@@ -7,8 +7,10 @@ __pycache__/
 *.pt
 
 # Data
-/data/raw/
-/data/processed/
+/data/raw/*
+/data/processed/*
+!/data/raw/.gitkeep
+!/data/processed/.gitkeep
 
 # Local configurations
 configs/*_local.yaml
