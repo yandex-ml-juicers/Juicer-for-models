@@ -9,8 +9,10 @@ __pycache__/
 # Data
 /data/raw/*
 /data/processed/*
+/data/weights/*
 !/data/raw/.gitkeep
 !/data/processed/.gitkeep
+!/data/weights/.gitkeep
 
 # Local configurations
 configs/*_local.yaml
