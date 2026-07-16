@@ -191,7 +191,7 @@ from clearml import Task
 
 task = Task.init(
     project_name="Juicer-for-models/Name",         # проект
-    task_name="resnet50_to_resnet18_vanila_KD",    # имя запуска
+    task_name="resnet50_to_resnet18_vanila_KD_training",    # имя запуска
     task_type=Task.TaskTypes.training,             # тип
     tags=["baseline", "kd"],                       # теги
     output_uri=True,                               # куда складывать артефакты/модели
@@ -233,7 +233,7 @@ task = Task.init(
 
 ```python
 task = Task.init(
-    project_name="Juicer-for-models/Name", task_name="...",
+    project_name="Juicer-for-models/Name", task_name=f"{cfg.model.teacher.name}_{cfg.model.teacher.name}_{cfg.exp.name_exp}_{cfg.exp.task_type}",
     auto_connect_frameworks={
         "pytorch": True,
         "matplotlib": True,
@@ -246,8 +246,8 @@ task = Task.init(
 
 ## Явное логирование
 
-Про явное логирование: https://clear.ml/docs/latest/docs/references/sdk/logger/
-
+[Про явное логирование](https://clear.ml/docs/latest/docs/references/sdk/logger/
+)
 Самое частое — залогировать словарь параметров.
 
 ```python
@@ -318,7 +318,7 @@ task.upload_artifact(name="checkpoints", artifact_object="outputs/checkpoints/")
 
 ```python
 from clearml import Task
-src = Task.get_task(project_name="Juicer-for-models", task_name="...")
+src = Task.get_task(project_name="Juicer-for-models", task_name=f"{cfg.model.teacher.name}_{cfg.model.teacher.name}_{cfg.exp.name_exp}_{cfg.exp.task_type}")
 df = src.artifacts["val_predictions"].get()               # объект в память
 local_path = src.artifacts["checkpoints"].get_local_copy() # скачать файлы, вернуть путь
 ```
@@ -371,8 +371,8 @@ def main(cfg: DictConfig) -> None:
     # 1) Task.init — ПЕРВОЙ строкой внутри main (после того как Hydra собрала cfg)
     task = Task.init(
         project_name="Juicer-for-models",
-        task_name=f"{cfg.model.name}_{cfg.data.name}",
-        task_type=Task.TaskTypes.training,
+        task_name=f"{cfg.model.teacher.name}_{cfg.model.teacher.name}_{cfg.exp.name_exp}_{cfg.exp.task_type}",
+        task_type=cfg.exp.task_type,
         output_uri=True,
         auto_connect_arg_parser=False,  # у нас Hydra, не argparse
     )
