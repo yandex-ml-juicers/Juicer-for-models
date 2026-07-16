@@ -29,8 +29,60 @@ from src.utils import resolve_device, seed_everything
 log = logging.getLogger(__name__)
 
 
+def init_clearml(cfg: DictConfig):
+    """Task.init по требованиям base_docs.md; None, если трекинг выключен.
+
+    Импорт ленивый: смоуки/CI и запуски без настроенного clearml.conf
+    не должны требовать установленный и сконфигурированный ClearML.
+    """
+    if not cfg.clearml.enabled:
+        return None
+    from clearml import Task
+
+    task = Task.init(
+        project_name=cfg.clearml.project,
+        task_name=cfg.name,
+        task_type=Task.TaskTypes.training,
+        tags=list(cfg.clearml.tags),
+        output_uri=True,  # torch.save-чекпоинты уезжают в хранилище ClearML
+        auto_connect_frameworks=True,
+        auto_connect_arg_parser=False,  # у нас Hydra, не argparse
+    )
+    # Полный разрешённый конфиг — в Configuration objects задачи.
+    task.connect_configuration(OmegaConf.to_container(cfg, resolve=True), name="hydra_config")
+    return task
+
+
+def clearml_reporter(task):
+    """Колбэк per-epoch метрик для Trainer.
+
+    Конвенция из base_docs.md: title = график в UI, series = линия на нём
+    (train и eval одного лосса ложатся на один график).
+    """
+    logger = task.get_logger()
+
+    def report(row: dict) -> None:
+        epoch = row["epoch"]
+        logger.report_scalar("loss", "train", row["train_total"], iteration=epoch)
+        logger.report_scalar("loss", "eval", row["eval_loss"], iteration=epoch)
+        logger.report_scalar("accuracy", "train", row["train_acc"], iteration=epoch)
+        logger.report_scalar("accuracy", "eval", row["eval_acc"], iteration=epoch)
+        logger.report_scalar("lr", "lr", row["lr"], iteration=epoch)
+        # Компоненты лосса (train_ce, train_kd, train_feature_*) — одним графиком.
+        for key, value in row.items():
+            if key.startswith("train_") and key not in ("train_total", "train_acc"):
+                logger.report_scalar(
+                    "loss_components", key.removeprefix("train_"), value, iteration=epoch
+                )
+
+    return report
+
+
 @hydra.main(config_path="../configs", config_name="config", version_base="1.3")
 def main(cfg: DictConfig) -> float:
+    # ClearML — первой строкой, до создания моделей и тренера (см. base_docs.md).
+    task = init_clearml(cfg)
+
     output_dir = Path(HydraConfig.get().runtime.output_dir)
     log.info("Конфиг запуска:\n%s", OmegaConf.to_yaml(cfg))
     log.info("Артефакты запуска: %s", output_dir)
@@ -41,7 +93,7 @@ def main(cfg: DictConfig) -> float:
 
     train_loader, eval_loader = build_dataloaders(cfg.data, seed=cfg.seed)
 
-    student = instantiate(cfg.model.s`tudent).to(device)
+    student = instantiate(cfg.model.student).to(device)
     teacher = None
     if cfg.model.get("teacher") is not None:
         teacher = instantiate(cfg.model.teacher).to(device)
@@ -62,9 +114,14 @@ def main(cfg: DictConfig) -> float:
         eval_loader=eval_loader,
         device=device,
         output_dir=output_dir,
+        metrics_callback=clearml_reporter(task) if task is not None else None,
         **cfg.trainer,
     )
     result = trainer.fit()
+
+    if task is not None:
+        task.get_logger().report_single_value("best_eval_acc", result["best_acc"])
+        task.close()
 
     # Возврат метрики делает скрипт совместимым с hydra-свиперами
     # (optuna и т.п. максимизируют возвращаемое значение).

@@ -11,6 +11,9 @@ defaults:
 
 name: b1_resnet20_scratch
 
+clearml:
+  tags: [baseline, scratch, b1]
+
 trainer:
   epochs: 20
   amp: false

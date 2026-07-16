@@ -30,6 +30,14 @@ device: auto  # auto | cuda | cuda:N | cpu
 # Путь к чекпоинту для scripts/eval.py (относительно корня репозитория).
 ckpt_path: null
 
+# Трекинг в ClearML (нужен настроенный clearml.conf или CLEARML_* переменные,
+# см. base_docs.md). Выключен по умолчанию, чтобы смоуки/CI работали оффлайн:
+#   python scripts/train.py experiment=b1_vanilla_kd clearml.enabled=true
+clearml:
+  enabled: false
+  project: Juicer-for-models
+  tags: []  # эксперименты добавляют свои, см. configs/experiment/*.yaml
+
 hydra:
   run:
     dir: outputs/${name}/${now:%Y-%m-%d_%H-%M-%S}

@@ -9,6 +9,7 @@
 
 import time
 from collections import defaultdict
+from collections.abc import Callable
 from pathlib import Path
 
 import torch
@@ -86,6 +87,7 @@ class Trainer:
         save_best: bool = True,
         save_last: bool = True,
         progress_bar: bool = True,
+        metrics_callback: Callable[[dict], None] | None = None,
     ) -> None:
         if criterion.requires_teacher and teacher is None:
             raise ValueError(
@@ -110,6 +112,10 @@ class Trainer:
         self.save_best = save_best
         self.save_last = save_last
         self.progress_bar = progress_bar
+        # Точка стыковки внешнего трекера (ClearML и т.п.): вызывается после
+        # каждой эпохи со строкой метрик — той же, что уходит в history.csv.
+        # Trainer ничего не знает о трекере, колбэк собирает scripts/train.py.
+        self.metrics_callback = metrics_callback
 
         # AMP имеет смысл только на CUDA; на CPU молча работаем в fp32.
         self.amp_enabled = amp and device.type == "cuda"
@@ -161,6 +167,8 @@ class Trainer:
                     "time_sec": round(time.time() - start, 1),
                 }
                 history.append(row)
+                if self.metrics_callback is not None:
+                    self.metrics_callback(row)
 
                 is_best = eval_acc > best_acc
                 if is_best:

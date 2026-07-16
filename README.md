@@ -113,6 +113,21 @@ DataLoader (`worker_init_fn` + отдельный `torch.Generator` для shuff
 | `baseline_2.0_12_07` | `b2_feature_kd` + контроль `b2_scratch` |
 | `baseline_3.0_12_07` | отложен: ансамбль учителей ляжет как `TeacherEnsemble(nn.Module)` + конфиг в `model/teacher/`, файнтюн учителей — как experiment с `loss=ce` |
 
+## ClearML
+
+Трекинг выключен по умолчанию (смоуки и CI работают оффлайн). Для запуска
+с логированием в ClearML нужен настроенный `clearml.conf` или переменные
+`CLEARML_*` (см. base_docs.md), дальше:
+
+```bash
+python scripts/train.py experiment=b1_vanilla_kd clearml.enabled=true
+```
+
+В задачу уезжают: полный Hydra-конфиг, консоль, git-коммит и diff,
+чекпоинты (`output_uri=true`), скаляры по эпохам (loss train/eval,
+accuracy, lr, компоненты лосса) и итоговый `best_eval_acc`. Теги задаются
+в experiment-конфиге (`clearml.tags`), имя задачи = `name` запуска.
+
 ## Тесты
 
 ```bash

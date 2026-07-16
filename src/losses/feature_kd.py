@@ -69,6 +69,13 @@ class FeatureKD(DistillationLoss):
         student_features: dict | None = None,
         teacher_features: dict | None = None,
     ) -> dict[str, torch.Tensor]:
+        if teacher_logits is None:
+            raise TypeError("FeatureKD требует логиты учителя (requires_teacher=True)")
+        if student_features is None or teacher_features is None:
+            raise TypeError(
+                "FeatureKD требует карты признаков обеих моделей (см. required_features)"
+            )
+
         temperature = self.temperature
         ce = F.cross_entropy(student_logits, labels)
 

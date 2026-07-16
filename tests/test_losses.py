@@ -52,6 +52,11 @@ class TestHintonKD:
         with pytest.raises(ValueError):
             HintonKD(alpha=1.5)
 
+    def test_none_teacher_raises(self, batch):
+        student_logits, _, labels = batch
+        with pytest.raises(TypeError, match="requires_teacher"):
+            HintonKD()(student_logits, None, labels)
+
 
 class TestFeatureKD:
     LAYERS = {"block": {"student_channels": 4, "teacher_channels": 4, "weight": 1.0}}

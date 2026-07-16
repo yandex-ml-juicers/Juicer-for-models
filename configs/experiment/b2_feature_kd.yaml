@@ -12,6 +12,9 @@ defaults:
 
 name: b2_resnet50_to_resnet18_feature_kd
 
+clearml:
+  tags: [baseline, kd, feature-kd, b2]
+
 trainer:
   epochs: 10
   amp: true
