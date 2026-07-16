@@ -1,0 +1,3 @@
+# Обучение без дистилляции (бейзлайн "ученик с нуля"). Сочетается с model/teacher=null.
+_target_: src.losses.CrossEntropy
+label_smoothing: 0.0

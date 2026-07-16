@@ -1,0 +1,9 @@
+# Ключи 1:1 соответствуют kwargs конструктора src.training.Trainer.
+epochs: 20
+amp: false                 # mixed precision (только CUDA; на CPU игнорируется)
+grad_clip_norm: null
+limit_train_batches: null  # для смоук-тестов: обрезать эпоху до N батчей
+limit_eval_batches: null
+save_best: true
+save_last: true
+progress_bar: true

@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "juicer-for-models"
+version = "0.1.0"
+description = "R&D-фреймворк дистилляции CV-моделей (учитель -> ученик) на PyTorch + Hydra"
+requires-python = ">=3.10"
+dynamic = ["dependencies"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pre-commit"]
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements.txt"] }
+
+# Пакет намеренно называется `src` (import src.*): так задан шаблон репозитория,
+# и все импорты в конфигах Hydra (_target_: src.…) завязаны на это имя.
+[tool.setuptools.packages.find]
+include = ["src", "src.*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

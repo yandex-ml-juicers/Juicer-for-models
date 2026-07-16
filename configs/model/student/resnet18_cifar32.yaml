@@ -1,0 +1,3 @@
+# Ученик бейзлайна 2: torchvision ResNet-18 со стемом, адаптированным под 32x32.
+_target_: src.models.factory.cifar_resnet18
+num_classes: ${data.num_classes}

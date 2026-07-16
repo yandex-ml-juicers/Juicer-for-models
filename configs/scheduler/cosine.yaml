@@ -1,0 +1,4 @@
+# Рантайм-аргумент (optimizer) подставляет train.py, отсюда _partial_.
+_target_: torch.optim.lr_scheduler.CosineAnnealingLR
+_partial_: true
+T_max: ${trainer.epochs}

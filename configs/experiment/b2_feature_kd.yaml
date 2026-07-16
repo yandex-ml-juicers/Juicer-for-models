@@ -1,0 +1,33 @@
+# @package _global_
+# Бейзлайн 2 (notebooks/baseline_2.0_12_07.ipynb):
+# feature-based дистилляция ResNet-50 -> ResNet-18 (стем под 32x32) на CIFAR-10.
+# Логиты (KL) + MSE по нормализованным картам layer1..layer4 через 1x1-адаптеры, AMP.
+defaults:
+  - override /data: cifar10
+  - override /model/teacher: resnet50_cifar
+  - override /model/student: resnet18_cifar32
+  - override /loss: feature_kd
+  - override /optimizer: adamw
+  - override /scheduler: cosine
+
+name: b2_resnet50_to_resnet18_feature_kd
+
+trainer:
+  epochs: 10
+  amp: true
+
+loss:
+  temperature: 4.0
+  ce_weight: 1.0
+  logits_weight: 1.0
+  feature_weight: 1.0
+
+optimizer:
+  lr: 1.0e-3
+  weight_decay: 1.0e-4
+
+data:
+  loader:
+    batch_size: 256
+    num_workers: 2
+    persistent_workers: true

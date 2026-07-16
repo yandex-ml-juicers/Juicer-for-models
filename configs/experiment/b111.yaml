@@ -1,0 +1,31 @@
+# @package _global_
+# Бейзлайн 1 (notebooks/baseline_1.0_11_07.ipynb):
+# ванильная дистилляция Хинтона ResNet-56 -> ResNet-20 на CIFAR-10.
+defaults:
+  - override /data: cifar10
+  - override /model/teacher: resnet56_cifar
+  - override /model/student: resnet20_cifar
+  - override /loss: hinton_kd
+  - override /optimizer: adam
+  - override /scheduler: cosine
+
+name: b1_resnet56_to_resnet20_kd
+
+trainer:
+  epochs: 20
+  amp: false
+
+loss:
+  temperature: 4.0
+  alpha: 0.9
+
+optimizer:
+  lr: 1.0e-3
+
+data:
+  normalize:
+    # Статистики из ноутбука baseline_1 (отличаются от общепринятых в data/cifar10.yaml).
+    std: [0.2023, 0.1994, 0.2010]
+  loader:
+    batch_size: 128
+    num_workers: 3

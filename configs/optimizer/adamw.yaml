@@ -1,0 +1,7 @@
+_target_: torch.optim.AdamW
+_partial_: true
+_convert_: all  # betas должны прийти списком, а не ListConfig
+lr: 1.0e-3
+weight_decay: 1.0e-4
+betas: [0.9, 0.999]
+eps: 1.0e-8

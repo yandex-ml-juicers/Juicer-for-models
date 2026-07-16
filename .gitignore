@@ -40,3 +40,6 @@ env/
 # IDE
 .vscode/
 .idea/
+# Hydra run dirs
+outputs/
+multirun/

@@ -1,0 +1,4 @@
+# Учитель бейзлайна 2: ResNet-50, предобученный на CIFAR-10 (пакет detectors).
+_target_: src.models.factory.from_detectors
+name: resnet50_cifar10
+pretrained: true

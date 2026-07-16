@@ -1,0 +1,13 @@
+# Logits KD + MSE по нормализованным картам признаков с обучаемыми 1x1-адаптерами.
+# Число каналов задано под пару resnet18_cifar32 (ученик) -> resnet50_cifar (учитель).
+_target_: src.losses.FeatureKD
+_convert_: all  # вложенные узлы передаются в конструктор как обычные dict
+temperature: 4.0
+ce_weight: 1.0
+logits_weight: 1.0
+feature_weight: 1.0
+layers:
+  layer1: { student_channels: 64,  teacher_channels: 256,  weight: 1.0 }
+  layer2: { student_channels: 128, teacher_channels: 512,  weight: 1.0 }
+  layer3: { student_channels: 256, teacher_channels: 1024, weight: 1.0 }
+  layer4: { student_channels: 512, teacher_channels: 2048, weight: 1.0 }

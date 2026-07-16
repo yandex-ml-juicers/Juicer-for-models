@@ -1,0 +1,5 @@
+# Ученик бейзлайна 1: ResNet-20 (0.27M параметров), обучается с нуля.
+_target_: src.models.factory.from_torch_hub
+repo: chenyaofo/pytorch-cifar-models
+name: cifar10_resnet20
+pretrained: false

@@ -1,0 +1,26 @@
+# @package _global_
+# Контрольная точка бейзлайна 1: тот же ResNet-20, но с нуля, без учителя.
+# Разница eval_acc с b1_vanilla_kd = чистый эффект дистилляции.
+defaults:
+  - override /data: cifar10
+  - override /model/teacher: null
+  - override /model/student: resnet20_cifar
+  - override /loss: ce
+  - override /optimizer: adam
+  - override /scheduler: cosine
+
+name: b1_resnet20_scratch
+
+trainer:
+  epochs: 20
+  amp: false
+
+optimizer:
+  lr: 1.0e-3
+
+data:
+  normalize:
+    std: [0.2023, 0.1994, 0.2010]
+  loader:
+    batch_size: 128
+    num_workers: 2
