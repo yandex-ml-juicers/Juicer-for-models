@@ -1,11 +1,52 @@
 """Фабрики датасетов. Вызываются через hydra.utils.instantiate из cfg.data.dataset
 с дозаполнением аргументов train= и transform= в рантайме (см. loaders.py)."""
 
+import random
+from collections import defaultdict
 from typing import Callable
 
 import torchvision
+from datasets import DownloadConfig, concatenate_datasets, load_dataset
 from hydra.utils import to_absolute_path
 from torch.utils.data import Dataset
+
+
+class HFImageNet(Dataset):
+    def __init__(
+        self,
+        root: str,
+        split: str,
+        transform: Callable = None,
+        download: bool = True,
+    ) -> None:
+        if split not in {"train", "validation"}:
+            raise ValueError(
+                "split должен быть 'train' или 'validation'"
+            )
+
+        self.dataset = load_dataset(
+            "ILSVRC/imagenet-1k",
+            split=split,
+            cache_dir=to_absolute_path(root),
+            download_config=DownloadConfig(
+                local_files_only=not download,
+            ),
+        )
+        self.transform = transform
+
+    def __len__(self) -> int:
+        return len(self.dataset)
+
+    def __getitem__(self, index: int):
+        item = self.dataset[index]
+
+        image = item["image"].convert("RGB")
+        label = int(item["label"])
+
+        if self.transform is not None:
+            image = self.transform(image)
+
+        return image, label
 
 
 def cifar10(
@@ -32,6 +73,23 @@ def cifar10(
         transform=transform,
     )
 
+def imagenet_1k(
+    root: str,
+    train: bool,
+    transform: Callable | None = None,
+    download: bool = True,
+) -> Dataset:
+    """ImageNet-1K dataset.
+
+    The official ImageNet-1K dataset is used for image classification tasks.
+    """
+    
+    return HFImageNet(
+        root=root,
+        split="train" if train else "validation",
+        transform=transform,
+        download=download,
+    )
 
 def fake_cifar_like(
     train: bool,
