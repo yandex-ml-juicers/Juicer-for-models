@@ -1,2 +1,0 @@
-_target_: src.models.factory.imagenet1k_resnet18
-num_classes: ${data.num_classes}
