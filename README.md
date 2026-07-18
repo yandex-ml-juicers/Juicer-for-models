@@ -3,11 +3,18 @@
 
 ## Установка
 
+
 ```bash
+pip install 'torch>=2.7' 'torchvision>=0.22' --index-url https://download.pytorch.org/whl/cu128
+
 pip install -r requirements.txt
 pip install -e . --no-deps        # пакет src/ становится импортируемым
 # для тестов: pip install -e ".[dev]" --no-build-isolation
 ```
+
+На машине без GPU шаг с индексом cu128 пропускается — `requirements.txt`
+поставит обычную сборку, всё работает на CPU (смоуки, тесты). Проверить
+сборку: `python -c "import torch; print(torch.__version__, torch.version.cuda)"`.
 
 ## Быстрый старт
 
