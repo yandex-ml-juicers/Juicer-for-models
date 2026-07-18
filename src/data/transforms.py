@@ -17,7 +17,8 @@ def build_transforms(
     """
     ops: list = []
     if image_size is not None:
-        ops.append(transforms.Resize(image_size))
+        # ops.append(transforms.Resize(image_size))
+        ops.append(transforms.Resize((image_size, image_size)))
     ops.append(transforms.ToTensor())
     ops.append(transforms.Normalize(tuple(mean), tuple(std)))
     return transforms.Compose(ops)
