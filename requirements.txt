@@ -6,3 +6,4 @@ tqdm>=4.65
 timm>=1.0
 detectors>=0.1.4
 clearml>=1.16
+datasets>=2.20.0
