@@ -1,15 +1,5 @@
 """Единая точка входа обучения.
 
-Примеры:
-    python scripts/train.py experiment=b1_vanilla_kd
-    python scripts/train.py experiment=b2_feature_kd trainer.epochs=30
-    python scripts/train.py loss=hinton_kd loss.temperature=8 seed=1
-    python scripts/train.py data=fake '~model/teacher' loss=ce \
-        trainer.epochs=1 trainer.limit_train_batches=3   # смоук без сети/GPU
-
-(`~model/teacher` — CLI-синтаксис удаления группы из defaults; в yaml-файлах
-экспериментов то же самое пишется как `- override /model/teacher: null`.)
-
 Артефакты запуска (конфиг, логи, history.csv, чекпоинты) складываются
 в outputs/<name>/<дата_время>/.
 """
@@ -30,11 +20,6 @@ log = logging.getLogger(__name__)
 
 
 def init_clearml(cfg: DictConfig):
-    """Task.init по требованиям base_docs.md; None, если трекинг выключен.
-
-    Импорт ленивый: смоуки/CI и запуски без настроенного clearml.conf
-    не должны требовать установленный и сконфигурированный ClearML.
-    """
     if not cfg.clearml.enabled:
         return None
     from clearml import Task
@@ -54,8 +39,7 @@ def init_clearml(cfg: DictConfig):
 
 
 def clearml_reporter(task):
-    """Колбэк per-epoch метрик для Trainer.
-
+    """
     Конвенция из base_docs.md: title = график в UI, series = линия на нём
     (train и eval одного лосса ложатся на один график).
     """
