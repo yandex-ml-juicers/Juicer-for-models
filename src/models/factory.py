@@ -40,3 +40,9 @@ def cifar_resnet18(num_classes: int = 10) -> nn.Module:
     model.maxpool = nn.Identity()
     model.fc = nn.Linear(model.fc.in_features, num_classes)
     return model
+
+def imagenet1k_resnet18(num_classes: int = 1000) -> nn.Module:
+    """ResNet-18 classifier for ImageNet-1K."""
+    model = tv_models.resnet18(weights=None)
+    model.fc = nn.Linear(model.fc.in_features, num_classes)
+    return model
