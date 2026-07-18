@@ -45,7 +45,7 @@ def init_clearml(cfg: DictConfig):
         task_type=Task.TaskTypes.training,
         tags=list(cfg.clearml.tags),
         output_uri=True,  # torch.save-чекпоинты уезжают в хранилище ClearML
-        auto_connect_frameworks=True,
+        auto_connect_frameworks={"pytorch": False,},
         auto_connect_arg_parser=False,  # у нас Hydra, не argparse
     )
     # Полный разрешённый конфиг — в Configuration objects задачи.
