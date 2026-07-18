@@ -2,7 +2,7 @@
 defaults:
   - override /data: imagenet1k
   - override /model/teacher: null
-  - override /model/student: resnet18_imagenet1k
+  - override /model/student: resnet18_imagenet
   - override /loss: ce
   - override /optimizer: adam
   - override /scheduler: cosine
@@ -12,10 +12,11 @@ device: cuda
 deterministic: false
 
 clearml:
+  enabled: True
   tags: [imagenet-1k, baseline, scratch, resnet18]
 
 trainer:
-  epochs: 20
+  epochs: 10
   amp: true
 
 optimizer:
