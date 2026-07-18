@@ -1,10 +1,10 @@
 dataset:
   _target_: src.data.datasets.imagenet
   root: data/raw
-  repo_path: ILSVRC/imagenet-1k
+  repo_path: clane9/imagenet-100
   download: true
 
-num_classes: 1000
+num_classes: 100
 image_size: 224
 
 normalize:
