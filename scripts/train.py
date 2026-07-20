@@ -47,18 +47,23 @@ def clearml_reporter(task):
     """
     logger = task.get_logger()
 
-    def report(row: dict) -> None:
-        epoch = row["epoch"]
-        logger.report_scalar(title="loss", series="train", row["train_total"], iteration=epoch)
-        logger.report_scalar(title="loss", series="eval", row["eval_loss"], iteration=epoch)
-        logger.report_scalar(title="accuracy", series="train", row["train_acc"], iteration=epoch)
-        logger.report_scalar(title="accuracy", series="eval", row["eval_acc"], iteration=epoch)
-        logger.report_scalar(title="lr", series="lr", row["lr"], iteration=epoch)
+    def report(row: dict, iteration: str = 'epoch') -> None:
+    
+        iterate = row[iteration]
+        logger.report_scalar(title="loss", series="train", value=row["train_total"], iteration=iterate)
+        logger.report_scalar(title="loss", series="eval", value=row["eval_loss"], iteration=iterate)
+        logger.report_scalar(title="accuracy", series="train", value=row["train_acc"], iteration=iterate)
+        logger.report_scalar(title="accuracy", series="eval", value=row["eval_acc"], iteration=iterate)
+        logger.report_scalar(title="lr", series="lr", value=row["lr"], iteration=iterate)
+        logger.report_scalar(title="precision", series="train", value=row["train_precision"], iteration=iterate)
+        logger.report_scalar(title="recall", series="train", value=row["train_recall"], iteration=iterate)
+        logger.report_scalar(title="F1", series="train", value=row["train_F1"], iteration=iterate)
+
         # Компоненты лосса (train_ce, train_kd, train_feature_*) — одним графиком.
         for key, value in row.items():
-            if key.startswith("train_") and key not in ("train_total", "train_acc"):
+            if key.startswith("train_") and key not in ('train_total', 'train_acc', 'train_precision', 'train_recall', 'train_F1'):
                 logger.report_scalar(
-                    "loss_components", key.removeprefix("train_"), value, iteration=epoch
+                    "loss_components", key.removeprefix("train_"), value, iteration=iterate
                 )
 
     return report

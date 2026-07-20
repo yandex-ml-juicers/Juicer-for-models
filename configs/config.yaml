@@ -27,7 +27,13 @@ clearml:
   enabled: False
   project: Juicer-for-models # проект
   tags: []  # теги для фильтрации экспериментов
-  scalars: [] # какие скаляры логировать (можно указать как переменные, так и функции)
+  scalars: [] # какие скаляры логировать (график_скаляр_итератор)
+  # возможные значения для scalars:
+  # [ train_loss, eval_loss, train_acc, eval_acc,
+  # train_precision, train_recall, train_F1 ]
+  plots: [] # какие графики логировать
+  # возможные значения для plots:
+  # [ , ]
   reuse_last_task_id: False # перезаписывать ли таску с таким же именем
   continue_last_task: False # подхватывать ли предыдущий ID и продолжать логирование
   output_uri: True # складывать ли артефакты/модели и если куда-то базово, то url
