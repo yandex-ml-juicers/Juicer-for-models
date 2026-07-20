@@ -2,20 +2,26 @@ import pytest
 import torch
 from omegaconf import OmegaConf
 
-from src.data import build_dataloaders
+from src.data import base_loader
 from src.models.factory import cifar_resnet18
 from src.utils.seed import seed_everything
 
 FAKE_DATA_CFG = {
     "dataset": {
-        "_target_": "src.data.datasets.fake_cifar10",
-        "train_size": 64,
-        "eval_size": 32,
+        "build": {
+            "_target_": "src.data.datasets.fake_cifar10",
+            "train_size": 64,
+            "eval_size": 32,
+            "num_classes": 10,
+        },
         "num_classes": 10,
     },
-    "num_classes": 10,
-    "image_size": None,
-    "normalize": {"mean": [0.5, 0.5, 0.5], "std": [0.25, 0.25, 0.25]},
+    "transform": {
+        "_target_": "src.data.transforms.base_transform",
+        "mean": [0.5, 0.5, 0.5],
+        "std": [0.25, 0.25, 0.25],
+        "image_size": None,
+    },
     "loader": {"batch_size": 16, "num_workers": 0, "pin_memory": False, "persistent_workers": False},
 }
 
@@ -70,11 +76,11 @@ def test_dataloader_order_is_reproducible():
     cfg = OmegaConf.create(FAKE_DATA_CFG)
 
     seed_everything(42)
-    train_a, _ = build_dataloaders(cfg, seed=42)
+    train_a, _ = base_loader(cfg, seed=42)
     batches_a = [labels.clone() for _, labels in train_a]
 
     seed_everything(42)
-    train_b, _ = build_dataloaders(cfg, seed=42)
+    train_b, _ = base_loader(cfg, seed=42)
     batches_b = [labels.clone() for _, labels in train_b]
 
     assert len(batches_a) == len(batches_b)

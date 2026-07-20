@@ -35,7 +35,7 @@ python scripts/train.py experiment=b2_scratch
 python scripts/train.py experiment=b1_vanilla_kd loss.temperature=8 trainer.epochs=30 seed=1
 
 # Смоук-тест пайплайна: синтетические данные, CPU, без сети, ~10 секунд
-python scripts/train.py data=fake_cifar10 '~model/teacher' loss=ce \
+python scripts/train.py data/dataset=fake_cifar10 '~model/teacher' loss=ce \
     trainer.epochs=1 trainer.limit_train_batches=3 trainer.limit_eval_batches=2
 
 # Оценка сохранённого чекпоинта

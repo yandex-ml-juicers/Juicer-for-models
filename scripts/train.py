@@ -12,7 +12,7 @@ from hydra.core.hydra_config import HydraConfig
 from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
 
-from src.data import build_dataloaders
+from src.data import base_loader
 from src.training import Trainer
 from src.utils import resolve_device, seed_everything
 
@@ -78,7 +78,7 @@ def main(cfg: DictConfig) -> float:
     seed_everything(cfg.seed, deterministic=cfg.deterministic, warn_only=cfg.deterministic_warn_only)
     device = resolve_device(cfg.device)
 
-    train_loader, eval_loader = build_dataloaders(cfg.data, seed=cfg.seed)
+    train_loader, eval_loader = base_loader(cfg.data, seed=cfg.seed)
 
     student = instantiate(cfg.model.student).to(device)
     teacher = None
