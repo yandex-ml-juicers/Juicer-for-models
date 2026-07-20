@@ -8,7 +8,7 @@ from src.utils.seed import seed_everything
 
 FAKE_DATA_CFG = {
     "dataset": {
-        "_target_": "src.data.datasets.fake_cifar_like",
+        "_target_": "src.data.datasets.fake_cifar10",
         "train_size": 64,
         "eval_size": 32,
         "num_classes": 10,
