@@ -1,6 +1,5 @@
 # @package _global_
-# Контрольная точка бейзлайна 1: тот же ResNet-20, но с нуля, без учителя.
-# Разница eval_acc с b1_vanilla_kd = чистый эффект дистилляции.
+# ResNet-20 (baseline_1.0), но с нуля, без учителя.
 defaults:
   - override /data: cifar10
   - override /model/teacher: null

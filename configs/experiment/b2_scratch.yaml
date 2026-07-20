@@ -1,5 +1,5 @@
 # @package _global_
-# Контрольная точка бейзлайна 2: ResNet-18 (стем под 32x32) с нуля, без учителя.
+# Контрольная точка бейзлайна 2: ResNet-18 (32x32) с нуля, без учителя.
 defaults:
   - override /data: cifar10
   - override /model/teacher: null
