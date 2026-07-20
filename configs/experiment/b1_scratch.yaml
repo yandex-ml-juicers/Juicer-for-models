@@ -1,7 +1,9 @@
 # @package _global_
 # ResNet-20 (baseline_1.0), но с нуля, без учителя.
 defaults:
-  - override /data: cifar10
+  - override /data/dataset: cifar10
+  - override /data/loader: base_loader
+  - override /data/transform: base_transform
   - override /model/teacher: null
   - override /model/student: resnet20_cifar
   - override /loss: ce
@@ -21,8 +23,9 @@ optimizer:
   lr: 1.0e-3
 
 data:
-  normalize:
-    std: [0.2023, 0.1994, 0.2010]
+  dataset:
+    normalize:
+      std: [0.2023, 0.1994, 0.2010]
   loader:
     batch_size: 128
     num_workers: 2

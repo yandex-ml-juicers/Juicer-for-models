@@ -1,0 +1,19 @@
+# Синтетический датасет формы CIFAR-10 (3x32x32) для смоук-тестов и CI:
+# проверяет сборку всего пайплайна без сети и скачивания данных.
+build:
+  _target_: src.data.datasets.fake_cifar10
+  train_size: 512
+  eval_size: 256
+  num_classes: ${data.dataset.fake_cifar10.num_classes} # ссылаемся на num_classes
+
+image_size: null
+num_classes: 10
+# почему num_classes и в build и вне него?
+# соглашение - во всех datasets (не важно fake/не fake)
+# будет запускаться построение через instantiate(src.data.dataset.name_dataset.build)
+# instantiate забирает все соседние ключи узла
+# а num classes cifar10 не принимает
+
+normalize:
+  mean: [0.4914, 0.4822, 0.4465]
+  std: [0.2470, 0.2435, 0.2616]
