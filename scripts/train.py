@@ -43,18 +43,17 @@ def init_clearml(cfg: DictConfig):
 
 def clearml_reporter(task):
     """
-    Конвенция из base_docs.md: title = график в UI, series = линия на нём
-    (train и eval одного лосса ложатся на один график).
+    title = график в UI, series = линия на нём
     """
     logger = task.get_logger()
 
     def report(row: dict) -> None:
         epoch = row["epoch"]
-        logger.report_scalar("loss", "train", row["train_total"], iteration=epoch)
-        logger.report_scalar("loss", "eval", row["eval_loss"], iteration=epoch)
-        logger.report_scalar("accuracy", "train", row["train_acc"], iteration=epoch)
-        logger.report_scalar("accuracy", "eval", row["eval_acc"], iteration=epoch)
-        logger.report_scalar("lr", "lr", row["lr"], iteration=epoch)
+        logger.report_scalar(title="loss", series="train", row["train_total"], iteration=epoch)
+        logger.report_scalar(title="loss", series="eval", row["eval_loss"], iteration=epoch)
+        logger.report_scalar(title="accuracy", series="train", row["train_acc"], iteration=epoch)
+        logger.report_scalar(title="accuracy", series="eval", row["eval_acc"], iteration=epoch)
+        logger.report_scalar(title="lr", series="lr", row["lr"], iteration=epoch)
         # Компоненты лосса (train_ce, train_kd, train_feature_*) — одним графиком.
         for key, value in row.items():
             if key.startswith("train_") and key not in ("train_total", "train_acc"):
