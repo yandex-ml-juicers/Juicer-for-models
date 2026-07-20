@@ -46,3 +46,9 @@ def imagenet_resnet18(num_classes: int = 1000) -> nn.Module:
     model = tv_models.resnet18(weights=None)
     model.fc = nn.Linear(model.fc.in_features, num_classes)
     return model
+
+def imagenet_resnet50_pretrained(num_classes: int = 1000) -> nn.Module:
+    return tv_models.resnet50(weights=tv_models.ResNet50_Weights.IMAGENET1K_V2)
+
+def imagenet_resnet152_pretrained(num_classes: int = 1000) -> nn.Module:
+    return tv_models.resnet152(weights=tv_models.ResNet152_Weights.IMAGENET1K_V2)
