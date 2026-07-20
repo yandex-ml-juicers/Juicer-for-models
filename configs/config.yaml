@@ -9,7 +9,7 @@ defaults:
   - trainer: default
   - experiment: null
 
-name: default
+name: default # имя таски
 
 # Воспроизводимость
 seed: 42
@@ -24,9 +24,14 @@ ckpt_path: null
 # Трекинг в ClearML
 # Выключен по умолчанию, чтобы тесты работали оффлайн
 clearml:
-  enabled: false
-  project: Juicer-for-models
-  tags: []  # эксперименты добавляют свои
+  enabled: False
+  project: Juicer-for-models # проект
+  tags: []  # теги для фильтрации экспериментов
+  reuse_last_task_id: False # перезаписывать ли таску с таким же именем
+  continue_last_task: False # подхватывать ли предыдущий ID и продолжать логирование
+  output_uri: True # складывать ли артефакты/модели и если куда-то базово, то url
+  auto_connect_frameworks: True # авто-перехват фреймворков
+  auto_connect_arg_parser: False # авто-перехват аргументов из argparse
 
 # Логи Hydra
 hydra:

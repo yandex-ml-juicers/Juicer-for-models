@@ -25,14 +25,17 @@ def init_clearml(cfg: DictConfig):
     from clearml import Task
 
     task = Task.init(
-        project_name=cfg.clearml.project,
-        task_name=cfg.name,
-        task_type=Task.TaskTypes.training,
-        tags=list(cfg.clearml.tags),
-        output_uri=True,  # torch.save-чекпоинты уезжают в хранилище ClearML
-        auto_connect_frameworks=True,
-        auto_connect_arg_parser=False,  # у нас Hydra, не argparse
+        project_name=cfg.clearml.project,                      # проект
+        task_name=f"{cfg.name}",                               # имя таски
+        task_type=Task.TaskTypes.training,                     # тип таски
+        tags=cfg.clearml.tags,                                 # теги
+        reuse_last_task_id = cfg.clearml.reuse_last_task_id,   # перезаписывать ли таску с таким же именем
+        continue_last_task=cfg.clearml.continue_last_task,     # Подхватит предыдущий ID и продолжит логирование
+        output_uri=cfg.clearml.output_uri,                     # складывать ли артефакты/модели и если куда-то базово, то url
+        auto_connect_frameworks=cfg.clearml.auto_connect_frameworks, # авто-перехват фреймворков
+        auto_connect_arg_parser=cfg.clearml.auto_connect_arg_parser, # авто-перехват аргументов из argparse
     )
+
     # Полный разрешённый конфиг — в Configuration objects задачи.
     task.connect_configuration(OmegaConf.to_container(cfg, resolve=True), name="hydra_config")
     return task
