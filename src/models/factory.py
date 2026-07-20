@@ -96,8 +96,50 @@ def imagenet_resnet50_pretrained(num_classes: int = 1000, checkpoint_path: str |
     return model
 
 
-def imagenet_resnet152_pretrained(num_classes: int = 1000) -> nn.Module:
-    return tv_models.resnet152(weights=tv_models.ResNet152_Weights.IMAGENET1K_V2)
+def imagenet_resnet152_pretrained(num_classes: int = 1000, checkpoint_path: str | None = None) -> nn.Module:
+    if checkpoint_path is None:
+        return tv_models.resnet152(weights=tv_models.ResNet152_Weights.IMAGENET1K_V2)
+
+    model = tv_models.resnet152(weights=None,num_classes=num_classes)
+    path = Path(to_absolute_path(checkpoint_path))
+
+    if not path.exists():
+        raise FileNotFoundError(f"Файл с весами не найден: {path}")
+
+    checkpoint = torch.load(path, map_location="cpu", weights_only=True)
+
+    if not isinstance(checkpoint, dict):
+        raise TypeError(f"Ожидался checkpoint в виде dict, получен {type(checkpoint)}")
+
+    if "model_state_dict" in checkpoint:
+        state_dict = checkpoint["model_state_dict"]
+    elif "student_state" in checkpoint:
+        state_dict = checkpoint["student_state"]
+    elif "state_dict" in checkpoint:
+        state_dict = checkpoint["state_dict"]
+    elif "model" in checkpoint and isinstance(checkpoint["model"], dict):
+        state_dict = checkpoint["model"]
+    else:
+        # Файл может содержать непосредственно state_dict.
+        state_dict = checkpoint
+
+    # Убираем префиксы, возникающие после DataParallel/DDP/torch.compile.
+    cleaned_state_dict = {}
+
+    for key, value in state_dict.items():
+        if key.startswith("module."):
+            key = key.removeprefix("module.")
+
+        if key.startswith("_orig_mod."):
+            key = key.removeprefix("_orig_mod.")
+
+        cleaned_state_dict[key] = value
+
+    incompatible = model.load_state_dict(cleaned_state_dict, strict=True)
+
+    print(f"Веса ResNet-152 загружены из: {path}")
+
+    return model
 
 def imagenet_resnet50(num_classes: int = 1000) -> nn.Module:
     """ResNet-50 classifier for ImageNet-1K."""
