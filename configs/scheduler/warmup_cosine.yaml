@@ -1,0 +1,10 @@
+# Рантайм-аргумент (optimizer) подставляет train.py, отсюда _partial_.
+_target_: src.schedulers.warmup_cosine.warmup_cosine_scheduler
+_partial_: true
+
+warmup_epochs: 5
+epochs: ${trainer.epochs}
+
+start_factor: 0.01
+end_factor: 1.0
+eta_min: 1.0e-6
