@@ -3,26 +3,17 @@ from hydra.utils import instantiate
 from omegaconf import DictConfig
 from torch.utils.data import DataLoader
 
-from src.data.transforms import build_transforms
+from src.data.transforms import base_transform
 from src.utils.seed import make_generator, seed_worker
 
 
-def build_dataloaders(cfg: DictConfig, seed: int) -> tuple[DataLoader, DataLoader]:
-    """Возвращает (train_loader, eval_loader).
+def base_loader(cfg: DictConfig, seed: int) -> tuple[DataLoader, DataLoader]:
+    """Возвращает (train_loader, eval_loader)."""
+    train_transform = instantiate(cfg.transform)
+    eval_transform = instantiate(cfg.transform)
 
-    Воспроизводимость порядка данных обеспечивают два механизма:
-    - выделенный generator для shuffle (не зависит от глобального генератора);
-    - seed_worker, сидирующий NumPy/random в каждом воркере DataLoader.
-    """
-    train_transform = build_transforms(
-        mean=cfg.normalize.mean, std=cfg.normalize.std, image_size=cfg.image_size
-    )
-    eval_transform = build_transforms(
-        mean=cfg.normalize.mean, std=cfg.normalize.std, image_size=cfg.image_size
-    )
-
-    train_dataset = instantiate(cfg.dataset, train=True, transform=train_transform)
-    eval_dataset = instantiate(cfg.dataset, train=False, transform=eval_transform)
+    train_dataset = instantiate(cfg.dataset.build, train=True, transform=train_transform)
+    eval_dataset = instantiate(cfg.dataset.build, train=False, transform=eval_transform)
 
     num_workers = cfg.loader.num_workers
     common = dict(

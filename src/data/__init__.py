@@ -1,4 +1,4 @@
-from src.data.loaders import build_dataloaders
-from src.data.transforms import build_transforms
+from src.data.loaders import base_loader
+from src.data.transforms import base_transform
 
-__all__ = ["build_dataloaders", "build_transforms"]
+__all__ = ["base_loader", "base_transform"]
