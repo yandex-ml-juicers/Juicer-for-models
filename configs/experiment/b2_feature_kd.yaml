@@ -2,7 +2,9 @@
 # feature-based дистилляция ResNet-50 -> ResNet-18 (32x32) на CIFAR-10.
 # Логиты (KL) + MSE по нормализованным картам layer1..layer4 через 1x1-адаптеры, AMP.
 defaults:
-  - override /data: cifar10
+  - override /data/dataset: cifar10
+  - override /data/loader: base_loader
+  - override /data/transform: base_transform
   - override /model/teacher: resnet50_cifar
   - override /model/student: resnet18_cifar32
   - override /loss: feature_kd

@@ -1,7 +1,9 @@
 # @package _global_
 # Контрольная точка бейзлайна 2: ResNet-18 (32x32) с нуля, без учителя.
 defaults:
-  - override /data: cifar10
+  - override /data/dataset: cifar10
+  - override /data/loader: base_loader
+  - override /data/transform: base_transform
   - override /model/teacher: null
   - override /model/student: resnet18_cifar32
   - override /loss: ce
