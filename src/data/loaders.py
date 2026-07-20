@@ -5,7 +5,7 @@ from hydra.utils import instantiate
 from omegaconf import DictConfig
 from torch.utils.data import DataLoader
 
-from src.data.transforms import build_transforms
+from src.data.transforms import build_transforms, build_transforms_train, build_transforms_eval
 from src.utils.seed import make_generator, seed_worker
 
 
@@ -16,10 +16,10 @@ def build_dataloaders(cfg: DictConfig, seed: int) -> tuple[DataLoader, DataLoade
     - выделенный generator для shuffle (не зависит от глобального генератора);
     - seed_worker, сидирующий NumPy/random в каждом воркере DataLoader.
     """
-    train_transform = build_transforms(
+    train_transform = build_transforms_train(
         mean=cfg.normalize.mean, std=cfg.normalize.std, image_size=cfg.image_size
     )
-    eval_transform = build_transforms(
+    eval_transform = build_transforms_eval(
         mean=cfg.normalize.mean, std=cfg.normalize.std, image_size=cfg.image_size
     )
 
