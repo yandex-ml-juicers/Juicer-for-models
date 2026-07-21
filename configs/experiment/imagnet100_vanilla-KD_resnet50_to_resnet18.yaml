@@ -1,10 +1,10 @@
 # @package _global_
 defaults:
-  - override /data: imagenet100
+  - override /data/dataset: imagenet100
   - override /model/teacher: resnet50_imagenet_pretrained
   - override /model/student: resnet18_imagenet
   - override /loss: hinton_kd
-  - override /optimizer: SGD
+  - override /optimizer: adamw
   - override /scheduler: warmup_cosine
 
 name: imagenet100_vanilla-KD_resnet50_to_resnet18
@@ -12,7 +12,7 @@ device: cuda
 deterministic: false
 
 clearml:
-  enabled: True
+  enabled: False
   tags: [imagenet-100, vanilla-KD, resnet50, resnet18]
 
 trainer:

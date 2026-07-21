@@ -19,7 +19,7 @@ def from_torch_hub(repo: str, name: str, pretrained: bool = False) -> nn.Module:
     trust_repo=True отключает интерактивный вопрос про доверие к репозиторию —
     скрипт обязан работать без stdin (запуски в tmux/CI).
     """
-    return torch.hub.load(repo, name, pretrained=pretrained, trust_repo=True)
+    return torch.hub.load(repo, name, pretrained=pretrained, trust_repo=True) # type: ignore
 
 
 def from_detectors(name: str, pretrained: bool = True) -> nn.Module:
@@ -40,7 +40,7 @@ def cifar_resnet18(num_classes: int = 10) -> nn.Module:
     """
     model = tv_models.resnet18(weights=None)
     model.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
-    model.maxpool = nn.Identity()
+    model.maxpool = nn.Identity() # type: ignore
     model.fc = nn.Linear(model.fc.in_features, num_classes)
     return model
 

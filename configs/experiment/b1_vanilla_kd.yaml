@@ -16,6 +16,7 @@ name: b1_resnet56_to_resnet20_kd
 clearml:
   enabled: True
   tags: [baseline, kd, b1]
+  reuse_last_task_id: True
 
 trainer:
   epochs: 20

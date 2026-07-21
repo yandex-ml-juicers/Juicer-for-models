@@ -1,6 +1,6 @@
 # @package _global_
 defaults:
-  - override /data: imagenet100
+  - override /data/dataset: imagenet100
   - override /model/teacher: null
   - override /model/student: resnet152_imagenet
   - override /loss: ce
