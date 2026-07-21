@@ -15,7 +15,6 @@ import torch
 
 def seed_everything(seed: int, deterministic: bool = True, warn_only: bool = False) -> int:
     """Фиксирует все источники случайности: Python, NumPy, PyTorch, CUDA.
-
     Args:
         seed: базовый seed для всех генераторов.
         deterministic: если True, принуждает PyTorch использовать только
@@ -26,7 +25,6 @@ def seed_everything(seed: int, deterministic: bool = True, warn_only: bool = Fal
             реализации, вместо RuntimeError будет warning. Использовать
             только когда падение блокирует работу, и осознавать, что
             воспроизводимость в этой точке теряется.
-
     Returns:
         Тот же seed (удобно логировать).
     """

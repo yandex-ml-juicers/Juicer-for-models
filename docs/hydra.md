@@ -12,7 +12,7 @@
 С Hydra код один, а всё, что можно крутить (модели, лосс, батч, темпер­атура,
 seed), вынесено в YAML-файлы в `configs/`. Эксперимент — это файл конфига.
 Запуск любого параметра с любым значением — одна команда, и каждая команда
-оставляет после себя папку с точным снапшотом конфига, по которому запуск
+оставляет после себя папку с точным снапшотом конфига (.hydra), по которому запуск
 можно повторить бит-в-бит.
 
 ## Что такое Hydra за 30 секунд
@@ -42,12 +42,16 @@ python scripts/train.py experiment=b2_feature_kd
 python scripts/train.py experiment=b2_scratch
 
 # Смоук-тест: синтетические данные, CPU, без сети, ~10 секунд
-python scripts/train.py data=fake '~model/teacher' loss=ce \
+python scripts/train.py data/dataset=fake_cifar10 '~model/teacher' loss=ce \
     trainer.epochs=1 trainer.limit_train_batches=3 trainer.limit_eval_batches=2
 ```
 
 `experiment=...` — это выбор готового пресета из `configs/experiment/`.
-Всё остальное в команде — точечные переопределения поверх него.
+Всё остальное в команде — точечные переопределения поверх него. Кроме
+CIFAR-бейзлайнов выше в этой папке лежит растущий набор ImageNet-экспериментов
+(scratch/vanilla-KD/ESKD для resnet18/50/152) — актуальный список смотри
+командой `ls configs/experiment/` или `python scripts/train.py --help`,
+здесь их специально не перечисляем: список меняется чаще, чем этот файл.
 
 ## Как устроена папка configs/
 
@@ -57,35 +61,50 @@ python scripts/train.py data=fake '~model/teacher' loss=ce \
 
 ```
 configs/
-├── config.yaml        # корень: какие оси есть и что выбрано по умолчанию
-├── data/              # cifar10.yaml, fake.yaml
+├── config.yaml         # корень: какие оси есть и что выбрано по умолчанию
+├── data/
+│   ├── dataset/        # cifar10.yaml, fake_cifar10.yaml, imagenet1k.yaml, imagenet100.yaml
+│   ├── loader/         # base_loader.yaml (batch_size, num_workers, ...)
+│   └── transform/      # base_transform.yaml (mean/std/image_size из выбранного датасета)
 ├── model/
-│   ├── teacher/       # resnet56_cifar.yaml, resnet50_cifar.yaml
-│   └── student/       # resnet20_cifar.yaml, resnet18_cifar32.yaml
-├── loss/              # ce.yaml, hinton_kd.yaml, feature_kd.yaml
-├── optimizer/         # adam.yaml, adamw.yaml
-├── scheduler/         # cosine.yaml
-├── trainer/           # default.yaml (эпохи, AMP, чекпоинты)
-└── experiment/        # готовые сочетания осей: b1_vanilla_kd.yaml, ...
+│   ├── teacher/        # resnet56_cifar.yaml, resnet50_cifar.yaml, resnet50/152_imagenet_pretrained.yaml
+│   └── student/        # resnet20_cifar.yaml, resnet18_cifar32.yaml, resnet18/50/152_imagenet.yaml
+├── loss/                # ce.yaml, hinton_kd.yaml, feature_kd.yaml
+├── optimizer/           # adam.yaml, adamw.yaml, SGD.yaml
+├── scheduler/           # cosine.yaml, warmup_cosine.yaml
+├── trainer/             # default.yaml (эпохи, AMP, чекпоинты)
+└── experiment/          # готовые сочетания осей: b1_vanilla_kd.yaml, imagenet1k_scratch_resnet18.yaml, ...
 ```
+
+`data/` — не одна ось, а три независимые: **какой датасет**, **какими значениями
+грузить его в DataLoader** (`batch_size`, `num_workers`, ...) и **как строить
+трансформы** (`_target_: src.data.transforms.base_transform`, а `mean`/`std`/
+`image_size` — интерполяции на выбранный `data/dataset`, не свои числа).
+Один `loader`/`transform`-файл обслуживает любой датасет — переключаешь только
+`data/dataset`, остальные две оси обычно не трогаешь.
 
 Дефолтный выбор записан в начале `configs/config.yaml`:
 
 ```yaml
 defaults:
   - _self_
-  - data: cifar10          # <группа>: <имя файла без .yaml>
+  - data/dataset: cifar10       # <группа>: <имя файла без .yaml>
+  - data/loader: base_loader
+  - data/transform: base_transform
   - model/teacher: resnet56_cifar
   - model/student: resnet20_cifar
   - loss: hinton_kd
   - optimizer: adam
   - scheduler: cosine
   - trainer: default
-  - experiment: null       # пресет по умолчанию не выбран
+  - experiment: null            # пресет по умолчанию не выбран
 ```
 
 Итоговый конфиг = склейка выбранных файлов, где содержимое `loss/hinton_kd.yaml`
-оказывается в `cfg.loss`, `data/cifar10.yaml` — в `cfg.data`, и т.д.
+оказывается в `cfg.loss`, `data/dataset/cifar10.yaml` — в `cfg.data.dataset`,
+и т.д. Важно: `cifar10`/`imagenet1k` — это имя *выбранного файла*, а не ключ
+в дереве — оно нигде не остаётся после сборки (подробнее — раздел
+[«Пакеты» в config_yaml.md](config_yaml.md)).
 
 **Посмотреть итоговый конфиг, не запуская обучение:**
 
@@ -124,10 +143,14 @@ python scripts/train.py experiment=b2_feature_kd --cfg job
                              # конфига, а не в cfg.experiment» — просто
                              # всегда оставляй её первой строкой
 defaults:                    # какие файлы групп выбрать
+  - override /data/dataset: cifar10
+  - override /data/loader: base_loader
+  - override /data/transform: base_transform
   - override /model/teacher: resnet56_cifar
   - override /model/student: resnet20_cifar
   - override /loss: hinton_kd
   - override /optimizer: adam
+  - override /scheduler: cosine
 
 name: b1_resnet56_to_resnet20_kd   # имя запуска -> подпапка в outputs/
 
@@ -137,9 +160,19 @@ loss:
   temperature: 4.0
   alpha: 0.9
 data:
+  dataset:
+    normalize:
+      std: [0.2023, 0.1994, 0.2010]   # путь: cfg.data.dataset.normalize.std
   loader:
     batch_size: 128
 ```
+
+Первые три строки `defaults` не меняют выбор (в корне и так `cifar10`/
+`base_loader`/`base_transform`) — переобъявлены явно, ради самодокументируемости
+эксперимента. Раз группа уже выбрана в корне, повторное упоминание всегда
+через `override`, даже если значение то же самое — иначе Hydra не поймёт,
+что это изменение существующего выбора, а не второе объявление той же оси
+(`ConfigCompositionException: Could not override ...`).
 
 **Завести свой эксперимент** = скопировать ближайший по смыслу файл, поменять
 `name`, оси и значения. Всё. Код не трогаем.
@@ -188,7 +221,10 @@ T_max: ${trainer.epochs}     # длина косинуса всегда равн
 ```
 
 Поменял `trainer.epochs=30` из CLI — `T_max` подтянулся сам. Так же
-`num_classes` ученика ссылается на `${data.num_classes}`.
+`num_classes` ученика ссылается на `${data.dataset.num_classes}` — размер
+последнего слоя классификатора всегда соответствует выбранному `data/dataset`,
+переключил `cifar10` на `imagenet1k` — число классов подтянулось само, без
+правки конфига модели.
 
 ## Что остаётся после запуска
 
@@ -205,8 +241,7 @@ outputs/<name>/<дата_время>/
 
 Хочешь понять, чем был запуск двухнедельной давности — открой его
 `.hydra/config.yaml`. Хочешь его повторить — примени те же overrides
-(благодаря `seed` и `deterministic: true` результат совпадёт бит-в-бит,
-подробности в README, раздел «Воспроизводимость»).
+(благодаря `seed` и `deterministic: true` результат совпадёт бит-в-бит).
 
 Оценить сохранённый чекпоинт:
 
@@ -214,6 +249,20 @@ outputs/<name>/<дата_время>/
 python scripts/eval.py experiment=b2_feature_kd \
     ckpt_path=outputs/b2_resnet50_to_resnet18_feature_kd/<дата_время>/best.pt
 ```
+
+
+Как воспроизвести результат?
+
+Вариант А (опасно): Повторить ту же команду (взять список из overrides.yaml (outputs/default/папка запуска/.hydra/overrides.yaml) и подставить обратно, например experiment=b1_scratch ...). Однако гарантия не полная (конфиг эксперимента может быть уже изменён)
+
+Вариант Б (рекомендуется): загрузить сам снапшот напрямую в обход текущего состояния configs/:
+```bash
+python scripts/train.py \
+    --config-path /абсолютный/путь/outputs/<name>/<дата_время>/.hydra \
+    --config-name config \
+    hydra.run.dir=outputs/replay
+```
+
 
 ## Частые грабли
 
