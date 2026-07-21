@@ -10,7 +10,13 @@ from hydra.utils import instantiate
 
 from src.losses import DistillationLoss
 
-EXPERIMENTS = ["b1_vanilla_kd", "b1_scratch", "b2_feature_kd", "b2_scratch"]
+EXPERIMENTS = [
+    "b1_vanilla_kd",
+    "b1_scratch",
+    "b2_feature_kd",
+    "b2_scratch",
+    "imagenet1k_scratch_resnet18",
+]
 
 
 def compose_config(overrides: list[str]):
