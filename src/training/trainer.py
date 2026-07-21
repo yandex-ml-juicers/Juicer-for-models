@@ -181,6 +181,8 @@ class Trainer:
                     **{f"train_{key}": value for key, value in other_train_metrics.items()},
                 }
 
+                print('ВСЕ ЗНАЧЕНИЯ = ', all_values)
+
 
                 history.append(all_values)
                 if self.metrics_callback is not None:
@@ -205,7 +207,7 @@ class Trainer:
                     self.epochs,
                     lr,
                     train_loss_components["total"],
-                    train_loss_components["acc"] * 100,
+                    other_train_metrics["acc"] * 100,
                     eval_loss,
                     eval_acc * 100,
                     " *" if is_best else "",
