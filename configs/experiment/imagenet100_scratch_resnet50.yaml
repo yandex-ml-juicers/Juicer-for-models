@@ -1,13 +1,13 @@
 # @package _global_
 defaults:
-  - override /data: imagenet100
+  - override /data/dataset: imagenet100
   - override /model/teacher: null
   - override /model/student: resnet50_imagenet
   - override /loss: ce
-  - override /optimizer: SGD
+  - override /optimizer: adamw
   - override /scheduler: warmup_cosine
 
-name: imagenet100_resnet50_scratch
+name: imagenet100_scratch_resnet50
 device: cuda
 deterministic: false
 

@@ -43,23 +43,34 @@ def init_clearml(cfg: DictConfig):
 
 def clearml_reporter(task):
     """
-    Конвенция из base_docs.md: title = график в UI, series = линия на нём
-    (train и eval одного лосса ложатся на один график).
+    title = график в UI, series = линия на нём
     """
     logger = task.get_logger()
 
-    def report(row: dict) -> None:
-        epoch = row["epoch"]
-        logger.report_scalar("loss", "train", row["train_total"], iteration=epoch)
-        logger.report_scalar("loss", "eval", row["eval_loss"], iteration=epoch)
-        logger.report_scalar("accuracy", "train", row["train_acc"], iteration=epoch)
-        logger.report_scalar("accuracy", "eval", row["eval_acc"], iteration=epoch)
-        logger.report_scalar("lr", "lr", row["lr"], iteration=epoch)
+    def report(row: dict, iteration: str = 'epoch') -> None:
+    
+        iterate = row[iteration]
+        logger.report_scalar(title="loss", series="train", value=row["train_loss_total"], iteration=iterate)
+        logger.report_scalar(title="loss", series="eval", value=row["eval_loss"], iteration=iterate)
+        logger.report_scalar(title="accuracy", series="train", value=row["train_acc"], iteration=iterate)
+        logger.report_scalar(title="accuracy", series="eval", value=row["eval_acc"], iteration=iterate)
+        logger.report_scalar(title="lr", series="lr", value=row["lr"], iteration=iterate)
+        logger.report_scalar(title="precision", series="train", value=row["train_precision"], iteration=iterate)
+        logger.report_scalar(title="recall", series="train", value=row["train_recall"], iteration=iterate)
+        logger.report_scalar(title="F1", series="train", value=row["train_F1"], iteration=iterate)
+        logger.report_scalar(title="KL", series="train_KL", value=row["train_KL_divergence"], iteration=iterate)
+        logger.report_scalar(title="agreement_rate", series="train_agreement_rate", value=row["train_agreement_rate"], iteration=iterate)
+        logger.report_scalar(title="grad_norm", series="train_avg_grad_norm", value=row["train_avg_grad_norm"], iteration=iterate)
+        logger.report_scalar(title="grad_norm", series="train_max_grad_norm", value=row["train_max_grad_norm"], iteration=iterate)
+        logger.report_scalar(title="weight_norm", series="train_avg_weight_norm", value=row["train_avg_weight_norm"], iteration=iterate)
+        logger.report_scalar(title="weight_norm", series="train_max_weight_norm", value=row["train_max_weight_norm"], iteration=iterate)
+        
+
         # Компоненты лосса (train_ce, train_kd, train_feature_*) — одним графиком.
         for key, value in row.items():
-            if key.startswith("train_") and key not in ("train_total", "train_acc"):
+            if key.startswith("train_loss"):
                 logger.report_scalar(
-                    "loss_components", key.removeprefix("train_"), value, iteration=epoch
+                    "loss_components", key.removeprefix("train_"), value, iteration=iterate
                 )
 
     return report
@@ -100,6 +111,8 @@ def main(cfg: DictConfig) -> float:
         device=device,
         output_dir=output_dir,
         metrics_callback=clearml_reporter(task) if task is not None else None,
+        num_classes=cfg.data.dataset.num_classes,
+        scalars=cfg.clearml.scalars,
         **cfg.trainer,
     )
     result = trainer.fit()

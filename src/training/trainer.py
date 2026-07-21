@@ -15,12 +15,14 @@ from pathlib import Path
 import torch
 from torch import nn
 from torch.utils.data import DataLoader
+from torch.amp.grad_scaler import GradScaler
+import torch.nn.functional as F
 from tqdm import tqdm
 
 from src.losses.base import DistillationLoss
 from src.models.feature_extractor import FeatureExtractor
 from src.utils.logger import MetricsHistory, get_logger
-from src.utils.metrics import AverageMeter, accuracy
+from src.utils.metrics import AverageMeter, accuracy, ConfusionMatrixAccumulator
 
 log = get_logger(__name__)
 
@@ -43,7 +45,7 @@ def evaluate(
         images = images.to(device, non_blocking=True)
         labels = labels.to(device, non_blocking=True)
         logits = model(images)
-        loss = torch.nn.functional.cross_entropy(logits, labels)
+        loss = F.cross_entropy(logits, labels)
 
         batch_size = labels.size(0)
         loss_meter.update(loss.item(), batch_size)
@@ -77,6 +79,7 @@ class Trainer:
         scheduler: torch.optim.lr_scheduler.LRScheduler | None,
         train_loader: DataLoader,
         eval_loader: DataLoader,
+        num_classes: int,
         device: torch.device,
         output_dir: Path,
         epochs: int,
@@ -88,6 +91,7 @@ class Trainer:
         save_last: bool = True,
         progress_bar: bool = True,
         metrics_callback: Callable[[dict], None] | None = None,
+        scalars: dict[str, float | int | str],
     ) -> None:
         if criterion.requires_teacher and teacher is None:
             raise ValueError(
@@ -102,9 +106,9 @@ class Trainer:
         self.scheduler = scheduler
         self.train_loader = train_loader
         self.eval_loader = eval_loader
+        self.num_classes = num_classes
         self.device = device
         self.output_dir = Path(output_dir)
-
         self.epochs = epochs
         self.grad_clip_norm = grad_clip_norm
         self.limit_train_batches = limit_train_batches
@@ -116,10 +120,17 @@ class Trainer:
         # каждой эпохи со строкой метрик — той же, что уходит в history.csv.
         # Trainer ничего не знает о трекере, колбэк собирает scripts/train.py.
         self.metrics_callback = metrics_callback
+        self.scalars = scalars
+        # metrics = {'loss.train_loss': }
+        self.train_confmat: ConfusionMatrixAccumulator | None = None
+        if {"precision", "recall", "f1"} & set(self.scalars):
+            self.train_confmat = ConfusionMatrixAccumulator(self.num_classes, self.device)
+        
+
 
         # AMP имеет смысл только на CUDA; на CPU молча работаем в fp32.
         self.amp_enabled = amp and device.type == "cuda"
-        self.scaler = torch.amp.GradScaler(device.type, enabled=self.amp_enabled)
+        self.scaler = GradScaler(device.type, enabled=self.amp_enabled)
 
         if self.teacher is not None:
             self.teacher.eval()
@@ -140,7 +151,8 @@ class Trainer:
         if criterion.required_features:
             layers = list(criterion.required_features)
             self.student_extractor = FeatureExtractor(self.student, layers)
-            self.teacher_extractor = FeatureExtractor(self.teacher, layers)
+            if self.teacher is not None:
+                self.teacher_extractor = FeatureExtractor(self.teacher, layers)
 
     def fit(self) -> dict:
         history = MetricsHistory(self.output_dir / "history.csv")
@@ -148,27 +160,33 @@ class Trainer:
 
         try:
             for epoch in range(1, self.epochs + 1):
-                start = time.time()
-                lr = self.optimizer.param_groups[0]["lr"]
 
-                train_stats = self._train_epoch(epoch)
+                start = time.time()
+                lr=self.optimizer.param_groups[0]["lr"]
+
+                train_loss_components, other_train_metrics = self._train_epoch(epoch)
                 eval_loss, eval_acc = evaluate(
                     self.student, self.eval_loader, self.device, self.limit_eval_batches
                 )
                 if self.scheduler is not None:
                     self.scheduler.step()
 
-                row = {
+                all_values = {
                     "epoch": epoch,
                     "lr": lr,
-                    **{f"train_{key}": value for key, value in train_stats.items()},
                     "eval_loss": eval_loss,
                     "eval_acc": eval_acc,
-                    "time_sec": round(time.time() - start, 1),
+                    "time_epoch": round(time.time() - start, 1),
+                    **{f"train_loss_{key}": value for key, value in train_loss_components.items()},
+                    **{f"train_{key}": value for key, value in other_train_metrics.items()},
                 }
-                history.append(row)
+
+                print('ВСЕ ЗНАЧЕНИЯ = ', all_values)
+
+
+                history.append(all_values)
                 if self.metrics_callback is not None:
-                    self.metrics_callback(row)
+                    self.metrics_callback(all_values)
 
                 is_best = eval_acc > best_acc
                 if is_best:
@@ -188,26 +206,35 @@ class Trainer:
                     epoch,
                     self.epochs,
                     lr,
-                    train_stats["total"],
-                    train_stats["acc"] * 100,
+                    train_loss_components["total"],
+                    other_train_metrics["acc"] * 100,
                     eval_loss,
                     eval_acc * 100,
                     " *" if is_best else "",
-                    row["time_sec"],
+                    all_values["time_epoch"],
                 )
         finally:
             if self.student_extractor is not None:
                 self.student_extractor.remove()
+            if self.teacher_extractor is not None:
                 self.teacher_extractor.remove()
 
         log.info("Лучшая точность: %.2f%% (эпоха %d)", best_acc * 100, best_epoch)
         return {"best_acc": best_acc, "best_epoch": best_epoch}
 
-    def _train_epoch(self, epoch: int) -> dict[str, float]:
+    def _train_epoch(self, epoch: int) -> tuple:
         self.student.train()
         self.criterion.train()
 
-        meters: dict[str, AverageMeter] = defaultdict(AverageMeter)
+        max_grad_norm = -1
+        max_weight_norm = -1
+
+        if self.train_confmat is not None:
+            self.train_confmat.reset()
+
+        meters_avg: dict[str, AverageMeter] = defaultdict(AverageMeter)
+        meters_avg_loss: dict[str, AverageMeter] = defaultdict(AverageMeter)
+        meters_other: dict[str, float | int | str] = {}
         iterator = tqdm(
             self.train_loader,
             desc=f"Эпоха {epoch}/{self.epochs}",
@@ -226,6 +253,7 @@ class Trainer:
             self.optimizer.zero_grad(set_to_none=True)
             if self.student_extractor is not None:
                 self.student_extractor.clear()
+            if self.teacher_extractor is not None:
                 self.teacher_extractor.clear()
 
             teacher_logits = None
@@ -246,22 +274,73 @@ class Trainer:
                         self.teacher_extractor.features if self.teacher_extractor else None
                     ),
                 )
+            
+
+            if self.teacher is not None and teacher_logits is not None:
+                if {"KL_divergence", "agreement_rate"} & set(self.scalars):
+                    with torch.no_grad():
+                        # обе метрики — в fp32, независимо от AMP, ради численной стабильности
+                        s_logits = student_logits.detach().float()
+                        t_logits = teacher_logits.detach().float()
+
+                        KL = F.kl_div(
+                            F.log_softmax(s_logits, dim=1),
+                            F.softmax(t_logits, dim=1),
+                            reduction="batchmean",
+                        )
+                        meters_avg["KL_divergence"].update(KL.item(), batch_size)
+
+                        # доля примеров, где top-1 ученика совпал с top-1 учителя
+                        agreement = (s_logits.argmax(dim=1) == t_logits.argmax(dim=1)).float().mean()
+                        meters_avg["agreement_rate"].update(agreement.item(), batch_size)
 
             self.scaler.scale(losses["total"]).backward()
-            if self.grad_clip_norm is not None:
-                self.scaler.unscale_(self.optimizer)
-                params = [p for group in self.optimizer.param_groups for p in group["params"]]
-                torch.nn.utils.clip_grad_norm_(params, self.grad_clip_norm)
+
+            self.scaler.unscale_(self.optimizer)
+
+            params = [p for group in self.optimizer.param_groups for p in group["params"]]
+            clip_threshold = self.grad_clip_norm if self.grad_clip_norm is not None else float("inf") 
+            grad_norm = torch.nn.utils.clip_grad_norm_(params, clip_threshold)
+            
             self.scaler.step(self.optimizer)
             self.scaler.update()
 
+
+            grad_norm_value = grad_norm.item()
+            meters_avg["avg_grad_norm"].update(grad_norm_value, n=1)    # средняя градиент
+            if grad_norm_value > max_grad_norm:
+                max_grad_norm = grad_norm_value # максимальный градиент
+            
+            with torch.no_grad():
+                weight_norm = torch.norm(torch.stack([p.detach().norm() for p in params]))
+            weight_norm_value = weight_norm.item()
+            meters_avg["avg_weight_norm"].update(weight_norm_value, n=1)
+            if weight_norm_value > max_weight_norm: 
+                max_weight_norm = weight_norm_value
+
             for key, value in losses.items():
-                meters[key].update(value.item(), batch_size)
-            meters["acc"].update(accuracy(student_logits.float(), labels), batch_size)
+                meters_avg_loss[key].update(value.item(), batch_size)
+
+            meters_avg["acc"].update(accuracy(student_logits.float(), labels), batch_size) #train_acc
+
+            probs = torch.softmax(student_logits.detach().float(), dim=1)
+
+            if self.train_confmat is not None:
+                self.train_confmat.update(probs.argmax(dim=1), labels)
 
             iterator.set_postfix({"loss": f"{losses['total'].item():.3f}"})
 
-        return {key: meter.avg for key, meter in meters.items()}
+        if self.train_confmat is not None:
+            meters_other.update(self.train_confmat.compute()) # pr, rec, F1
+
+        train_loss_components = {key: meter.avg for key, meter in meters_avg_loss.items()} # train_loss_components
+
+        meters_other["max_grad_norm"] = max_grad_norm
+        meters_other["max_weight_norm"] = max_weight_norm
+
+        other_train_metrics = {**{key: meter.avg for key, meter in meters_avg.items()}, **meters_other}
+
+        return train_loss_components, other_train_metrics
 
     def _save_checkpoint(self, filename: str, epoch: int, best_acc: float) -> None:
         checkpoint = {
