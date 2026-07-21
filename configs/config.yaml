@@ -1,6 +1,8 @@
 defaults:
   - _self_
-  - data: cifar10
+  - data/dataset: cifar10
+  - data/loader: base_loader
+  - data/transform: base_transform
   - model/teacher: resnet56_cifar
   - model/student: resnet20_cifar
   - loss: hinton_kd

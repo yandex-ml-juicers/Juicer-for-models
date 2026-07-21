@@ -195,6 +195,10 @@ class Trainer:
                         self._save_checkpoint("best.pt", epoch, best_acc)
                 if self.save_last:
                     self._save_checkpoint("last.pt", epoch, best_acc)
+                if epoch == 40:
+                    self._save_checkpoint("checkpoint_40_epochs.pt", epoch, best_acc)
+                if epoch == 80:
+                    self._save_checkpoint("checkpoint_80_epochs.pt", epoch, best_acc)
 
                 log.info(
                     "Эпоха %02d/%d | lr=%.6f | train loss=%.4f | train acc=%.2f%% | "
