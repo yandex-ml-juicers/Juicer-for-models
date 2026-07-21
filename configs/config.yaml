@@ -1,12 +1,8 @@
-# Корневой конфиг. Композиция: каждая группа defaults — независимая ось
-# эксперимента; готовые сочетания лежат в configs/experiment/*.yaml.
-#
-#  пример запуска конкретного эксперимента:
-#      python scripts/train.py experiment=b2_feature_kd
-#      python scripts/train.py loss=hinton_kd loss.temperature=8 trainer.epochs=5
 defaults:
   - _self_
-  - data: cifar10
+  - data/dataset: cifar10
+  - data/loader: base_loader
+  - data/transform: base_transform
   - model/teacher: resnet56_cifar
   - model/student: resnet20_cifar
   - loss: hinton_kd
@@ -15,29 +11,31 @@ defaults:
   - trainer: default
   - experiment: null
 
-# Имя запуска: подпапка в outputs/, задаётся экспериментом.
-name: default
+name: default # имя таски
 
+# Воспроизводимость
 seed: 42
-# Бит-в-бит воспроизводимость (только детерминированные CUDA-ядра, ~10-20% медленнее).
 deterministic: true
-# Аварийный клапан: warning вместо RuntimeError для операций без
-# детерминированной реализации. Включать осознанно.
-deterministic_warn_only: false
+# если нет детерменированной реализации при false ловим ошибку, при true запускаемся
+deterministic_warn_only: false # лучше держать false
 
 device: auto  # auto | cuda | cuda:N | cpu
 
-# Путь к чекпоинту для scripts/eval.py (относительно корня репозитория).
 ckpt_path: null
 
-# Трекинг в ClearML (нужен настроенный clearml.conf или CLEARML_* переменные,
-# см. base_docs.md). Выключен по умолчанию, чтобы смоуки/CI работали оффлайн:
-#   python scripts/train.py experiment=b1_vanilla_kd clearml.enabled=true
+# Трекинг в ClearML
+# Выключен по умолчанию, чтобы тесты работали оффлайн
 clearml:
-  enabled: false
-  project: Juicer-for-models
-  tags: []  # эксперименты добавляют свои, см. configs/experiment/*.yaml
+  enabled: False
+  project: Juicer-for-models # проект
+  tags: []  # теги для фильтрации экспериментов
+  reuse_last_task_id: False # перезаписывать ли таску с таким же именем
+  continue_last_task: False # подхватывать ли предыдущий ID и продолжать логирование
+  output_uri: True # складывать ли артефакты/модели и если куда-то базово, то url
+  auto_connect_frameworks: True # авто-перехват фреймворков
+  auto_connect_arg_parser: False # авто-перехват аргументов из argparse
 
+# Логи Hydra
 hydra:
   run:
     dir: outputs/${name}/${now:%Y-%m-%d_%H-%M-%S}
@@ -45,6 +43,4 @@ hydra:
     dir: multirun/${name}/${now:%Y-%m-%d_%H-%M-%S}
     subdir: ${hydra.job.num}
   job:
-    # Не менять cwd процесса: пути к данным остаются относительно корня репо,
-    # артефакты пишутся в output_dir через HydraConfig (см. scripts/train.py).
-    chdir: false
+    chdir: false # входные пути всегда от корня репо, выходные по явно запрошенному output_dir

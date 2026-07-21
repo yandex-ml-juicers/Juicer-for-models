@@ -1,15 +1,5 @@
 """Единая точка входа обучения.
 
-Примеры:
-    python scripts/train.py experiment=b1_vanilla_kd
-    python scripts/train.py experiment=b2_feature_kd trainer.epochs=30
-    python scripts/train.py loss=hinton_kd loss.temperature=8 seed=1
-    python scripts/train.py data=fake '~model/teacher' loss=ce \
-        trainer.epochs=1 trainer.limit_train_batches=3   # смоук без сети/GPU
-
-(`~model/teacher` — CLI-синтаксис удаления группы из defaults; в yaml-файлах
-экспериментов то же самое пишется как `- override /model/teacher: null`.)
-
 Артефакты запуска (конфиг, логи, history.csv, чекпоинты) складываются
 в outputs/<name>/<дата_время>/.
 """
@@ -22,7 +12,7 @@ from hydra.core.hydra_config import HydraConfig
 from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
 
-from src.data import build_dataloaders
+from src.data import base_loader
 from src.training import Trainer
 from src.utils import resolve_device, seed_everything
 
@@ -30,32 +20,29 @@ log = logging.getLogger(__name__)
 
 
 def init_clearml(cfg: DictConfig):
-    """Task.init по требованиям base_docs.md; None, если трекинг выключен.
-
-    Импорт ленивый: смоуки/CI и запуски без настроенного clearml.conf
-    не должны требовать установленный и сконфигурированный ClearML.
-    """
     if not cfg.clearml.enabled:
         return None
     from clearml import Task
 
     task = Task.init(
-        project_name=cfg.clearml.project,
-        task_name=cfg.name,
-        task_type=Task.TaskTypes.training,
-        tags=list(cfg.clearml.tags),
-        output_uri=True,  # torch.save-чекпоинты уезжают в хранилище ClearML
-        auto_connect_frameworks={"pytorch": False,},
-        auto_connect_arg_parser=False,  # у нас Hydra, не argparse
+        project_name=cfg.clearml.project,                      # проект
+        task_name=f"{cfg.name}",                               # имя таски
+        task_type=Task.TaskTypes.training,                     # тип таски
+        tags=cfg.clearml.tags,                                 # теги
+        reuse_last_task_id = cfg.clearml.reuse_last_task_id,   # перезаписывать ли таску с таким же именем
+        continue_last_task=cfg.clearml.continue_last_task,     # Подхватит предыдущий ID и продолжит логирование
+        output_uri=cfg.clearml.output_uri,                     # складывать ли артефакты/модели и если куда-то базово, то url
+        auto_connect_frameworks=cfg.clearml.auto_connect_frameworks, # авто-перехват фреймворков
+        auto_connect_arg_parser=cfg.clearml.auto_connect_arg_parser, # авто-перехват аргументов из argparse
     )
+
     # Полный разрешённый конфиг — в Configuration objects задачи.
     task.connect_configuration(OmegaConf.to_container(cfg, resolve=True), name="hydra_config")
     return task
 
 
 def clearml_reporter(task):
-    """Колбэк per-epoch метрик для Trainer.
-
+    """
     Конвенция из base_docs.md: title = график в UI, series = линия на нём
     (train и eval одного лосса ложатся на один график).
     """
@@ -91,7 +78,7 @@ def main(cfg: DictConfig) -> float:
     seed_everything(cfg.seed, deterministic=cfg.deterministic, warn_only=cfg.deterministic_warn_only)
     device = resolve_device(cfg.device)
 
-    train_loader, eval_loader = build_dataloaders(cfg.data, seed=cfg.seed)
+    train_loader, eval_loader = base_loader(cfg.data, seed=cfg.seed)
 
     student = instantiate(cfg.model.student).to(device)
     teacher = None

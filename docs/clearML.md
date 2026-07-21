@@ -1,112 +1,3 @@
-# Основное
-
-
-Используем четыре типа веток:
-
-| Тип | От какой ветки | Вливается в | Когда использовать |
-|---|---|---|---|
-| `main` | — | — | Всегда рабочий, протестированный код. Только через Pull Request, прямые пуши запрещены. |
-| `dev` | `main` | `main` (через PR) | Ветка интеграции. Все фичи и эксперименты сначала попадают сюда. |
-| ветви функциональностей | `dev` | `dev` | Разработка фичи или проведение эксперимента (см. префиксы ниже). |
-| `hotfix/*` | `main` | `main` и `dev` | Быстрое исправление критичной ошибки в `main` в обход `dev`. |
-
-## main
-
-- **`main` (или `master`):** Всегда содержит рабочий, протестированный код. Сюда нельзя пушить напрямую — только через Pull Requests (PR).
-
-## dev 
-
-- **`develop` (опционально):** Ветка для интеграции новых фич.
-
-## feature и hotfix branches
-
-Могут порождаться от: dev
-Должны вливаться в: dev
-
-Правила наименования веток:
-
-Используйте префиксы, чтобы сразу было понятно, над чем идет работа:
-
-| Префикс | Значение | Пример |
-|---|---|---|
-| `feat/` | Новая функциональность | `feat/kd-loss-implementation` |
-| `exp/` | Эксперимент | `exp/resnet50-to-resnet18-baseline` |
-| `fix/` | Исправление бага | `fix/dataloader-memory-leak` |
-| `docs/` | Только документация / README / `docs/` | `docs/update-configs-guide` |
-| `chore/` | Инфраструктура: CI, зависимости, конфиг линтеров и т.п. | `chore/add-precommit-hooks` |
-| `hotfix/` | Срочное исправление в `main` | `hotfix/broken-checkpoint-path` |
-
-Под фичей мы тут будем понимать как эксперимент, так и написание кода/документации.
-Ветви функциональностей (feature branches), используются для разработки новых функций. Смысл существования ветви функциональности (feature branch) состоит в том, что она живёт так долго, сколько продолжается разработка данной функциональности (фичи). Когда работа в ветви завершена, последняя вливается обратно в главную ветвь разработки или же удаляется (в случае неудачного эксперимента).  
-  
-Ветви функциональностей (feature branches) в нашем случаи стоит отправлять на github тоже, чтобы другие видели, кто какую взял фичу.
-
-Ветви исправлений (hotfix branches) создаются из главной (main) ветви. Допускается создавать ветки от main для быстрых и мелких исправлений. Но, вероятно нам это не нужно, так как нам не нужно поддерживать постоянную работу какого-то сервиса.
-
-# Commits
-
-Используем Conventional Commits: `<тип>: <описание>`.
-
-- **feat** — новая функциональность.
-- **fix** — исправление ошибки.
-- **docs** — изменения в документации.
-- **style** — форматирование (отступы, запятые), без изменения логики.
-- **refactor** — изменение кода без новых фич и без исправления багов.
-- **test** — добавление/изменение тестов.
-- **chore** — рутинные задачи (сборка, зависимости, конфиги CI).
-- **exp** - новый эксперимент
-
-Пример: `feat: add temperature scaling to KD loss`.
-
-# Структура
-
-```markdown
-├── .github/                # GitHub Actions для CI/CD, тестов и линтеров
-├── docker/
-│   ├── Dockerfile
-├── configs/                # Конфигурационные файлы (YAML или JSON)
-│   ├── data.yaml           # Пути к датасетам, параметры аугментации
-│   ├── model.yaml          # Настройки учителя и ученика
-│   └── train_kd.yaml       # Гиперпараметры обучения (температура, альфа, эпохи)
-├── data/                   # Папка для данных
-│   ├── weights/     
-│   ├── raw/                # Исходные данные (например, скачанные датасеты)
-│   └── processed/          # Предобработанные данные
-├── notebooks/              # Jupyter ноутбуки для разведочного анализа (EDA) и baseline
-│   └── baseline_1.0_MM_DD.ipynb
-├── scripts/                # Точки входа для запуска кода
-│   ├── train.py            # Основной скрипт запуска обучения
-│   ├── eval.py         # Скрипт для валидации и подсчета метрик
-├── src/                    # Основной исходный код (модуль)
-│   ├── __init__.py
-│   ├── data/               # Всё для работы с данными
-│   │   ├── generate.py     # генерация подвыборок, выбор нудного датасета...
-│   │   └── transforms.py   # Аугментации, нормировка ... (преобразование данных)
-│   ├── models/             # модели
-│   │   ├── teachers/ # Тяжелые модели (учителя)
-│   │   │     ├── teacher1.py
-│   │   │     ├── teacher2.py 
-│   │   ├── students/ # Легкие модели (ученики)
-│   │   │     ├── student1.py     
-│   │   │     ├── student2.py
-│   ├── test/               # тесты не для моделей
-│   │   ├── test_loss_functions.py
-│   │   └── test_transforms.py
-│   ├── utils/              # Вспомогательные функции
-│   │   ├── metrics.py      # Подсчет метрик (IoU, MAE, Accuracy и т.д.)
-│   │   └── logger.py       # Логирование экспериментов
-│   ├── docs/               # мини документация 
-│   │   ├── docs_configs.md          # Описание структуры конфигов 
-│   │   └── docs_models_zoo.md       # Зоопарк моделей
-├── .gitignore              # Исключения для Git
-├── .dvcignore              # Исключения для DVC
-├── .pre-commit-config.yaml # Настройки pre-commit хуков (для форматирования кода)
-├── README.md
-├── HISTORY.md              # история экспериментов, что использовали, какой конфиг, результаты
-└── requirements.txt        # Зависимости проекта
-```
-
-# DVC
 
 # ClearML
 
@@ -189,13 +80,23 @@ task.close()
 ```python
 from clearml import Task
 
+       project_name="Juicer-for-models",
+        task_name=f"{cfg.name}",
+        task_type=cfg.task_type,
+        reuse_last_task_id = cfg.reuse_last_task_id,
+        output_uri= cfg.output_uri,
+
 task = Task.init(
-    project_name="Juicer-for-models/Name",         # проект
-    task_name="resnet50_to_resnet18_vanila_KD_training",    # имя запуска
-    task_type=Task.TaskTypes.training,             # тип
-    tags=["baseline", "kd"],                       # теги
-    output_uri=True,                               # куда складывать артефакты/модели
-    auto_connect_frameworks=True,                  # авто-перехват фреймворков
+    project_name=cfg.clearml.project,                      # проект
+    task_name=f"{cfg.name}",                               # имя таски
+    task_type=Task.TaskTypes.training,                       # тип таски
+    tags=cfg.clearml.tags,                                 # теги
+    reuse_last_task_id = cfg.clearml.reuse_last_task_id,   # перезаписывать ли таску с таким же именем
+    continue_last_task=cfg.clearml.continue_last_task,     # Подхватит предыдущий ID и продолжит логирование
+    output_uri=cfg.clearml.output_uri,                     # складывать ли артефакты/модели и если куда-то базово, то url
+    auto_connect_frameworks=cfg.clearml.auto_connect_frameworks, # авто-перехват фреймворков
+    auto_connect_arg_parser=cfg.clearml.auto_connect_arg_parser, # авто-перехват аргументов из argparse
+    
 )
 ```
 
@@ -233,14 +134,15 @@ task = Task.init(
 
 ```python
 task = Task.init(
-    project_name="Juicer-for-models/Name", task_name=f"{cfg.model.teacher.name}_{cfg.model.teacher.name}_{cfg.exp.name_exp}_{cfg.exp.task_type}",
+    project_name="Juicer-for-models/Name",
+    task_name=f"{cfg.name}",
     auto_connect_frameworks={
         "pytorch": True,
         "matplotlib": True,
         "tensorboard": True,
         "detect_repository": True,   # можно False, чтобы не тянуть git
     },
-    auto_connect_arg_parser=False,   # т.к. используем Hydra
+    auto_connect_arg_parser=cfg.clearml.auto_connect_arg_parser,   # т.к. используем Hydra
 )
 ```
 
@@ -318,7 +220,7 @@ task.upload_artifact(name="checkpoints", artifact_object="outputs/checkpoints/")
 
 ```python
 from clearml import Task
-src = Task.get_task(project_name="Juicer-for-models", task_name=f"{cfg.model.teacher.name}_{cfg.model.teacher.name}_{cfg.exp.name_exp}_{cfg.exp.task_type}")
+src = Task.get_task(project_name="Juicer-for-models", task_name=f"{cfg.name}")
 df = src.artifacts["val_predictions"].get()               # объект в память
 local_path = src.artifacts["checkpoints"].get_local_copy() # скачать файлы, вернуть путь
 ```
@@ -370,11 +272,15 @@ from clearml import Task
 def main(cfg: DictConfig) -> None:
     # 1) Task.init — ПЕРВОЙ строкой внутри main (после того как Hydra собрала cfg)
     task = Task.init(
-        project_name="Juicer-for-models",
-        task_name=f"{cfg.model.teacher.name}_{cfg.model.teacher.name}_{cfg.exp.name_exp}_{cfg.exp.task_type}",
-        task_type=cfg.exp.task_type,
-        output_uri=True,
-        auto_connect_arg_parser=False,  # у нас Hydra, не argparse
+    project_name=cfg.clearml.project,                      # проект
+    task_name=f"{cfg.name}",                               # имя таски
+    task_type=Task.TaskTypes.training,                     # тип таски
+    tags=cfg.clearml.tags,                                 # теги
+    reuse_last_task_id = cfg.clearml.reuse_last_task_id,   # перезаписывать ли таску с таким же именем
+    continue_last_task=cfg.clearml.continue_last_task,     # Подхватит предыдущий ID и продолжит логирование
+    output_uri=cfg.clearml.output_uri,                     # складывать ли артефакты/модели и если куда-то базово, то url
+    auto_connect_frameworks=cfg.clearml.auto_connect_frameworks, # авто-перехват фреймворков
+    auto_connect_arg_parser=cfg.clearml.auto_connect_arg_parser, # авто-перехват аргументов из argparse
     )
 
     # 2) (опционально) продублировать конфиг плоско — удобно для сравнения
@@ -405,20 +311,3 @@ if __name__ == "__main__":
 > ClearML захватит уже готовый конфиг и корректную рабочую папку.
 
 ## Датасеты: ClearML Data
-
-# CI/CD + ruff + Pyrefly
-
-# Docker 
-
-# Hydra 
-
-Мини-документация: [docs/hydra.md](docs/hydra.md) — что такое Hydra и зачем она нам,
-как запускать эксперименты, шпаргалка переопределений из CLI, как завести свой
-эксперимент-конфиг.
-
-# Lightning 
-
-# Документация
-README.md — входная точка: что за проект, как запустить (Docker в первую очередь), как быстро прогнать обучение, ссылки на остальную документацию.
-HISTORY.md — журнал экспериментов. Заполняется при каждом мало-мальски значимом эксперименте.
-docs/ — документация по конкретным подсистемам (конфиги, зоопарк моделей, DVC, ClearML), чтобы README не разрастался.

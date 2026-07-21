@@ -2,6 +2,9 @@
 __pycache__/
 *.py[cod]
 
+# Package build metadata (pip install -e .)
+*.egg-info/
+
 # Model weights
 *.pth
 *.pt
