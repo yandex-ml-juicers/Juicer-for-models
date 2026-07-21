@@ -58,6 +58,13 @@ def clearml_reporter(task):
         logger.report_scalar(title="precision", series="train", value=row["train_precision"], iteration=iterate)
         logger.report_scalar(title="recall", series="train", value=row["train_recall"], iteration=iterate)
         logger.report_scalar(title="F1", series="train", value=row["train_F1"], iteration=iterate)
+        logger.report_scalar(title="KL", series="KL", value=row["KL_divergence"], iteration=iterate)
+        logger.report_scalar(title="agreement_rate", series="agreement_rate", value=row["agreement_rate"], iteration=iterate)
+        logger.report_scalar(title="grad_norm", series="avg_grad_norm", value=row["avg_grad_norm"], iteration=iterate)
+        logger.report_scalar(title="grad_norm", series="max_grad_norm", value=row["max_grad_norm"], iteration=iterate)
+        logger.report_scalar(title="weight_norm", series="avg_weight_norm", value=row["avg_weight_norm"], iteration=iterate)
+        logger.report_scalar(title="weight_norm", series="max_weight_norm", value=row["max_weight_norm"], iteration=iterate)
+        
 
         # Компоненты лосса (train_ce, train_kd, train_feature_*) — одним графиком.
         for key, value in row.items():

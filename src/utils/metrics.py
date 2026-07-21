@@ -51,7 +51,7 @@ class ConfusionMatrixAccumulator:
         self.matrix.zero_()
 
     def compute(self) -> dict[str, float]:
-        """precision/recall/f1 (macro), выведенные из накопленной матрицы
+        """precision/recall/F1 (macro), выведенные из накопленной матрицы
         """
         cm = self.matrix.float()
         tp = cm.diagonal()
@@ -69,5 +69,5 @@ class ConfusionMatrixAccumulator:
         return {
             "precision": precision[present].mean().item(),
             "recall": recall[present].mean().item(),
-            "f1": f1[present].mean().item(),
+            "F1": f1[present].mean().item(),
         }
