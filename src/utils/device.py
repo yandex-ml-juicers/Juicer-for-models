@@ -6,10 +6,8 @@ import torch
 
 log = logging.getLogger(__name__)
 
-
 def resolve_device(device: str = "auto") -> torch.device:
     """Разворачивает строку из конфига в torch.device.
-
     Args:
         device: "auto" (cuda если доступна, иначе cpu), "cuda", "cuda:N" или "cpu".
     """
