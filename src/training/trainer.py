@@ -181,12 +181,10 @@ class Trainer:
                     **{f"train_{key}": value for key, value in other_train_metrics.items()},
                 }
 
-                row = {"epoch": epoch, **{k: v for k, v in all_values.items() if k in self.scalars or k.startswith("train_")}}
 
-
-                history.append(row)
+                history.append(all_values)
                 if self.metrics_callback is not None:
-                    self.metrics_callback(row)
+                    self.metrics_callback(all_values)
 
                 is_best = eval_acc > best_acc
                 if is_best:
@@ -211,7 +209,7 @@ class Trainer:
                     eval_loss,
                     eval_acc * 100,
                     " *" if is_best else "",
-                    row["time_epoch"],
+                    all_values["time_epoch"],
                 )
         finally:
             if self.student_extractor is not None:
