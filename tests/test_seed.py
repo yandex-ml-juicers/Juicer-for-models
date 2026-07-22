@@ -17,10 +17,18 @@ FAKE_DATA_CFG = {
         "num_classes": 10,
     },
     "transform": {
-        "_target_": "src.data.transforms.base_transform",
-        "mean": [0.5, 0.5, 0.5],
-        "std": [0.25, 0.25, 0.25],
-        "image_size": None,
+        "train": {
+            "_target_": "src.data.transforms.base_transform",
+            "mean": [0.5, 0.5, 0.5],
+            "std": [0.25, 0.25, 0.25],
+            "image_size": None,
+        },
+        "eval": {
+            "_target_": "src.data.transforms.base_transform",
+            "mean": [0.5, 0.5, 0.5],
+            "std": [0.25, 0.25, 0.25],
+            "image_size": None,
+        },
     },
     "loader": {"batch_size": 16, "num_workers": 0, "pin_memory": False, "persistent_workers": False},
 }
