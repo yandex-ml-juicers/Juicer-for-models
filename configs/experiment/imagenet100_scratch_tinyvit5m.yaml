@@ -19,16 +19,16 @@ clearml:
   output_uri: false
 
 trainer:
-  epochs: 200
+  epochs: 70
   amp: true
 
 optimizer:
   lr: 2.5e-4
-  weight_decay: 0.05
+  weight_decay: 0.1
   fused: true
 
 scheduler:
-  warmup_epochs: 20
+  warmup_epochs: 10
   start_factor: 0.01
   end_factor: 1.0
   eta_min: 5.0e-6
@@ -38,6 +38,10 @@ loss:
 
 data:
   loader:
-    batch_size: 256
+    batch_size: 512
     num_workers: 32
     persistent_workers: true
+
+model:
+  student:
+    model_name: tiny_vit_5m_224

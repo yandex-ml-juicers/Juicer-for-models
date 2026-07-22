@@ -154,15 +154,23 @@ def imagenet_resnet152(num_classes: int = 1000) -> nn.Module:
     model.fc = nn.Linear(model.fc.in_features, num_classes)
     return model
 
-def tinyvit(model_name: str, num_classes: int = 100) -> nn.Module:
+def tinyvit(model_name: str, pretrained: bool = False, drop_rate: float = 0.1, drop_path_rate: float = 0.1, num_classes: int = 100) -> nn.Module:
     return timm.create_model(
         model_name,
-        pretrained=False,
+        pretrained=pretrained,
         num_classes=num_classes,
+        drop_rate=drop_rate,
+        drop_path_rate=drop_path_rate
     )
 
 def shufflenet_v2_x1_0(num_classes: int = 100) -> nn.Module:
     return tv_models.shufflenet_v2_x1_0(
+        num_classes=100,
+        pretrained=False
+    )
+
+def shufflenet_v2_x0_5(num_classes: int = 100) -> nn.Module:
+    return tv_models.shufflenet_v2_x0_5(
         num_classes=100,
         pretrained=False
     )
