@@ -1,0 +1,47 @@
+# @package _global_
+defaults:
+  - override /data/dataset: imagenet100
+  - override /data/transform/train: tinyvit_transform
+  - override /data/transform/eval: tinyvit_transform
+  - override /model/teacher: null
+  - override /model/student: tiny_vit
+  - override /loss: ce
+  - override /optimizer: adamw
+  - override /scheduler: warmup_cosine
+
+name: imagenet100_tiny-vit-11m_scratch
+device: cuda
+deterministic: false
+
+clearml:
+  enabled: True
+  tags: [imagenet-100, teacher, scratch, tiny ViT 11m]
+  output_uri: false
+
+trainer:
+  epochs: 200
+  amp: true
+
+optimizer:
+  lr: 2.5e-4
+  weight_decay: 0.05
+  fused: true
+
+scheduler:
+  warmup_epochs: 20
+  start_factor: 0.01
+  end_factor: 1.0
+  eta_min: 5.0e-6
+
+loss:
+  label_smoothing: 0.1
+
+data:
+  loader:
+    batch_size: 256
+    num_workers: 32
+    persistent_workers: true
+
+model:
+  student:
+    model_name: tiny_vit_11m_224
