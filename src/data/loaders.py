@@ -9,8 +9,8 @@ from src.utils.seed import make_generator, seed_worker
 
 def base_loader(cfg: DictConfig, seed: int) -> tuple[DataLoader, DataLoader]:
     """Возвращает (train_loader, eval_loader)."""
-    train_transform = instantiate(cfg.transform)
-    eval_transform = instantiate(cfg.transform)
+    train_transform = instantiate(cfg.transform.train)
+    eval_transform = instantiate(cfg.transform.eval)
 
     train_dataset = instantiate(cfg.dataset.build, train=True, transform=train_transform)
     eval_dataset = instantiate(cfg.dataset.build, train=False, transform=eval_transform)

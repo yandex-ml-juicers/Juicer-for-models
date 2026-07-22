@@ -19,7 +19,7 @@ def base_transform(
     ops.append(transforms.Normalize(tuple(mean), tuple(std)))
     return transforms.Compose(ops)
 
-def build_transforms_train(
+def build_transform_train(
     mean: Sequence[float],
     std: Sequence[float],
     image_size: int | None = None,
@@ -37,7 +37,7 @@ def build_transforms_train(
     ops.append(transforms.Normalize(tuple(mean), tuple(std)))
     return transforms.Compose(ops)
 
-def build_transforms_eval(
+def build_transform_eval(
     mean: Sequence[float],
     std: Sequence[float],
     image_size: int | None = None,
@@ -55,3 +55,30 @@ def build_transforms_eval(
     ops.append(transforms.Normalize(tuple(mean), tuple(std)))
     return transforms.Compose(ops)
 
+def build_transform_tinyvit_train(
+    mean: Sequence[float],
+    std: Sequence[float],
+    image_size: int | None = None,
+) -> transforms.Compose:
+    ops: list = []
+    if image_size is not None:
+        ops.append(transforms.RandomResizedCrop(size=image_size, scale=(0.7, 1.0), interpolation=transforms.InterpolationMode.BICUBIC))
+        ops.append(transforms.RandomHorizontalFlip())
+    ops.append(transforms.RandAugment(num_ops=2, magnitude=9))
+    ops.append(transforms.ToTensor())
+    ops.append(transforms.Normalize(tuple(mean), tuple(std)))
+    ops.append(transforms.RandomErasing(p=0.25, value="random"))
+    return transforms.Compose(ops)
+
+def build_transform_tinyvit_eval(
+    mean: Sequence[float],
+    std: Sequence[float],
+    image_size: int | None = None,
+) -> transforms.Compose:
+    ops: list = []
+    if image_size is not None:
+        ops.append(transforms.Resize(size=image_size, interpolation=transforms.InterpolationMode.BICUBIC))
+    ops.append(transforms.CenterCrop(image_size))
+    ops.append(transforms.ToTensor())
+    ops.append(transforms.Normalize(tuple(mean), tuple(std)))
+    return transforms.Compose(ops)
