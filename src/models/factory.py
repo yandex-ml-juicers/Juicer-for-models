@@ -5,6 +5,7 @@ configs/model/teacher/*.yaml и configs/model/student/*.yaml.
 модели, и ею владеет Trainer.
 """
 
+import timm
 import torch
 from torch import nn
 from torchvision import models as tv_models
@@ -152,3 +153,16 @@ def imagenet_resnet152(num_classes: int = 1000) -> nn.Module:
     model = tv_models.resnet152(weights=None)
     model.fc = nn.Linear(model.fc.in_features, num_classes)
     return model
+
+def tinyvit(model_name: str, num_classes: int = 100) -> nn.Module:
+    return timm.create_model(
+        model_name,
+        pretrained=False,
+        num_classes=num_classes,
+    )
+
+def shufflenet_v2_x1_0(num_classes: int = 100) -> nn.Module:
+    return tv_models.shufflenet_v2_x1_0(
+        num_classes=100,
+        pretrained=False
+    )
