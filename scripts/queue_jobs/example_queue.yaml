@@ -1,7 +1,7 @@
 available_gpus: [0, 1]
 
 experiments:
-  - "experiment=b1_vanilla_kd loss.temperature=3 seed=1 clearml.enabled=false"
-  - "experiment=b2_feature_kd model.student.lr=0.005 clearml.enabled=false"
-  - "experiment=imagenet1k_scratch_resnet18 clearml.enabled=false"
-# - ...
+  - "experiment=b1_vanilla_kd clearml.enabled=false"
+  - "experiment=b2_feature_kd clearml.enabled=false"
+  # - "experiment=imagenet1k_scratch_resnet18 clearml.enabled=false"
+  # - ...
