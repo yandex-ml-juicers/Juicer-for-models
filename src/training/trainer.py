@@ -181,9 +181,6 @@ class Trainer:
                     **{f"train_{key}": value for key, value in other_train_metrics.items()},
                 }
 
-                print('ВСЕ ЗНАЧЕНИЯ = ', all_values)
-
-
                 history.append(all_values)
                 if self.metrics_callback is not None:
                     self.metrics_callback(all_values)
