@@ -5,6 +5,7 @@ configs/model/teacher/*.yaml и configs/model/student/*.yaml.
 модели, и ею владеет Trainer.
 """
 
+import timm
 import torch
 from torch import nn
 from torchvision import models as tv_models
@@ -152,3 +153,61 @@ def imagenet_resnet152(num_classes: int = 1000) -> nn.Module:
     model = tv_models.resnet152(weights=None)
     model.fc = nn.Linear(model.fc.in_features, num_classes)
     return model
+
+def tinyvit(
+    model_name: str, 
+    pretrained: bool = False,
+    checkpoint_path: str | Path | None = None, 
+    drop_rate: float = 0.1, 
+    drop_path_rate: float = 0.1, 
+    num_classes: int = 100
+) -> nn.Module:
+    model = timm.create_model(
+        model_name,
+        pretrained=pretrained,
+        num_classes=num_classes,
+        drop_rate=drop_rate,
+        drop_path_rate=drop_path_rate
+    )
+
+    if checkpoint_path is not None:
+        checkpoint_path = Path(checkpoint_path)
+
+        if not checkpoint_path.is_file():
+            raise FileNotFoundError(f"Checkpoint не найден: {checkpoint_path}")
+
+        checkpoint = torch.load(
+            checkpoint_path,
+            map_location="cpu",
+            weights_only=True,
+        )
+
+        # Поддержка нескольких распространённых форматов checkpoint.
+        if isinstance(checkpoint, dict) and "student_state" in checkpoint:
+            state_dict = checkpoint["student_state"]
+        elif isinstance(checkpoint, dict) and "state_dict" in checkpoint:
+            state_dict = checkpoint["state_dict"]
+        elif isinstance(checkpoint, dict) and "model" in checkpoint:
+            state_dict = checkpoint["model"]
+        else:
+            state_dict = checkpoint
+
+        # Удаление префикса, если модель обучалась через DDP/DataParallel.
+        state_dict = {
+            key.removeprefix("module."): value
+            for key, value in state_dict.items()
+        }
+
+        model.load_state_dict(state_dict, strict=True)
+
+def shufflenet_v2_x1_0(num_classes: int = 100) -> nn.Module:
+    return tv_models.shufflenet_v2_x1_0(
+        num_classes=100,
+        pretrained=False
+    )
+
+def shufflenet_v2_x0_5(num_classes: int = 100) -> nn.Module:
+    return tv_models.shufflenet_v2_x0_5(
+        num_classes=100,
+        pretrained=False
+    )

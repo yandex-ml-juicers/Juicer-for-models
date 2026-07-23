@@ -1,0 +1,51 @@
+# @package _global_
+defaults:
+  - override /data/dataset: imagenet100
+  - override /data/transform/train: tinyvit_transform
+  - override /data/transform/eval: tinyvit_transform
+  - override /model/teacher: null
+  - override /model/student: tiny_vit
+  - override /loss: ce
+  - override /optimizer: adamw
+  - override /scheduler: warmup_cosine
+
+name: imagenet100_tiny-vit-21m_finetune
+device: cuda
+deterministic: false
+
+clearml:
+  enabled: True
+  tags: [imagenet-100, teacher, fine-tune, tiny ViT 21m]
+  output_uri: false
+
+trainer:
+  epochs: 30
+  amp: true
+
+optimizer:
+  lr: 5.0e-5
+  weight_decay: 0.05
+  fused: true
+
+scheduler:
+  warmup_epochs: 3
+  start_factor: 0.1
+  end_factor: 1.0
+  eta_min: 1.0e-6
+
+loss:
+  label_smoothing: 0.1
+
+data:
+  loader:
+    batch_size: 512
+    num_workers: 32
+    persistent_workers: true
+    pin_memory: true
+
+model:
+  student:
+    model_name: tiny_vit_21m_224
+    pretrained: true
+    drop_path_rate: 1.0
+    drop_rate: 0.0
