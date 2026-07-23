@@ -1,12 +1,45 @@
 """Метрики и агрегаторы."""
 
+import pandas as pd
 import torch
+import torch.nn as nn
 
 def accuracy(logits: torch.Tensor, targets: torch.Tensor) -> float:
     """Доля правильных ответов по argmax логитов, в [0, 1]."""
     predictions = logits.argmax(dim=1)
     return (predictions == targets).float().mean().item()
 
+def count_parameters(model: nn.Module) -> dict:
+    '''Считает колиечество параметров у модели
+    '''
+    total = sum(p.numel() for p in model.parameters())
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    buffers = sum(b.numel() for b in model.buffers())
+
+    params_size = sum(p.numel() * p.element_size() for p in model.parameters())
+    buffers_size = sum(b.numel() * b.element_size() for b in model.buffers())
+
+    return {
+        "total_M": total / 1e6,
+        "trainable_M": trainable / 1e6,
+        "buffers_M": buffers / 1e6,
+        "size_MiB": (params_size + buffers_size) / (1024**2),
+    }
+
+def build_param_table(student=None, teacher=None, criterion=None) -> pd.DataFrame | None:
+    cols = ["total_k", "trainable_k", "buffers_k", "size_MiB"]
+    rows = {}
+    if student is not None:
+        rows["Student"] = count_parameters(student)
+    if criterion is not None:
+        rows["Criterion"] = count_parameters(criterion)
+    if teacher is not None:
+        rows["Teacher"] = count_parameters(teacher)
+    if rows is {}:
+        return None
+    df = pd.DataFrame.from_dict(rows, orient="index", columns=cols)
+    df.index.name = "module"
+    return df.reset_index()
 
 class AverageMeter:
     """Взвешенное скользящее среднее (среднее по всем объектам, не по батчам).
