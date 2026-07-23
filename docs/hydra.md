@@ -65,7 +65,9 @@ configs/
 ├── data/
 │   ├── dataset/        # cifar10.yaml, fake_cifar10.yaml, imagenet1k.yaml, imagenet100.yaml
 │   ├── loader/         # base_loader.yaml (batch_size, num_workers, ...)
-│   └── transform/      # base_transform.yaml (mean/std/image_size из выбранного датасета)
+│   └── transform/
+│       ├── train/      # base_transform.yaml — трансформ для train_loader
+│       └── eval/       # base_transform.yaml — трансформ для eval_loader
 ├── model/
 │   ├── teacher/        # resnet56_cifar.yaml, resnet50_cifar.yaml, resnet50/152_imagenet_pretrained.yaml
 │   └── student/        # resnet20_cifar.yaml, resnet18_cifar32.yaml, resnet18/50/152_imagenet.yaml
@@ -76,12 +78,19 @@ configs/
 └── experiment/          # готовые сочетания осей: b1_vanilla_kd.yaml, imagenet1k_scratch_resnet18.yaml, ...
 ```
 
-`data/` — не одна ось, а три независимые: **какой датасет**, **какими значениями
-грузить его в DataLoader** (`batch_size`, `num_workers`, ...) и **как строить
-трансформы** (`_target_: src.data.transforms.base_transform`, а `mean`/`std`/
-`image_size` — интерполяции на выбранный `data/dataset`, не свои числа).
-Один `loader`/`transform`-файл обслуживает любой датасет — переключаешь только
-`data/dataset`, остальные две оси обычно не трогаешь.
+`data/` — не одна ось, а четыре независимые: **какой датасет**, **какими
+значениями грузить его в DataLoader** (`batch_size`, `num_workers`, ...) и
+**как строить трансформы** — отдельно для train и для eval
+(`_target_: src.data.transforms.base_transform`, а `mean`/`std`/`image_size` —
+интерполяции на выбранный `data/dataset`, не свои числа).
+
+Трансформ разбит на `train/` и `eval/` **сейчас с одинаковым содержимым**
+(оба — просто `ToTensor` + `Normalize`), но раздельно с самого начала —
+именно затем, чтобы завтра можно было добавить аугментации только на train
+(`data/transform/train=with_augmentation`), не трогая eval и не переписывая
+`base_loader()`. Один `loader`-файл и одна пара `train`/`eval` transform-файлов
+обслуживают любой датасет — переключаешь только `data/dataset`, остальные три
+оси обычно не трогаешь.
 
 Дефолтный выбор записан в начале `configs/config.yaml`:
 
@@ -90,7 +99,8 @@ defaults:
   - _self_
   - data/dataset: cifar10       # <группа>: <имя файла без .yaml>
   - data/loader: base_loader
-  - data/transform: base_transform
+  - data/transform/train: base_transform
+  - data/transform/eval: base_transform
   - model/teacher: resnet56_cifar
   - model/student: resnet20_cifar
   - loss: hinton_kd
@@ -145,7 +155,8 @@ python scripts/train.py experiment=b2_feature_kd --cfg job
 defaults:                    # какие файлы групп выбрать
   - override /data/dataset: cifar10
   - override /data/loader: base_loader
-  - override /data/transform: base_transform
+  - override /data/transform/train: base_transform
+  - override /data/transform/eval: base_transform
   - override /model/teacher: resnet56_cifar
   - override /model/student: resnet20_cifar
   - override /loss: hinton_kd
@@ -167,12 +178,20 @@ data:
     batch_size: 128
 ```
 
-Первые три строки `defaults` не меняют выбор (в корне и так `cifar10`/
-`base_loader`/`base_transform`) — переобъявлены явно, ради самодокументируемости
-эксперимента. Раз группа уже выбрана в корне, повторное упоминание всегда
-через `override`, даже если значение то же самое — иначе Hydra не поймёт,
-что это изменение существующего выбора, а не второе объявление той же оси
-(`ConfigCompositionException: Could not override ...`).
+Первые четыре строки `defaults` не меняют выбор (в корне и так `cifar10`/
+`base_loader`/`base_transform` для train и eval) — переобъявлены явно, ради
+самодокументируемости эксперимента. Раз группа уже выбрана в корне, повторное
+упоминание всегда через `override`, даже если значение то же самое — иначе
+Hydra не поймёт, что это изменение существующего выбора, а не второе
+объявление той же оси (`ConfigCompositionException: Could not override ...`).
+
+`data/transform/train` и `data/transform/eval` — это **две отдельные
+группы**, не одна группа с двумя значениями: переопределять (или выбирать)
+их нужно **обеими** строками по отдельности, даже если в обоих случаях
+выбирается один и тот же файл `base_transform.yaml`. Группы `data/transform`
+(без `/train` или `/eval`) не существует — обращение к ней целиком, одной
+строкой, упадёт `Could not override 'data/transform'. No match in the
+defaults list.`
 
 **Завести свой эксперимент** = скопировать ближайший по смыслу файл, поменять
 `name`, оси и значения. Всё. Код не трогаем.
