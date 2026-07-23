@@ -27,7 +27,6 @@ def count_parameters(model: nn.Module) -> dict:
     }
 
 def build_param_table(student=None, teacher=None, criterion=None) -> pd.DataFrame | None:
-    cols = ["total_k", "trainable_k", "buffers_k", "size_MiB"]
     rows = {}
     if student is not None:
         rows["Student"] = count_parameters(student)
@@ -37,9 +36,10 @@ def build_param_table(student=None, teacher=None, criterion=None) -> pd.DataFram
         rows["Teacher"] = count_parameters(teacher)
     if rows is {}:
         return None
-    df = pd.DataFrame.from_dict(rows, orient="index", columns=cols)
+    df = pd.DataFrame.from_dict(rows, orient="index")
     df.index.name = "module"
-    return df.reset_index()
+    df = df.reset_index()
+    return df
 
 class AverageMeter:
     """Взвешенное скользящее среднее (среднее по всем объектам, не по батчам).
