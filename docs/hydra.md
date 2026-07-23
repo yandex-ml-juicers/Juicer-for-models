@@ -84,11 +84,7 @@ configs/
 (`_target_: src.data.transforms.base_transform`, а `mean`/`std`/`image_size` —
 интерполяции на выбранный `data/dataset`, не свои числа).
 
-Трансформ разбит на `train/` и `eval/` **сейчас с одинаковым содержимым**
-(оба — просто `ToTensor` + `Normalize`), но раздельно с самого начала —
-именно затем, чтобы завтра можно было добавить аугментации только на train
-(`data/transform/train=with_augmentation`), не трогая eval и не переписывая
-`base_loader()`. Один `loader`-файл и одна пара `train`/`eval` transform-файлов
+Один `loader`-файл и одна пара `train`/`eval` transform-файлов
 обслуживают любой датасет — переключаешь только `data/dataset`, остальные три
 оси обычно не трогаешь.
 
