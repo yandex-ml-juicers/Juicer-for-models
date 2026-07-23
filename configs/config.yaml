@@ -46,4 +46,4 @@ hydra:
     dir: multirun/${name}/${now:%Y-%m-%d_%H-%M-%S}
     subdir: ${hydra.job.num}
   job:
-    chdir: false # входные пути всегда от корня репо, выходные по явно запрошенному output_dir
+    chdir: True # входные пути всегда от корня репо, выходные по явно запрошенному output_dir
