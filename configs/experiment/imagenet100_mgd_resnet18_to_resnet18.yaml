@@ -1,0 +1,8 @@
+# @package _global_
+defaults:
+  - override /data/dataset: imagenet100
+  - override /model/teacher: resnet18_imagenet_pretrained
+  - override /model/student: resnet18_imagenet
+  - override /loss: mgd
+name: mgd_18_to_18_optuna
+ckpt_path: data/weights/resnet18_scratch/best.pt
