@@ -91,14 +91,12 @@ def clearml_reporter(task):
 
 @hydra.main(config_path="../configs", config_name="config", version_base="1.3")
 def main(cfg: DictConfig) -> float:
-    # ClearML — первой строкой, до создания моделей и тренера (см. base_docs.md).
     task = init_clearml(cfg)
 
     output_dir = Path(HydraConfig.get().runtime.output_dir)
     log.info("Конфиг запуска:\n%s", OmegaConf.to_yaml(cfg))
     log.info("Артефакты запуска: %s", output_dir)
 
-    # Первым делом, до любых созданий тензоров и загрузок данных.
     seed_everything(cfg.seed, deterministic=cfg.deterministic, warn_only=cfg.deterministic_warn_only)
     device = resolve_device(cfg.device)
 
