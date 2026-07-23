@@ -1,0 +1,7 @@
+available_gpus: [0, 1]
+
+experiments:
+  - "experiment=b1_vanilla_kd clearml.enabled=false"
+  - "experiment=b2_feature_kd clearml.enabled=false"
+  # - "experiment=imagenet1k_scratch_resnet18 clearml.enabled=false"
+  # - ...

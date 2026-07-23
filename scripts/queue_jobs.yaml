@@ -1,0 +1,14 @@
+# Конфиг для scripts/exp_queue.py — не проходит через Hydra-композицию,
+# это плоские данные для очереди запусков, а не ось эксперимента.
+
+# Какие GPU можно занимать (значения для CUDA_VISIBLE_DEVICES).
+available_gpus: [0, 1]
+
+# Список экспериментов
+# каждая задача будет запускаться как `python scripts/train.py <строка>` 
+# отдельным процессом на своей GPU
+experiments:
+  - "experiment=b1_vanilla_kd clearml.enabled=false"
+  - "experiment=b2_feature_kd clearml.enabled=false"
+  # - "experiment=imagenet1k_scratch_resnet18 clearml.enabled=false"
+  # - ...

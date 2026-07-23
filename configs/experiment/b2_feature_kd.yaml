@@ -4,7 +4,8 @@
 defaults:
   - override /data/dataset: cifar10
   - override /data/loader: base_loader
-  - override /data/transform: base_transform
+  - override /data/transform/train: base_transform
+  - override /data/transform/eval: base_transform
   - override /model/teacher: resnet50_cifar
   - override /model/student: resnet18_cifar32
   - override /loss: feature_kd

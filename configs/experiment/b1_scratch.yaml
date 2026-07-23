@@ -3,7 +3,8 @@
 defaults:
   - override /data/dataset: cifar10
   - override /data/loader: base_loader
-  - override /data/transform: base_transform
+  - override /data/transform/train: base_transform
+  - override /data/transform/eval: base_transform
   - override /model/teacher: null
   - override /model/student: resnet20_cifar
   - override /loss: ce
