@@ -138,28 +138,8 @@ class Trainer:
             self.teacher.eval()
             self.teacher.requires_grad_(False)
 
-        parameters_names = ["total_parameters_in-thousands", "trainable_parameters_in-thousands", "buffers_parameters_in-thousands", "size_in-MiB"]
-        #total_student_parameters, trainable_student_parameters, buffers_student_parameters
-        if self.metrics_callback_single is not None:
-            for role, model in (("Student", self.student), ("Criterion", self.criterion)):
-                stats = count_parameters(model)
-                self.metrics_callback_single({f"{role}_{k}": v for k, v in stats.items()})
-            if self.teacher is not None:
-                stats = count_parameters(self.teacher)
-                self.metrics_callback_single({f"Teacher_{k}": v for k, v in stats.items()})
-
         if self.metrics_callback_table is not None:
             self.metrics_callback_table(build_param_table(self.student, self.teacher, self.criterion))
-        """
-        if self.metrics_callback_single is not None:
-            student_count_parameters = count_parameters(self.student)
-            criterion_count_parameters = count_parameters(self.criterion)
-            self.metrics_callback_single({f'Student_'+parameters_names[i]: student_count_parameters[i] for i in range(len(parameters_names))})
-            self.metrics_callback_single({f'Criterion_'+parameters_names[i]: criterion_count_parameters[i] for i in range(len(parameters_names))})
-            if self.teacher is not None:
-                teacher_count_parameters = count_parameters(self.teacher)
-                self.metrics_callback_single({f'Teacher_'+parameters_names[i]: teacher_count_parameters[i] for i in range(len(parameters_names))})
-        """
 
         criterion_params = list(self.criterion.parameters())
         if criterion_params:
@@ -205,8 +185,6 @@ class Trainer:
                     **{f"train_loss_{key}": value for key, value in train_loss_components.items()},
                     **{f"train_{key}": value for key, value in other_train_metrics.items()},
                 }
-
-                print('ВСЕ ЗНАЧЕНИЯ = ', all_values)
 
                 history.append(all_values)
                 if self.metrics_callback_scalar is not None:
