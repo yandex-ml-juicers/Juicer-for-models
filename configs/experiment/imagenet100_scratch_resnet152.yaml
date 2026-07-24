@@ -7,16 +7,16 @@ defaults:
   - override /optimizer: SGD
   - override /scheduler: warmup_cosine
 
-name: imagenet100_resnet152_scratch
+name: imagenet100_scratch_resnet152
 device: cuda
-deterministic: false
+deterministic: True
 
 clearml:
-  enabled: True
+  enabled: False
   tags: [imagenet-100, teacher, scratch, resnet152]
 
 trainer:
-  epochs: 120
+  epochs: 1200
   amp: true
 
 optimizer:
@@ -34,6 +34,6 @@ loss:
 
 data:
   loader:
-    batch_size: 256
+    batch_size: 512
     num_workers: 16
     persistent_workers: true
