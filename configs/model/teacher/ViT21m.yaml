@@ -1,0 +1,5 @@
+_target_: src.models.factory.tinyvit
+model_name: tiny_vit_21m_224
+num_classes: ${data.dataset.num_classes}
+pretrained: False
+checkpoint_path: /home/m.obukhov/Juicer-for-models/data/weights/ViT21m_imagenet100.pt

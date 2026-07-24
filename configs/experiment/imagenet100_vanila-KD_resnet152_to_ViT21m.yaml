@@ -1,0 +1,38 @@
+  # @package _global_
+  defaults:
+    - override /data/dataset: imagenet100
+    - override /model/teacher: resnet152_imagenet_pretrained
+    - override /model/student: ViT21m
+    - override /loss: hinton_kd
+    - override /optimizer: adam
+    - override /scheduler: warmup_cosine
+
+  name: imagenet100_vanila-KD_resnet152_to_ViT21m
+  device: cuda
+  deterministic: False
+
+  clearml:
+    enabled: True
+    tags: [imagenet-100, ViT21m, resnet152]
+    reuse_last_task_id: True
+
+  trainer:
+    epochs: 100
+    amp: true
+    save_last: False
+
+  optimizer:
+    lr: 0.4
+    weight_decay: 1e-4
+
+  scheduler:
+    warmup_epochs: 10
+    start_factor: 0.01
+    end_factor: 1.0
+    eta_min: 1.0e-6
+
+  data:
+    loader:
+      batch_size: 756
+      num_workers: 32
+      persistent_workers: true
