@@ -32,7 +32,9 @@ def init_clearml(cfg: DictConfig):
         reuse_last_task_id = cfg.clearml.reuse_last_task_id,   # перезаписывать ли таску с таким же именем
         continue_last_task=cfg.clearml.continue_last_task,     # Подхватит предыдущий ID и продолжит логирование
         output_uri=cfg.clearml.output_uri,                     # складывать ли артефакты/модели и если куда-то базово, то url
-        auto_connect_frameworks=cfg.clearml.auto_connect_frameworks, # авто-перехват фреймворков
+        auto_connect_frameworks=OmegaConf.to_container(
+        cfg.clearml.auto_connect_frameworks, resolve=True
+        ), # авто-перехват фреймворков
         auto_connect_arg_parser=cfg.clearml.auto_connect_arg_parser, # авто-перехват аргументов из argparse
     )
 
@@ -51,9 +53,13 @@ def clearml_reporter(task):
     
         iterate = row[iteration]
         logger.report_scalar(title="loss", series="train", value=row["train_loss_total"], iteration=iterate)
-        logger.report_scalar(title="loss", series="eval", value=row["eval_loss"], iteration=iterate)
+        logger.report_scalar(title="loss", series="eval", value=row["eval_loss_student"], iteration=iterate)
         logger.report_scalar(title="accuracy", series="train", value=row["train_acc"], iteration=iterate)
-        logger.report_scalar(title="accuracy", series="eval", value=row["eval_acc"], iteration=iterate)
+        logger.report_scalar(title="accuracy", series="eval", value=row["eval_acc_student"], iteration=iterate)
+        if "eval_acc_teacher" in row.keys():
+            logger.report_scalar(title="loss", series="teacher", value=row["eval_loss_teacher"], iteration=iterate)
+            logger.report_scalar(title="accuracy", series="teacher", value=row["eval_acc_teacher"], iteration=iterate)
+
         logger.report_scalar(title="lr", series="lr", value=row["lr"], iteration=iterate)
         if "train_precision" in row.keys():
             logger.report_scalar(title="precision", series="train", value=row["train_precision"], iteration=iterate)

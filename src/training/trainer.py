@@ -170,17 +170,24 @@ class Trainer:
                 lr=self.optimizer.param_groups[0]["lr"]
 
                 train_loss_components, other_train_metrics = self._train_epoch(epoch)
-                eval_loss, eval_acc = evaluate(
+                eval_loss_student, eval_acc_student = evaluate(
                     self.student, self.eval_loader, self.device, self.limit_eval_batches
                 )
+                if self.teacher is not None:
+                    eval_loss_teacher, eval_acc_teacher = evaluate(
+                        self.teacher, self.eval_loader, self.device, self.limit_eval_batches
+                    )
+
                 if self.scheduler is not None:
                     self.scheduler.step()
 
                 all_values = {
                     "epoch": epoch,
                     "lr": lr,
-                    "eval_loss": eval_loss,
-                    "eval_acc": eval_acc,
+                    "eval_loss_student": eval_loss_student,
+                    "eval_acc_student": eval_acc_student,
+                    "eval_loss_teacher": eval_loss_teacher,
+                    "eval_acc_teacher": eval_acc_teacher,
                     "time_epoch": round(time.time() - start, 1),
                     **{f"train_loss_{key}": value for key, value in train_loss_components.items()},
                     **{f"train_{key}": value for key, value in other_train_metrics.items()},
@@ -190,9 +197,9 @@ class Trainer:
                 if self.metrics_callback_scalar is not None:
                     self.metrics_callback_scalar(all_values)
 
-                is_best = eval_acc > best_acc
+                is_best = eval_acc_student > best_acc
                 if is_best:
-                    best_acc, best_epoch = eval_acc, epoch
+                    best_acc, best_epoch = eval_acc_student, epoch
                     if self.save_best:
                         self._save_checkpoint("best.pt", epoch, best_acc)
                 if self.save_last:
@@ -210,8 +217,8 @@ class Trainer:
                     lr,
                     train_loss_components["total"],
                     other_train_metrics["acc"] * 100,
-                    eval_loss,
-                    eval_acc * 100,
+                    eval_loss_student,
+                    eval_acc_student * 100,
                     " *" if is_best else "",
                     all_values["time_epoch"],
                 )
