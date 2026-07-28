@@ -8,6 +8,7 @@ configs/model/teacher/*.yaml и configs/model/student/*.yaml.
 import torch
 from torch import nn
 from torchvision import models as tv_models
+from torchvision.models._api import WeightsEnum
 
 from hydra.utils import to_absolute_path
 from pathlib import Path
@@ -44,27 +45,36 @@ def cifar_resnet18(num_classes: int = 10) -> nn.Module:
     model.fc = nn.Linear(model.fc.in_features, num_classes)
     return model
 
-def imagenet_resnet18(num_classes: int = 1000) -> nn.Module:
-    """ResNet-18 classifier for ImageNet-1K."""
-    model = tv_models.resnet18(weights=None)
-    model.fc = nn.Linear(model.fc.in_features, num_classes)
-    return model
+def torchvision_model(
+    model_name: str, 
+    num_classes: int = 1000,
+    weights: WeightsEnum | None = None, 
+    checkpoint_path: str | None = None
+) -> nn.Module:
+    """
+    Function for load models from torchvision
+    Edit last layer for current classes
+    """
 
-def imagenet_resnet50_pretrained(num_classes: int = 1000, checkpoint_path: str | None = None) -> nn.Module:
+    # Создание модели с выходным слоем на определенное количество классов и с весами из torchvision
+    model = get_model(
+        model_name,
+        weights=weights,
+        num_classes=num_classes
+    )
+
     if checkpoint_path is None:
-        return tv_models.resnet50(weights=tv_models.ResNet50_Weights.IMAGENET1K_V2)
+        return model
     
-    model = tv_models.resnet50(weights=None,num_classes=num_classes,)
-    path = Path(to_absolute_path(checkpoint_path))
+    weights_path = Path(to_absolute_path(checkpoint_path))
+    if not weights_path.exists():
+        raise FileNotFoundError(f"Weights file was not found: {path}")
 
-    if not path.exists():
-        raise FileNotFoundError(f"Файл с весами не найден: {path}")
-
-    checkpoint = torch.load(path, map_location="cpu", weights_only=True)
-
+    checkpoint = torch.load(weights_path, map_location="cpu", weights_only=True)
     if not isinstance(checkpoint, dict):
-        raise TypeError(f"Ожидался checkpoint в виде dict, получен {type(checkpoint)}")
+        raise TypeError(f"A checkpoint with a dict-style weight was expected, but it was received {type(checkpoint)}")
 
+    # Trainer сохраянет "student_state", перебор на случай изменений
     if "model_state_dict" in checkpoint:
         state_dict = checkpoint["model_state_dict"]
     elif "student_state" in checkpoint:
@@ -74,10 +84,8 @@ def imagenet_resnet50_pretrained(num_classes: int = 1000, checkpoint_path: str |
     elif "model" in checkpoint and isinstance(checkpoint["model"], dict):
         state_dict = checkpoint["model"]
     else:
-        # Файл может содержать непосредственно state_dict.
         state_dict = checkpoint
 
-    # Убираем префиксы, возникающие после DataParallel/DDP/torch.compile.
     cleaned_state_dict = {}
 
     for key, value in state_dict.items():
@@ -91,64 +99,6 @@ def imagenet_resnet50_pretrained(num_classes: int = 1000, checkpoint_path: str |
 
     incompatible = model.load_state_dict(cleaned_state_dict, strict=True)
 
-    print(f"Веса ResNet-50 загружены из: {path}")
+    print(f"Weights for {model_name} has been uploaded: {weights_path}")
 
-    return model
-
-
-def imagenet_resnet152_pretrained(num_classes: int = 1000, checkpoint_path: str | None = None) -> nn.Module:
-    if checkpoint_path is None:
-        return tv_models.resnet152(weights=tv_models.ResNet152_Weights.IMAGENET1K_V2)
-
-    model = tv_models.resnet152(weights=None,num_classes=num_classes)
-    path = Path(to_absolute_path(checkpoint_path))
-
-    if not path.exists():
-        raise FileNotFoundError(f"Файл с весами не найден: {path}")
-
-    checkpoint = torch.load(path, map_location="cpu", weights_only=True)
-
-    if not isinstance(checkpoint, dict):
-        raise TypeError(f"Ожидался checkpoint в виде dict, получен {type(checkpoint)}")
-
-    if "model_state_dict" in checkpoint:
-        state_dict = checkpoint["model_state_dict"]
-    elif "student_state" in checkpoint:
-        state_dict = checkpoint["student_state"]
-    elif "state_dict" in checkpoint:
-        state_dict = checkpoint["state_dict"]
-    elif "model" in checkpoint and isinstance(checkpoint["model"], dict):
-        state_dict = checkpoint["model"]
-    else:
-        # Файл может содержать непосредственно state_dict.
-        state_dict = checkpoint
-
-    # Убираем префиксы, возникающие после DataParallel/DDP/torch.compile.
-    cleaned_state_dict = {}
-
-    for key, value in state_dict.items():
-        if key.startswith("module."):
-            key = key.removeprefix("module.")
-
-        if key.startswith("_orig_mod."):
-            key = key.removeprefix("_orig_mod.")
-
-        cleaned_state_dict[key] = value
-
-    incompatible = model.load_state_dict(cleaned_state_dict, strict=True)
-
-    print(f"Веса ResNet-152 загружены из: {path}")
-
-    return model
-
-def imagenet_resnet50(num_classes: int = 1000) -> nn.Module:
-    """ResNet-50 classifier for ImageNet-1K."""
-    model = tv_models.resnet50(weights=None)
-    model.fc = nn.Linear(model.fc.in_features, num_classes)
-    return model
-
-def imagenet_resnet152(num_classes: int = 1000) -> nn.Module:
-    """ResNet-152 classifier for ImageNet-1K."""
-    model = tv_models.resnet152(weights=None)
-    model.fc = nn.Linear(model.fc.in_features, num_classes)
     return model
