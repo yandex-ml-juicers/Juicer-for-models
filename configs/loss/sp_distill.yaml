@@ -1,0 +1,2 @@
+_target_: src.losses.relational.SimilarityPreservationLoss
+lambda_sp: 10.0

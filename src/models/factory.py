@@ -199,6 +199,7 @@ def tinyvit(
         }
 
         model.load_state_dict(state_dict, strict=True)
+    return model
 
 def shufflenet_v2_x1_0(num_classes: int = 100) -> nn.Module:
     return tv_models.shufflenet_v2_x1_0(

@@ -1,0 +1,8 @@
+# @package _global_
+defaults:
+  - override /data/dataset: imagenet100
+  - override /model/teacher: tiny_vit_5m
+  - override /model/student: tiny_vit_5m
+  - override /loss: sp_distill
+
+name: SP_TinyViT_A100
