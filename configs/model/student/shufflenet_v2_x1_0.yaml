@@ -1,0 +1,2 @@
+_target_: src.models.factory.shufflenet_v2_x1_0
+num_classes: ${data.dataset.num_classes}

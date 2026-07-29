@@ -31,8 +31,14 @@ def build_transform_train(
     """
     ops: list = []
     if image_size is not None:
-        ops.append(transforms.RandomResizedCrop(image_size))
-        ops.append(transforms.RandomHorizontalFlip())
+        ops.append(transforms.RandomResizedCrop(
+            size=image_size,
+            scale=(0.7, 1.0),
+            ratio=(0.75, 4 / 3),
+            interpolation=transforms.InterpolationMode.BILINEAR,
+            antialias=True,
+        ))
+        ops.append(transforms.RandomHorizontalFlip(p=0.5))
     ops.append(transforms.ToTensor())
     ops.append(transforms.Normalize(tuple(mean), tuple(std)))
     return transforms.Compose(ops)
@@ -49,7 +55,11 @@ def build_transform_eval(
     """
     ops: list = []
     if image_size is not None:
-        ops.append(transforms.Resize(256))
+        ops.append(transforms.Resize(
+            size=256,
+            interpolation=transforms.InterpolationMode.BILINEAR,
+            antialias=True
+        ))
         ops.append(transforms.CenterCrop(image_size))
     ops.append(transforms.ToTensor())
     ops.append(transforms.Normalize(tuple(mean), tuple(std)))
@@ -62,12 +72,26 @@ def build_transform_tinyvit_train(
 ) -> transforms.Compose:
     ops: list = []
     if image_size is not None:
-        ops.append(transforms.RandomResizedCrop(size=image_size, scale=(0.7, 1.0), interpolation=transforms.InterpolationMode.BICUBIC))
+        ops.append(transforms.RandomResizedCrop(
+            size=image_size, 
+            scale=(0.6, 1.0), 
+            interpolation=transforms.InterpolationMode.BICUBIC,
+            antialias=True
+        ))
         ops.append(transforms.RandomHorizontalFlip())
-    ops.append(transforms.RandAugment(num_ops=2, magnitude=9))
+    ops.append(transforms.RandAugment(
+        num_ops=2, 
+        magnitude=9,
+        interpolation=transforms.InterpolationMode.BICUBIC
+    ))
     ops.append(transforms.ToTensor())
     ops.append(transforms.Normalize(tuple(mean), tuple(std)))
-    ops.append(transforms.RandomErasing(p=0.25, value="random"))
+    ops.append(transforms.RandomErasing(
+        p=0.25,
+        scale=(0.02, 0.20),
+        ratio=(0.3, 3.3), 
+        value="random"
+    ))
     return transforms.Compose(ops)
 
 def build_transform_tinyvit_eval(
@@ -77,7 +101,7 @@ def build_transform_tinyvit_eval(
 ) -> transforms.Compose:
     ops: list = []
     if image_size is not None:
-        ops.append(transforms.Resize(size=image_size, interpolation=transforms.InterpolationMode.BICUBIC))
+        ops.append(transforms.Resize(size=256, interpolation=transforms.InterpolationMode.BICUBIC))
     ops.append(transforms.CenterCrop(image_size))
     ops.append(transforms.ToTensor())
     ops.append(transforms.Normalize(tuple(mean), tuple(std)))
