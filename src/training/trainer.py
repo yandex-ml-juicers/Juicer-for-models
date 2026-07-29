@@ -22,7 +22,7 @@ from tqdm import tqdm
 from src.losses.base import DistillationLoss
 from src.models.feature_extractor import FeatureExtractor
 from src.utils.logger import MetricsHistory, get_logger
-from src.utils.metrics import AverageMeter, accuracy, ConfusionMatrixAccumulator
+from src.utils.metrics import AverageMeter, accuracy, ConfusionMatrixAccumulator, count_parameters, build_param_table
 
 log = get_logger(__name__)
 
@@ -90,7 +90,7 @@ class Trainer:
         save_best: bool = True,
         save_last: bool = True,
         progress_bar: bool = True,
-        metrics_callback: Callable[[dict], None] | None = None,
+        metrics_callback: tuple[Callable, Callable, Callable] | None = None,
         scalars: dict[str, float | int | str],
     ) -> None:
         if criterion.requires_teacher and teacher is None:
@@ -119,7 +119,9 @@ class Trainer:
         # Точка стыковки внешнего трекера (ClearML и т.п.): вызывается после
         # каждой эпохи со строкой метрик — той же, что уходит в history.csv.
         # Trainer ничего не знает о трекере, колбэк собирает scripts/train.py.
-        self.metrics_callback = metrics_callback
+        self.metrics_callback_scalar = metrics_callback[0] if metrics_callback is not None else None
+        self.metrics_callback_single = metrics_callback[1] if metrics_callback is not None else None
+        self.metrics_callback_table = metrics_callback[2] if metrics_callback is not None else None
         self.scalars = scalars
         # metrics = {'loss.train_loss': }
         self.train_confmat: ConfusionMatrixAccumulator | None = None
@@ -135,6 +137,9 @@ class Trainer:
         if self.teacher is not None:
             self.teacher.eval()
             self.teacher.requires_grad_(False)
+
+        if self.metrics_callback_table is not None:
+            self.metrics_callback_table(build_param_table(self.student, self.teacher, self.criterion))
 
         criterion_params = list(self.criterion.parameters())
         if criterion_params:
@@ -181,12 +186,9 @@ class Trainer:
                     **{f"train_{key}": value for key, value in other_train_metrics.items()},
                 }
 
-                print('ВСЕ ЗНАЧЕНИЯ = ', all_values)
-
-
                 history.append(all_values)
-                if self.metrics_callback is not None:
-                    self.metrics_callback(all_values)
+                if self.metrics_callback_scalar is not None:
+                    self.metrics_callback_scalar(all_values)
 
                 is_best = eval_acc > best_acc
                 if is_best:
@@ -274,7 +276,6 @@ class Trainer:
                         self.teacher_extractor.features if self.teacher_extractor else None
                     ),
                 )
-            
 
             if self.teacher is not None and teacher_logits is not None:
                 if {"KL_divergence", "agreement_rate"} & set(self.scalars):

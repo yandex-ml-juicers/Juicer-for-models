@@ -31,8 +31,14 @@ def build_transform_train(
     """
     ops: list = []
     if image_size is not None:
-        ops.append(transforms.RandomResizedCrop(image_size))
-        ops.append(transforms.RandomHorizontalFlip())
+        ops.append(transforms.RandomResizedCrop(
+            size=image_size,
+            scale=(0.7, 1.0),
+            ratio=(0.75, 4 / 3),
+            interpolation=transforms.InterpolationMode.BILINEAR,
+            antialias=True,
+        ))
+        ops.append(transforms.RandomHorizontalFlip(p=0.5))
     ops.append(transforms.ToTensor())
     ops.append(transforms.Normalize(tuple(mean), tuple(std)))
     return transforms.Compose(ops)
@@ -49,7 +55,11 @@ def build_transform_eval(
     """
     ops: list = []
     if image_size is not None:
-        ops.append(transforms.Resize(256))
+        ops.append(transforms.Resize(
+            size=256,
+            interpolation=transforms.InterpolationMode.BILINEAR,
+            antialias=True
+        ))
         ops.append(transforms.CenterCrop(image_size))
     ops.append(transforms.ToTensor())
     ops.append(transforms.Normalize(tuple(mean), tuple(std)))

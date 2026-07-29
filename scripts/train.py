@@ -47,7 +47,7 @@ def clearml_reporter(task):
     """
     logger = task.get_logger()
 
-    def report(row: dict, iteration: str = 'epoch') -> None:
+    def report_scalar(row: dict, iteration: str = 'epoch') -> None:
     
         iterate = row[iteration]
         logger.report_scalar(title="loss", series="train", value=row["train_loss_total"], iteration=iterate)
@@ -55,16 +55,17 @@ def clearml_reporter(task):
         logger.report_scalar(title="accuracy", series="train", value=row["train_acc"], iteration=iterate)
         logger.report_scalar(title="accuracy", series="eval", value=row["eval_acc"], iteration=iterate)
         logger.report_scalar(title="lr", series="lr", value=row["lr"], iteration=iterate)
-        logger.report_scalar(title="precision", series="train", value=row["train_precision"], iteration=iterate)
-        logger.report_scalar(title="recall", series="train", value=row["train_recall"], iteration=iterate)
-        logger.report_scalar(title="F1", series="train", value=row["train_F1"], iteration=iterate)
-        logger.report_scalar(title="KL", series="train_KL", value=row["train_KL_divergence"], iteration=iterate)
-        logger.report_scalar(title="agreement_rate", series="train_agreement_rate", value=row["train_agreement_rate"], iteration=iterate)
+        if "train_precision" in row.keys():
+            logger.report_scalar(title="precision", series="train", value=row["train_precision"], iteration=iterate)
+            logger.report_scalar(title="recall", series="train", value=row["train_recall"], iteration=iterate)
+            logger.report_scalar(title="F1", series="train", value=row["train_F1"], iteration=iterate)
+        if "train_KL_divergence" in row.keys():
+            logger.report_scalar(title="KL", series="train_KL", value=row["train_KL_divergence"], iteration=iterate)
+            logger.report_scalar(title="agreement_rate", series="train_agreement_rate", value=row["train_agreement_rate"], iteration=iterate)
         logger.report_scalar(title="grad_norm", series="train_avg_grad_norm", value=row["train_avg_grad_norm"], iteration=iterate)
         logger.report_scalar(title="grad_norm", series="train_max_grad_norm", value=row["train_max_grad_norm"], iteration=iterate)
         logger.report_scalar(title="weight_norm", series="train_avg_weight_norm", value=row["train_avg_weight_norm"], iteration=iterate)
         logger.report_scalar(title="weight_norm", series="train_max_weight_norm", value=row["train_max_weight_norm"], iteration=iterate)
-        
 
         # Компоненты лосса (train_ce, train_kd, train_feature_*) — одним графиком.
         for key, value in row.items():
@@ -73,7 +74,19 @@ def clearml_reporter(task):
                     "loss_components", key.removeprefix("train_"), value, iteration=iterate
                 )
 
-    return report
+    def report_single(single_values: dict):
+        for key, val in single_values.items():
+            task.get_logger().report_single_value(key, val)
+
+    def report_table(df):
+        task.get_logger().report_table(
+        title="parameters",
+        series="param_counts",
+        iteration=0,
+        table_plot=df,
+        )
+
+    return report_scalar, report_single, report_table
 
 
 @hydra.main(config_path="../configs", config_name="config", version_base="1.3")
@@ -97,7 +110,7 @@ def main(cfg: DictConfig) -> float:
 
     # Обучаемые параметры лосса (адаптеры feature-KD) оптимизируются вместе с учеником.
     params = list(student.parameters()) + list(criterion.parameters())
-    optimizer = instantiate(cfg.optimizer)(params)
+    optimizer = instantiate(cfg.optimizer)(params)  
     scheduler = instantiate(cfg.scheduler)(optimizer) if cfg.get("scheduler") is not None else None
 
     trainer = Trainer(

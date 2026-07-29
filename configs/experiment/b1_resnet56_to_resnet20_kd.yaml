@@ -3,7 +3,8 @@
 defaults:
   - override /data/dataset: cifar10
   - override /data/loader: base_loader
-  - override /data/transform: base_transform
+  - override /data/transform/train: base_transform
+  - override /data/transform/eval: base_transform
   - override /model/teacher: resnet56_cifar
   - override /model/student: resnet20_cifar
   - override /loss: hinton_kd
@@ -20,7 +21,7 @@ clearml:
 
 trainer:
   epochs: 20
-  amp: false
+  amp: False
 
 loss:
   temperature: 4.0
