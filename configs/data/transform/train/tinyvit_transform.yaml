@@ -1,0 +1,4 @@
+_target_: src.data.transforms.build_transform_tinyvit_train
+mean: ${data.dataset.normalize.mean}
+std: ${data.dataset.normalize.std}
+image_size: ${data.dataset.image_size}
