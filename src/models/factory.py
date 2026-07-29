@@ -9,7 +9,7 @@ import timm
 import torch
 from torch import nn
 from torchvision import models as tv_models
-
+from torchvision.models import get_model
 from hydra.utils import to_absolute_path
 from pathlib import Path
 
@@ -199,6 +199,7 @@ def tinyvit(
         }
 
         model.load_state_dict(state_dict, strict=True)
+    return model
 
         print(f"!!!weights has been loaded!!! {checkpoint_path}")
 
@@ -210,6 +211,16 @@ def shufflenet_v2_x1_0(num_classes: int = 100) -> nn.Module:
         pretrained=False
     )
 
+def imagenet_teacher(name: str, checkpoint_path: str, num_classes: int = 100):
+    '''эту функцию надо напистаь нормально и переименовать '''
+    model = get_model(name, num_classes=num_classes)
+    ckpt = torch.load(checkpoint_path, map_location="cpu")
+    state_dict = ckpt["student_state"] if "student_state" in ckpt else ckpt.get("state_dict", ckpt)
+    clean_dict = {k.replace("model.", ""): v for k, v in state_dict.items()}
+    model.load_state_dict(clean_dict)
+    model.eval()
+    return model
+  
 def shufflenet_v2_x0_5(num_classes: int = 100, checkpoint_path: str | None = None) -> nn.Module:
     model = tv_models.shufflenet_v2_x0_5(
         weights=None,
