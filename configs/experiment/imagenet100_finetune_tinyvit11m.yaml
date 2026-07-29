@@ -1,8 +1,8 @@
 # @package _global_
 defaults:
   - override /data/dataset: imagenet100
-  - override /data/transform/train: tinyvit_transform
-  - override /data/transform/eval: tinyvit_transform
+  - override /data/transform/train: imagenet_transform
+  - override /data/transform/eval: imagenet_transform
   - override /model/teacher: null
   - override /model/student: tiny_vit
   - override /loss: ce
@@ -19,11 +19,11 @@ clearml:
   output_uri: false
 
 trainer:
-  epochs: 30
+  epochs: 15
   amp: true
 
 optimizer:
-  lr: 5.0e-5
+  lr: 1.0e-5
   weight_decay: 0.05
   fused: true
 
@@ -45,7 +45,7 @@ data:
 
 model:
   student:
-    model_name: tiny_vit_11m_224
+    model_name: tiny_vit_11m_224.in1k
     pretrained: true
     drop_path_rate: 0.0
     drop_rate: 0.0
