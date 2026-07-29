@@ -19,7 +19,7 @@ clearml:
   output_uri: false
 
 trainer:
-  epochs: 30
+  epochs: 15
   amp: true
 
 optimizer:
@@ -45,7 +45,7 @@ data:
 
 model:
   student:
-    model_name: tiny_vit_21m_224
+    model_name: tiny_vit_21m_224.in1k
     pretrained: true
-    drop_path_rate: 1.0
+    drop_path_rate: 0.0
     drop_rate: 0.0
