@@ -4,7 +4,7 @@ defaults:
   - override /model/teacher: ViT21m
   - override /model/student: resnet152_imagenet
   - override /loss: hinton_kd
-  - override /optimizer: adam
+  - override /optimizer: adamw
   - override /scheduler: warmup_cosine
 
 name: imagenet100_vanila-KD_ViT21m_to_resnet152
@@ -15,13 +15,15 @@ clearml:
   enabled: True
   tags: [imagenet-100, ViT21m, resnet152]
   reuse_last_task_id: True
+
 trainer:
-  epochs: 100
+  epochs: 60
   amp: true
+  grad_clip_norm: 1.0
   save_last: False
 
 optimizer:
-  lr: 0.4
+  lr: 1e-3
   weight_decay: 1e-4
 
 scheduler:
@@ -32,6 +34,6 @@ scheduler:
 
 data:
   loader:
-    batch_size: 756
+    batch_size: 732
     num_workers: 32
     persistent_workers: true

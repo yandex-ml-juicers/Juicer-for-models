@@ -4,7 +4,7 @@
     - override /model/teacher: resnet152_imagenet_pretrained
     - override /model/student: ViT21m
     - override /loss: hinton_kd
-    - override /optimizer: adam
+    - override /optimizer: adamw
     - override /scheduler: warmup_cosine
 
   name: imagenet100_vanila-KD_resnet152_to_ViT21m
@@ -17,13 +17,14 @@
     reuse_last_task_id: True
 
   trainer:
-    epochs: 100
+    epochs: 60
     amp: true
+    grad_clip_norm: 1.0
     save_last: False
 
   optimizer:
-    lr: 0.4
-    weight_decay: 1e-4
+    lr: 1e-3
+    weight_decay: 0.05
 
   scheduler:
     warmup_epochs: 10
@@ -33,6 +34,6 @@
 
   data:
     loader:
-      batch_size: 756
+      batch_size: 732
       num_workers: 32
       persistent_workers: true
