@@ -21,7 +21,7 @@ clearml:
 
 trainer:
   epochs: 20
-  amp: false
+  amp: False
 
 loss:
   temperature: 4.0
