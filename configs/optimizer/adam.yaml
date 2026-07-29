@@ -1,0 +1,5 @@
+# _partial_: у optimizer'а есть обязательный рантайм-аргумент (params),
+# поэтому instantiate возвращает functools.partial, а params подставляет train.py.
+_target_: torch.optim.Adam
+_partial_: true
+lr: 1.0e-3

@@ -1,0 +1,50 @@
+defaults:
+  - _self_
+  - data/dataset: cifar10
+  - data/loader: base_loader
+  - data/transform/train: base_transform
+  - data/transform/eval: base_transform
+  - model/teacher: resnet56_cifar
+  - model/student: resnet20_cifar
+  - loss: hinton_kd
+  - optimizer: adam
+  - scheduler: cosine
+  - trainer: default
+  - experiment: null
+
+name: default # имя таски
+
+# Воспроизводимость
+seed: 42
+deterministic: true
+# если нет детерменированной реализации при false ловим ошибку, при true запускаемся
+deterministic_warn_only: false # лучше держать false
+
+device: auto  # auto | cuda | cuda:N | cpu
+
+ckpt_path: null
+
+# Трекинг в ClearML
+# Выключен по умолчанию, чтобы тесты работали оффлайн
+clearml:
+  enabled: False
+  project: Juicer-for-models # проект
+  tags: []  # теги для фильтрации экспериментов
+  scalars: ['f1', 'KL_divergence'] # какие скаляры логировать (график_скаляр_итератор)
+  # сейчас всё логируется
+  plots: [] # какие графики логировать
+  reuse_last_task_id: False # перезаписывать ли таску с таким же именем
+  continue_last_task: False # подхватывать ли предыдущий ID и продолжать логирование
+  output_uri: True # складывать ли артефакты/модели и если не куда-то базово, то url
+  auto_connect_frameworks: {"pytorch": False,} # авто-перехват фреймворков
+  auto_connect_arg_parser: False # авто-перехват аргументов из argparse
+
+# Логи Hydra
+hydra:
+  run:
+    dir: outputs/${name}/${now:%Y-%m-%d_%H-%M-%S}
+  sweep:
+    dir: multirun/${name}/${now:%Y-%m-%d_%H-%M-%S}
+    subdir: ${hydra.job.num}
+  job:
+    chdir: True # входные пути всегда от корня репо, выходные по явно запрошенному output_dir

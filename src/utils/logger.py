@@ -1,0 +1,42 @@
+"""Примитивное логирование: stdout + history.csv в директорию запуска.
+
+Намеренно без внешних трекеров (W&B/ClearML/MLflow): интеграция трекера —
+отдельная зона ответственности. Точка стыковки — MetricsHistory.append():
+трекер надо будет позвать ровно в этом месте.
+"""
+
+import csv
+import logging
+from pathlib import Path
+
+
+def get_logger(name: str) -> logging.Logger:
+    """Логгер модуля. Под Hydra хендлеры уже настроены (консоль + файл в run-dir)."""
+    return logging.getLogger(name)
+
+
+class MetricsHistory:
+    """Накапливает по строке метрик на эпоху и переписывает CSV после каждой.
+
+    Перезапись целиком (а не append) делает файл валидным даже при падении
+    посреди обучения и позволяет столбцам появляться в любой момент.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.path = Path(path)
+        self.rows: list[dict] = []
+
+    def append(self, row: dict) -> None:
+        self.rows.append(dict(row))
+        self._flush()
+
+    def _flush(self) -> None:
+        fieldnames: list[str] = []
+        for row in self.rows:
+            for key in row:
+                if key not in fieldnames:
+                    fieldnames.append(key)
+        with self.path.open("w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(self.rows)

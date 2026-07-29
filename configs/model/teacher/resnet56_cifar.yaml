@@ -1,0 +1,5 @@
+# Учитель бейзлайна 1: ResNet-56, предобученный на CIFAR-10 (~94% acc, 0.85M параметров).
+_target_: src.models.factory.from_torch_hub
+repo: chenyaofo/pytorch-cifar-models
+name: cifar10_resnet56
+pretrained: true

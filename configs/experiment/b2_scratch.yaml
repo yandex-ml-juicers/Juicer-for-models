@@ -1,0 +1,31 @@
+# @package _global_
+# Контрольная точка бейзлайна 2: ResNet-18 (32x32) с нуля, без учителя.
+defaults:
+  - override /data/dataset: cifar10
+  - override /data/loader: base_loader
+  - override /data/transform/train: base_transform
+  - override /data/transform/eval: base_transform
+  - override /model/teacher: null
+  - override /model/student: resnet18_cifar32
+  - override /loss: ce
+  - override /optimizer: adamw
+  - override /scheduler: cosine
+
+name: b2_resnet18_scratch
+
+clearml:
+  tags: [baseline, scratch, b2]
+
+trainer:
+  epochs: 10
+  amp: true
+
+optimizer:
+  lr: 1.0e-3
+  weight_decay: 1.0e-4
+
+data:
+  loader:
+    batch_size: 256
+    num_workers: 2
+    persistent_workers: true

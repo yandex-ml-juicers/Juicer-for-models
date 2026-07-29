@@ -1,0 +1,18 @@
+build:
+  _target_: src.data.datasets.imagenet
+  root: data/raw
+  repo_path: ILSVRC/imagenet-1k
+  download: true
+
+num_classes: 1000
+image_size: 224
+
+normalize:
+  mean: [0.485, 0.456, 0.406]
+  std: [0.229, 0.224, 0.225]
+
+loader:
+  batch_size: 512
+  num_workers: 32
+  pin_memory: true
+  persistent_workers: true

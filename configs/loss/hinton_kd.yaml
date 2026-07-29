@@ -1,0 +1,4 @@
+# Ванильная дистилляция Хинтона: (1-alpha)*loss_hard() + alpha*T^2*loss_soft().
+_target_: src.losses.HintonKD
+temperature: 4.0
+alpha: 0.9
