@@ -1,0 +1,47 @@
+# @package _global_
+defaults:
+  - override /data/dataset: imagenet100
+  - override /model/teacher: torchvision_model_for_classification
+  - override /model/student: torchvision_model_for_classification
+  - override /loss: hinton_kd
+  - override /optimizer: SGD
+  - override /scheduler: warmup_cosine
+
+name: imagenet100_ESKD_resnet50_to_resnet18
+device: cuda
+deterministic: false
+
+clearml:
+  enabled: True
+  tags: [imagenet-100, ESKD, 80_epochs, resnet50, resnet18]
+
+trainer:
+  epochs: 100
+  amp: true
+
+optimizer:
+  lr: 0.2
+  weight_decay: 1e-4
+
+scheduler:
+  warmup_epochs: 10
+  start_factor: 0.01
+  end_factor: 1.0
+  eta_min: 0.0586
+
+loss:
+  temperature: 4.0
+  alpha: 0.9
+
+data:
+  loader:
+    batch_size: 256
+    num_workers: 16
+    persistent_workers: true
+
+model:
+  teacher:
+    model_name: resnet50
+    checkpoint_path: data/weights/resnet50_imagenet100_scratch/checkpoint_80_epochs.pt
+  student:
+    model_name: resnet18

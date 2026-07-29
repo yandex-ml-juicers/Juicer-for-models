@@ -1,3 +1,0 @@
-_target_: src.models.factory.tinyvit
-model_name: tiny_vit_5m_224
-num_classes: ${data.dataset.num_classes}
