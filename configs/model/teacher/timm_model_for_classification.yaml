@@ -1,0 +1,3 @@
+_target_: src.models.factory.timm_model_for_classification
+model_name: tiny_vit_5m_224
+num_classes: 100

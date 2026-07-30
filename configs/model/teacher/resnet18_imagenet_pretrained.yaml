@@ -1,4 +1,0 @@
-_target_: src.models.factory.imagenet_teacher
-name: resnet18
-num_classes: 100
-checkpoint_path: ${ckpt_path}

@@ -1,3 +1,0 @@
-_target_: src.models.factory.imagenet_resnet152_pretrained
-num_classes: ${data.dataset.num_classes}
-checkpoint_path: null

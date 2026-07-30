@@ -1,0 +1,46 @@
+# @package _global_
+defaults:
+  - override /data/dataset: imagenet1k
+  - override /data/loader: base_loader
+  - override /data/transform/train: base_transform
+  - override /data/transform/eval: base_transform
+  - override /model/teacher: null
+  - override /model/student: torchvision_model_for_classification
+  - override /loss: ce
+  - override /optimizer: adamw
+  - override /scheduler: warmup_cosine
+
+name: imagenet1k_scratch_resnet18
+device: cuda
+deterministic: false
+
+clearml:
+  enabled: False
+  tags: [imagenet-1k, baseline, scratch, resnet18]
+
+trainer:
+  epochs: 20
+  amp: true
+
+optimizer:
+  lr: 1.0e-4
+  weight_decay: 0.02
+
+scheduler:
+  warmup_epochs: 5
+  start_factor: 0.01
+  end_factor: 1.0
+  eta_min: 1.0e-6
+
+loss:
+  label_smoothing: 0.1
+
+data:
+  loader:
+    batch_size: 1024
+    num_workers: 16
+    persistent_workers: true
+
+model:
+  student:
+    model_name: resnet18
