@@ -13,10 +13,12 @@ from collections.abc import Callable
 from pathlib import Path
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 from torch.utils.data import DataLoader
 from torch.amp.grad_scaler import GradScaler
-import torch.nn.functional as F
+from torchmetrics.detection.mean_ap import MeanAveragePrecision
+
 from tqdm import tqdm
 
 from src.losses.base import DistillationLoss
@@ -352,6 +354,393 @@ class Trainer:
             "criterion_state": self.criterion.state_dict(),
             "optimizer_state": self.optimizer.state_dict(),
             "scheduler_state": self.scheduler.state_dict() if self.scheduler else None,
+            "scaler_state": self.scaler.state_dict(),
+        }
+        torch.save(checkpoint, self.output_dir / filename)
+
+
+@torch.no_grad()
+def detection_evaluate(
+    model: nn.Module,
+    criterion: nn.Module,
+    loader: DataLoader,
+    device: torch.device,
+    prediction_postprocessor: Callable | None = None,
+    label_offset: int = 1,
+    limit_batches: int | None = None,
+) -> tuple[float, float]:
+    was_training = model.training
+    was_criterion_training = criterion.training
+
+    model.eval()
+    criterion.eval()
+
+    loss_meter = AverageMeter()
+    metric = MeanAveragePrecision(box_format="xyxy", iou_type="bbox")
+
+    for step, (images, labels) in enumerate(loader):
+        if limit_batches is not None and step >= limit_batches:
+            break
+
+        images = [image.to(device, non_blocking=True) for image in images]
+        targets_device = [
+            {
+                key: value.to(device, non_blocking=True)
+                if isinstance(value, Tensor)
+                else value
+                for key, value in target.items()
+            }
+            for target in targets
+        ]
+
+        outputs = model(images)
+        losses = criterion(outputs, targets_device)
+
+        batch_size = len(images)
+        loss_meter.update(losses["total"].item(), batch_size)
+
+        if prediction_postprocessor is not None:
+            predictions = prediction_postprocessor(
+                outputs,
+                images,
+            )
+        else:
+            predictions = outputs
+
+        predictions_for_metric = []
+        targets_for_metric = []
+
+        for prediction, target in zip(predictions, targets):
+            predictions_for_metric.append({
+                "boxes": prediction["boxes"].detach().cpu(),
+                "scores": prediction["scores"].detach().cpu(),
+                "labels": (
+                    prediction["labels"].detach().cpu()
+                    - label_offset
+                ),
+            })
+
+            metric_target = {
+                "boxes": target["boxes"].detach().cpu(),
+                "labels": (
+                    target["labels"].detach().cpu()
+                    - label_offset
+                ),
+            }
+
+            if "area" in target:
+                metric_target["area"] = (target["area"].detach().cpu())
+
+            targets_for_metric.append(metric_target)
+
+        metric.update(
+            predictions_for_metric,
+            targets_for_metric,
+        )
+
+    computed_metrics = metric.compute()
+
+    metrics = {
+        "map": computed_metrics["map"].item(),
+        "map_50": computed_metrics["map_50"].item(),
+        "map_75": computed_metrics["map_75"].item(),
+        "mar_100": computed_metrics["mar_100"].item(),
+    }
+
+    if was_model_training:
+        model.train()
+
+    if was_criterion_training:
+        criterion.train()
+
+    return loss_meter.avg, metrics
+
+class DetectionTrainer:
+    def __init__(
+        self,
+        *,
+        student: nn.Module,
+        teacher: nn.Module | None,
+        criterion: DistillationLoss,
+        optimizer: torch.optim.Optimizer,
+        scheduler: torch.optim.lr_scheduler.LRScheduler | None,
+        train_loader: DataLoader,
+        eval_loader: DataLoader,
+        num_classes: int,
+        device: torch.device,
+        output_dir: Path,
+        epochs: int,
+        amp: bool = False,
+        grad_clip_norm: float | None = None,
+        limit_train_batches: int | None = None,
+        limit_eval_batches: int | None = None,
+        save_best: bool = True,
+        save_last: bool = True,
+        progress_bar: bool = True,
+        metrics_callback: tuple[Callable, Callable, Callable] | None = None,
+        scalars: dict[str, float | int | str],
+        prediction_postprocessor: PredictionPostprocessor | None = None,
+    ) -> None:
+
+        if criterion.requires_teacher and teacher is None:
+            raise ValueError(
+                f"Лосс {type(criterion).__name__} требует учителя, но model/teacher=null. "
+            )
+
+        self.prediction_postprocessor = prediction_postprocessor
+
+        self.student = student
+        self.teacher = teacher
+        self.criterion = criterion
+        self.optimizer = optimizer
+        self.scheduler = scheduler
+        self.train_loader = train_loader
+        self.eval_loader = eval_loader
+        self.num_classes = num_classes
+        self.device = device
+        self.output_dir = Path(output_dir)
+        self.epochs = epochs
+        self.grad_clip_norm = grad_clip_norm
+        self.limit_train_batches = limit_train_batches
+        self.limit_eval_batches = limit_eval_batches
+        self.save_best = save_best
+        self.save_last = save_last
+        self.progress_bar = progress_bar
+        # Точка стыковки внешнего трекера (ClearML и т.п.): вызывается после
+        # каждой эпохи со строкой метрик — той же, что уходит в history.csv.
+        # Trainer ничего не знает о трекере, колбэк собирает scripts/train.py.
+        self.metrics_callback_scalar = metrics_callback[0] if metrics_callback is not None else None
+        self.metrics_callback_single = metrics_callback[1] if metrics_callback is not None else None
+        self.metrics_callback_table = metrics_callback[2] if metrics_callback is not None else None
+        self.scalars = scalars
+
+        self.amp_enabled = amp and device.type == "cuda"
+        self.scaler = GradScaler(device.type, enabled=self.amp_enabled)
+
+        self.student.to(self.device)
+        self.criterion.to(self.device)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+
+        if self.teacher is not None:
+            self.teacher.to(self.device)
+            self.teacher.eval()
+            self.teacher.requires_grad_(False)
+
+        if self.metrics_callback_table is not None:
+            self.metrics_callback_table(build_param_table(self.student, self.teacher, self.criterion))
+
+        criterion_params = list(self.criterion.parameters())
+        if criterion_params:
+            optimizer_params = {id(p) for group in optimizer.param_groups for p in group["params"]}
+            missing = [p for p in criterion_params if id(p) not in optimizer_params]
+            if missing:
+                raise ValueError(
+                    "У лосса есть обучаемые параметры (адаптеры), не попавшие в optimizer. "
+                    "Optimizer должен собираться из student.parameters() + criterion.parameters()."
+                )
+
+        self.student_extractor: FeatureExtractor | None = None
+        self.teacher_extractor: FeatureExtractor | None = None
+        if criterion.required_features:
+            layers = list(criterion.required_features)
+            self.student_extractor = FeatureExtractor(self.student, layers)
+            if self.teacher is not None:
+                self.teacher_extractor = FeatureExtractor(self.teacher, layers)
+
+    def fit(self) -> dict:
+        history = MetricsHistory(self.output_dir / "history.csv")
+        best_acc, best_epoch = 0.0, 0
+
+        try:
+            for epoch in range(1, self.epochs + 1):
+                start = time.time()
+                lr = self.optimizer.param_groups[0]["lr"]
+
+                train_loss_components, other_train_metrics = self._train_epoch(epoch)
+                eval_loss, eval_metrics = detection_evaluate(
+                    self.student,
+                    self.criterion, 
+                    self.eval_loader, 
+                    self.device,
+                    self.prediction_postprocessor
+                    limit_batches=self.limit_eval_batches
+                )
+
+                if self.scheduler is not None:
+                    self.scheduler.step()
+
+                all_values = {
+                    "epoch": epoch,
+                    "lr": lr,
+                    "eval_loss": eval_loss,
+                    "eval_map": eval_metrics["map"],
+                    "eval_map_50": eval_metrics["map_50"],
+                    "eval_map_75": eval_metrics["map_75"],
+                    "eval_mar_100": eval_metrics["mar_100"],
+                    "time_epoch": round(time.time() - start, 1),
+                    **{
+                        f"train_loss_{key}": value
+                        for key, value in train_loss_components.items()
+                    },
+                    **{
+                        f"train_{key}": value 
+                        for key, value in other_train_metrics.items()
+                    },
+                }
+
+                history.append(all_values)
+                if self.metrics_callback_scalar is not None:
+                    self.metrics_callback_scalar(all_values)
+
+                is_best = eval_metrics["map"] > best_map
+                if is_best:
+                    best_map = eval_metrics["map"]
+                    best_epoch = epoch
+                    if self.save_best:
+                        self._save_checkpoint("best.pt", epoch, best_map)
+                if self.save_last:
+                    self._save_checkpoint("last.pt", epoch, best_map)
+
+                log.info(
+                    "Эпоха %02d/%d | lr=%.6f | "
+                    "train loss=%.4f | eval loss=%.4f | "
+                    "mAP=%.4f | mAP@50=%.4f | mAP@75=%.4f%s | %.1f c",
+                    epoch,
+                    self.epochs,
+                    lr,
+                    train_loss_components["total"],
+                    eval_loss,
+                    eval_metrics["map"],
+                    eval_metrics["map_50"],
+                    eval_metrics["map_75"],
+                    " *" if is_best else "",
+                    all_values["time_epoch"],
+                )
+        
+        finally:
+            if self.student_extractor is not None:
+                self.student_extractor.remove()
+            if self.teacher_extractor is not None:
+                self.teacher_extractor.remove()
+
+        log.info("Лучший mAP: %.4f (эпоха %d)", best_map, best_epoch)
+        return {"best_map": best_map, "best_epoch": best_epoch}
+
+    def _train_epoch(self, epoch: int) -> tuple:
+        self.student.train()
+        self.criterion.train()
+
+        max_grad_norm = -1.0
+        max_weight_norm = -1.0
+
+        meters_avg: dict[str, AverageMeter] = defaultdict(AverageMeter)
+        meters_avg_loss: dict[str, AverageMeter] = defaultdict(AverageMeter)
+
+        iterator = tqdm(
+            self.train_loader,
+            desc=f"Эпоха {epoch}/{self.epochs}",
+            disable=not self.progress_bar,
+            leave=False,
+        )
+
+        for step, (images, targets) in enumerate(iterator):
+            if self.limit_train_batches is not None and step >= self.limit_train_batches:
+                iterator.close()
+                break
+
+            images = [image.to(self.device, non_blocking=True) for image in images]
+            targets = self._prepare_targets(targets)
+            batch_size = len(images)
+
+            self.optimizer.zero_grad(set_to_none=True)
+            if self.student_extractor is not None:
+                self.student_extractor.clear()
+            if self.teacher_extractor is not None:
+                self.teacher_extractor.clear()
+
+            teacher_outputs = None
+            if self.teacher is not None:
+                with torch.no_grad(), torch.autocast(self.device.type, enabled=self.amp_enabled):
+                    teacher_outputs = self.teacher(images)
+
+            with torch.autocast(self.device.type, enabled=self.amp_enabled):
+                student_outputs = self.student(images)
+                losses = self.criterion(
+                    student_outputs,
+                    teacher_outputs,
+                    targets,
+                    student_features=(
+                        self.student_extractor.features if self.student_extractor else None
+                    ),
+                    teacher_features=(
+                        self.teacher_extractor.features if self.teacher_extractor else None
+                    ),
+                )
+
+            self.scaler.scale(losses["total"]).backward()
+            self.scaler.unscale_(self.optimizer)
+
+            params = [p for group in self.optimizer.param_groups for p in group["params"]]
+            clip_threshold = self.grad_clip_norm if self.grad_clip_norm is not None else float("inf") 
+            grad_norm = torch.nn.utils.clip_grad_norm_(params, clip_threshold)
+
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+
+            grad_norm_value = float(grad_norm)
+            meters_avg["avg_grad_norm"].update(grad_norm_value, n=1)
+            max_grad_norm = max(max_grad_norm, grad_norm_value)
+
+            with torch.no_grad():
+                weight_norm = torch.norm(torch.stack([p.detach().norm() for p in params]))
+            weight_norm_value = float(weight_norm)
+            meters_avg["avg_weight_norm"].update(weight_norm_value, n=1)
+            max_weight_norm = max(max_weight_norm, weight_norm_value)
+
+            for key, value in losses.items():
+                meters_avg_loss[key].update(value.item(), batch_size)
+
+            iterator.set_postfix({"loss": f"{losses['total'].item():.3f}"})
+
+            train_loss_components = {key: meter.avg for key, meter in meters_avg_loss.items()}
+            meters_other["max_grad_norm"] = max_grad_norm
+            meters_other["max_weight_norm"] = max_weight_norm
+
+            return train_loss_components, other_train_metrics
+
+    def _prepare_targets(
+        self,
+        targets: Sequence[DetectionTarget],
+    ) -> list[DetectionTarget]:
+        return [
+            {
+                key: (
+                    value.to(self.device, non_blocking=True)
+                    if isinstance(value, Tensor)
+                    else value
+                )
+                for key, value in target.items()
+            }
+            for target in targets
+        ]
+
+    def _save_checkpoint(
+        self,
+        filename: str,
+        epoch: int,
+        best_map: float,
+    ) -> None:
+        checkpoint = {
+            "epoch": epoch,
+            "best_map": best_map,
+            "student_state": self.student.state_dict(),
+            "criterion_state": self.criterion.state_dict(),
+            "optimizer_state": self.optimizer.state_dict(),
+            "scheduler_state": (
+                self.scheduler.state_dict()
+                if self.scheduler is not None
+                else None
+            ),
             "scaler_state": self.scaler.state_dict(),
         }
         torch.save(checkpoint, self.output_dir / filename)

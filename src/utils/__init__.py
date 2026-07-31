@@ -12,4 +12,5 @@ __all__ = [
     "resolve_device",
     "seed_everything",
     "seed_worker",
+    "prediction_postprocessor"
 ]

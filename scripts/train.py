@@ -13,8 +13,8 @@ from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
 
 from src.data import base_loader
-from src.training import Trainer
-from src.utils import resolve_device, seed_everything
+from src.training import Trainer, DetectionTrainer
+from src.utils import resolve_device, seed_everything, prediction_postprocessor
 
 log = logging.getLogger(__name__)
 
@@ -52,8 +52,9 @@ def clearml_reporter(task):
         iterate = row[iteration]
         logger.report_scalar(title="loss", series="train", value=row["train_loss_total"], iteration=iterate)
         logger.report_scalar(title="loss", series="eval", value=row["eval_loss"], iteration=iterate)
-        logger.report_scalar(title="accuracy", series="train", value=row["train_acc"], iteration=iterate)
-        logger.report_scalar(title="accuracy", series="eval", value=row["eval_acc"], iteration=iterate)
+        if "accuracy" in row.keys():
+            logger.report_scalar(title="accuracy", series="train", value=row["train_acc"], iteration=iterate)
+            logger.report_scalar(title="accuracy", series="eval", value=row["eval_acc"], iteration=iterate)
         logger.report_scalar(title="lr", series="lr", value=row["lr"], iteration=iterate)
         if "train_precision" in row.keys():
             logger.report_scalar(title="precision", series="train", value=row["train_precision"], iteration=iterate)
@@ -80,10 +81,10 @@ def clearml_reporter(task):
 
     def report_table(df):
         task.get_logger().report_table(
-        title="parameters",
-        series="param_counts",
-        iteration=0,
-        table_plot=df,
+            title="parameters",
+            series="param_counts",
+            iteration=0,
+            table_plot=df,
         )
 
     return report_scalar, report_single, report_table
@@ -113,21 +114,39 @@ def main(cfg: DictConfig) -> float:
     optimizer = instantiate(cfg.optimizer)(params)  
     scheduler = instantiate(cfg.scheduler)(optimizer) if cfg.get("scheduler") is not None else None
 
-    trainer = Trainer(
-        student=student,
-        teacher=teacher,
-        criterion=criterion,
-        optimizer=optimizer,
-        scheduler=scheduler,
-        train_loader=train_loader,
-        eval_loader=eval_loader,
-        device=device,
-        output_dir=output_dir,
-        metrics_callback=clearml_reporter(task) if task is not None else None,
-        num_classes=cfg.data.dataset.num_classes,
-        scalars=cfg.clearml.scalars,
-        **cfg.trainer,
-    )
+    if task_type == "classification"
+        trainer = Trainer(
+            student=student,
+            teacher=teacher,
+            criterion=criterion,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            train_loader=train_loader,
+            eval_loader=eval_loader,
+            device=device,
+            output_dir=output_dir,
+            metrics_callback=clearml_reporter(task) if task is not None else None,
+            num_classes=cfg.data.dataset.num_classes,
+            scalars=cfg.clearml.scalars,
+            **cfg.trainer,
+        )
+    elif task_type == "detection":
+        trainer = DetectionTrainer(
+            student=student,
+            teacher=teacher,
+            criterion=criterion,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            train_loader=train_loader,
+            eval_loader=eval_loader,
+            device=device,
+            output_dir=output_dir,
+            metrics_callback=clearml_reporter(task) if task is not None else None,
+            num_classes=cfg.data.dataset.num_classes,
+            scalars=cfg.clearml.scalars,
+            prediction_postprocessor=prediction_postprocessor
+            **cfg.trainer,
+        )
     result = trainer.fit()
 
     if task is not None:
