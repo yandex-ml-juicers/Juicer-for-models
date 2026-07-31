@@ -193,7 +193,7 @@ def main(cfg: DictConfig) -> float:
 
     # Возврат метрики делает скрипт совместимым с hydra-свиперами
     # (optuna и т.п. максимизируют возвращаемое значение).
-    return result["best_acc"]
+    return result
 
 
 if __name__ == "__main__":
