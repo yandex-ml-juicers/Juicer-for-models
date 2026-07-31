@@ -177,8 +177,8 @@ def cityscapes(
 ) -> Dataset:
     """Create a Cityscapes detection dataset."""
 
-    root = Path(root)
-    annotation_dir = Path(annotation_dir)
+    root = Path(to_absolute_path(root))
+    annotation_dir = Path(to_absolute_path(annotation_dir))
 
     if train:
         image_dir = root / "train"

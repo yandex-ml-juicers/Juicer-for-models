@@ -2,9 +2,12 @@ build:
   _target_: src.data.datasets.cityscapes
   root: data/raw/cityscapes/leftImg8bit
   annotation_dir: data/raw/cityscapes/annotations
+  label_offset: 1
 
 num_classes: 8
 image_size: [1024, 2048]
+
+targets_format_mode: null
 
 normalize:
   mean: [0.485, 0.456, 0.406]
