@@ -7,7 +7,7 @@ from src.data.transforms import base_transform
 from src.utils.seed import make_generator, seed_worker
 
 
-def base_loader(cfg: DictConfig, seed: int) -> tuple[DataLoader, DataLoader]:
+def base_loader(cfg: DictConfig, task_type: str, seed: int) -> tuple[DataLoader, DataLoader]:
     """Возвращает (train_loader, eval_loader)."""
     train_transform = instantiate(cfg.transform.train)
     eval_transform = instantiate(cfg.transform.eval)
@@ -24,7 +24,7 @@ def base_loader(cfg: DictConfig, seed: int) -> tuple[DataLoader, DataLoader]:
         worker_init_fn=seed_worker,
     )
 
-    if cfg.task_type == "detection":
+    if task_type == "detection":
         common["collate_fn"] = detection_collate_fn
 
     train_loader = DataLoader(
