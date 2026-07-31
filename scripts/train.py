@@ -68,6 +68,37 @@ def clearml_reporter(task):
         logger.report_scalar(title="weight_norm", series="train_avg_weight_norm", value=row["train_avg_weight_norm"], iteration=iterate)
         logger.report_scalar(title="weight_norm", series="train_max_weight_norm", value=row["train_max_weight_norm"], iteration=iterate)
 
+        for key, value in row.items():
+            if (
+                key.startswith("train_loss_")
+                and key != "train_loss_total"
+            ):
+                series_name = key.removeprefix("train_loss_")
+
+                logger.report_scalar(
+                    title="detection_loss",
+                    series=series_name,
+                    value=value,
+                    iteration=iterate,
+                )
+
+        # Метрики детекции
+        detection_metrics = {
+            "eval_map": "mAP",
+            "eval_map_50": "mAP@50",
+            "eval_map_75": "mAP@75",
+            "eval_mar_100": "mAR@100",
+        }
+
+        for key, series_name in detection_metrics.items():
+            if key in row:
+                logger.report_scalar(
+                    title="detection_metrics",
+                    series=series_name,
+                    value=row[key],
+                    iteration=iterate,
+                )
+
         # Компоненты лосса (train_ce, train_kd, train_feature_*) — одним графиком.
         for key, value in row.items():
             if key.startswith("train_loss"):
@@ -101,7 +132,7 @@ def main(cfg: DictConfig) -> float:
     seed_everything(cfg.seed, deterministic=cfg.deterministic, warn_only=cfg.deterministic_warn_only)
     device = resolve_device(cfg.device)
 
-    train_loader, eval_loader = base_loader(cfg.data, seed=cfg.seed)
+    train_loader, eval_loader = base_loader(cfg.data, cfg.task_type, seed=cfg.seed)
 
     student = instantiate(cfg.model.student).to(device)
     teacher = None
@@ -114,7 +145,7 @@ def main(cfg: DictConfig) -> float:
     optimizer = instantiate(cfg.optimizer)(params)  
     scheduler = instantiate(cfg.scheduler)(optimizer) if cfg.get("scheduler") is not None else None
 
-    if task_type == "classification"
+    if cfg.task_type == "classification":
         trainer = Trainer(
             student=student,
             teacher=teacher,
@@ -130,7 +161,7 @@ def main(cfg: DictConfig) -> float:
             scalars=cfg.clearml.scalars,
             **cfg.trainer,
         )
-    elif task_type == "detection":
+    elif cfg.task_type == "detection":
         trainer = DetectionTrainer(
             student=student,
             teacher=teacher,
@@ -144,7 +175,9 @@ def main(cfg: DictConfig) -> float:
             metrics_callback=clearml_reporter(task) if task is not None else None,
             num_classes=cfg.data.dataset.num_classes,
             scalars=cfg.clearml.scalars,
-            prediction_postprocessor=prediction_postprocessor
+            prediction_postprocessor=prediction_postprocessor,
+            label_offset=cfg.data.dataset.build.label_offset,
+            targers_mode=cfg.data.dataset.targets_format_mode,
             **cfg.trainer,
         )
     result = trainer.fit()

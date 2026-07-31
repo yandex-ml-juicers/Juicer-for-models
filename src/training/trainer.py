@@ -9,15 +9,16 @@
 
 import time
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 import torch
 import torch.nn.functional as F
-from torch import nn
+from torch import Tensor, nn
 from torch.utils.data import DataLoader
 from torch.amp.grad_scaler import GradScaler
 from torchmetrics.detection.mean_ap import MeanAveragePrecision
+from torchvision.ops import box_convert
 
 from tqdm import tqdm
 
@@ -359,6 +360,50 @@ class Trainer:
         torch.save(checkpoint, self.output_dir / filename)
 
 
+def prepare_targets(
+    targets: Sequence[dict],
+    device: torch.device | str,
+    mode: str,
+) -> list[dict]:
+    if mode == "lw-detr-small":
+        prepared_targets = []
+
+        for target in targets:
+            class_labels = target["labels"].to(device=device, dtype=torch.long, non_blocking=True)
+            boxes = target["boxes"].to(device=device, dtype=torch.float32, non_blocking=True)
+
+            size = target["size"].to(device=device, dtype=torch.float32, non_blocking=True)
+            height, width = size.unbind()
+
+            boxes = box_convert(boxes, in_fmt="xyxy", out_fmt="cxcywh")
+            scale = torch.stack([width, height, width, height])
+            boxes = (boxes / scale).clamp(0.0, 1.0)
+
+            prepared_targets.append(
+                {
+                    "class_labels": class_labels,
+                    "boxes": boxes,
+                }
+            )
+
+        return prepared_targets
+
+    return [
+        {
+            key: (
+                value.to(
+                    device,
+                    non_blocking=True,
+                )
+                if isinstance(value, Tensor)
+                else value
+            )
+            for key, value in target.items()
+        }
+        for target in targets
+    ]
+
+
 @torch.no_grad()
 def detection_evaluate(
     model: nn.Module,
@@ -368,8 +413,9 @@ def detection_evaluate(
     prediction_postprocessor: Callable | None = None,
     label_offset: int = 1,
     limit_batches: int | None = None,
+    targers_mode: str | None = None
 ) -> tuple[float, float]:
-    was_training = model.training
+    was_model_training = model.training
     was_criterion_training = criterion.training
 
     model.eval()
@@ -378,32 +424,24 @@ def detection_evaluate(
     loss_meter = AverageMeter()
     metric = MeanAveragePrecision(box_format="xyxy", iou_type="bbox")
 
-    for step, (images, labels) in enumerate(loader):
+    for step, (images, targets) in enumerate(loader):
         if limit_batches is not None and step >= limit_batches:
             break
 
         images = [image.to(device, non_blocking=True) for image in images]
-        targets_device = [
-            {
-                key: value.to(device, non_blocking=True)
-                if isinstance(value, Tensor)
-                else value
-                for key, value in target.items()
-            }
-            for target in targets
-        ]
+        if isinstance(images, (list, tuple)):
+            images = torch.stack(images, dim=0)
 
-        outputs = model(images)
-        losses = criterion(outputs, targets_device)
+        targets_device = prepare_targets(targets, device, targers_mode)
+
+        outputs = model(pixel_values=images, labels=targets_device)
+        losses = criterion(outputs, teacher_outputs=None, labels=targets_device)
 
         batch_size = len(images)
         loss_meter.update(losses["total"].item(), batch_size)
 
         if prediction_postprocessor is not None:
-            predictions = prediction_postprocessor(
-                outputs,
-                images,
-            )
+            predictions = prediction_postprocessor(outputs, images)
         else:
             predictions = outputs
 
@@ -479,7 +517,9 @@ class DetectionTrainer:
         progress_bar: bool = True,
         metrics_callback: tuple[Callable, Callable, Callable] | None = None,
         scalars: dict[str, float | int | str],
-        prediction_postprocessor: PredictionPostprocessor | None = None,
+        prediction_postprocessor: Callable | None = None,
+        label_offset: int = 1,
+        targers_mode: str | None = None
     ) -> None:
 
         if criterion.requires_teacher and teacher is None:
@@ -488,6 +528,9 @@ class DetectionTrainer:
             )
 
         self.prediction_postprocessor = prediction_postprocessor
+
+        self.label_offset = label_offset
+        self.targers_mode = targers_mode
 
         self.student = student
         self.teacher = teacher
@@ -549,7 +592,7 @@ class DetectionTrainer:
 
     def fit(self) -> dict:
         history = MetricsHistory(self.output_dir / "history.csv")
-        best_acc, best_epoch = 0.0, 0
+        best_map, best_epoch = 0.0, 0
 
         try:
             for epoch in range(1, self.epochs + 1):
@@ -558,12 +601,14 @@ class DetectionTrainer:
 
                 train_loss_components, other_train_metrics = self._train_epoch(epoch)
                 eval_loss, eval_metrics = detection_evaluate(
-                    self.student,
-                    self.criterion, 
-                    self.eval_loader, 
-                    self.device,
-                    self.prediction_postprocessor
-                    limit_batches=self.limit_eval_batches
+                    model=self.student,
+                    criterion=self.criterion, 
+                    loader=self.eval_loader, 
+                    device=self.device,
+                    prediction_postprocessor=self.prediction_postprocessor,
+                    label_offset=self.label_offset,
+                    limit_batches=self.limit_eval_batches,
+                    targers_mode=self.targers_mode
                 )
 
                 if self.scheduler is not None:
@@ -635,6 +680,7 @@ class DetectionTrainer:
 
         meters_avg: dict[str, AverageMeter] = defaultdict(AverageMeter)
         meters_avg_loss: dict[str, AverageMeter] = defaultdict(AverageMeter)
+        meters_other: dict[str, float | int | str] = {}
 
         iterator = tqdm(
             self.train_loader,
@@ -649,7 +695,7 @@ class DetectionTrainer:
                 break
 
             images = [image.to(self.device, non_blocking=True) for image in images]
-            targets = self._prepare_targets(targets)
+            targets = prepare_targets(targets, self.device, self.targers_mode)
             batch_size = len(images)
 
             self.optimizer.zero_grad(set_to_none=True)
@@ -664,7 +710,14 @@ class DetectionTrainer:
                     teacher_outputs = self.teacher(images)
 
             with torch.autocast(self.device.type, enabled=self.amp_enabled):
-                student_outputs = self.student(images)
+                if isinstance(images, (list, tuple)):
+                    images = torch.stack(images, dim=0)
+
+                if self.teacher is not None:
+                    student_outputs = self.student(images)
+                else:
+                    student_outputs = self.student(pixel_values=images, labels=targets)
+
                 losses = self.criterion(
                     student_outputs,
                     teacher_outputs,
@@ -706,23 +759,9 @@ class DetectionTrainer:
             meters_other["max_grad_norm"] = max_grad_norm
             meters_other["max_weight_norm"] = max_weight_norm
 
-            return train_loss_components, other_train_metrics
+            other_train_metrics = {**{key: meter.avg for key, meter in meters_avg.items()}, **meters_other}
 
-    def _prepare_targets(
-        self,
-        targets: Sequence[DetectionTarget],
-    ) -> list[DetectionTarget]:
-        return [
-            {
-                key: (
-                    value.to(self.device, non_blocking=True)
-                    if isinstance(value, Tensor)
-                    else value
-                )
-                for key, value in target.items()
-            }
-            for target in targets
-        ]
+            return train_loss_components, other_train_metrics
 
     def _save_checkpoint(
         self,
