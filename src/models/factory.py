@@ -6,14 +6,17 @@ configs/model/teacher/*.yaml и configs/model/student/*.yaml.
 """
 
 import timm
+from pathlib import Path
+
 import torch
 from torch import nn
 from torchvision import models as tv_models
 from torchvision.models._api import WeightsEnum
-
 from torchvision.models import get_model
+
+from transformers import LwDetrConfig, LwDetrForObjectDetection
+
 from hydra.utils import to_absolute_path
-from pathlib import Path
 
 
 def from_torch_hub(repo: str, name: str, pretrained: bool = False) -> nn.Module:
@@ -145,3 +148,41 @@ def timm_model_for_classification(
     print(f"Weights for {model_name} has been loaded: {weights_path}")
 
     return model
+    
+
+def lwdetr_small_for_detection(
+    num_classes: int = 8,
+    disable_custom_kernels: bool = True,
+) -> nn.Module:
+    lwdetr_small_checkpoint = "AnnaZhang/lwdetr_small_60e_coco"
+    cityscapes_classes = [
+        "person",
+        "rider",
+        "car",
+        "truck",
+        "bus",
+        "train",
+        "motorcycle",
+        "bicycle",
+    ]
+
+    id2label = {
+        index: class_name
+        for index, class_name in enumerate(cityscapes_classes)
+    }
+
+    label2id = {
+        class_name: index
+        for index, class_name in id2label.items()
+    }
+
+    config = LwDetrConfig.from_pretrained(
+        lwdetr_small_checkpoint,
+        id2label=id2label,
+        label2id=label2id,
+        disable_custom_kernels=disable_custom_kernels,
+    )
+
+    return LwDetrForObjectDetection(config)
+
+    return LwDetrForObjectDetection(config)
