@@ -23,6 +23,10 @@ def base_loader(cfg: DictConfig, seed: int) -> tuple[DataLoader, DataLoader]:
         persistent_workers=cfg.loader.persistent_workers and num_workers > 0,
         worker_init_fn=seed_worker,
     )
+
+    if cfg.task_type == "detection":
+        common["collate_fn"] = detection_collate_fn
+
     train_loader = DataLoader(
         train_dataset,
         batch_size=cfg.loader.batch_size,
@@ -37,3 +41,12 @@ def base_loader(cfg: DictConfig, seed: int) -> tuple[DataLoader, DataLoader]:
         **common,
     )
     return train_loader, eval_loader
+
+
+def detection_collate_fn(
+    batch: list[tuple[torch.Tensor, dict[str, torch.Tensor]]],
+) -> tuple[
+    tuple[torch.Tensor, ...],
+    tuple[dict[str, torch.Tensor], ...],
+]:
+    return tuple(zip(*batch))
