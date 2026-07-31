@@ -4,6 +4,8 @@ from collections.abc import Sequence
 
 from torchvision import transforms
 
+from src.utils import detection_transforms
+
 
 def base_transform(
     mean: Sequence[float],
@@ -18,6 +20,7 @@ def base_transform(
     ops.append(transforms.ToTensor())
     ops.append(transforms.Normalize(tuple(mean), tuple(std)))
     return transforms.Compose(ops)
+
 
 def build_transform_train(
     mean: Sequence[float],
@@ -43,6 +46,7 @@ def build_transform_train(
     ops.append(transforms.Normalize(tuple(mean), tuple(std)))
     return transforms.Compose(ops)
 
+
 def build_transform_eval(
     mean: Sequence[float],
     std: Sequence[float],
@@ -64,6 +68,7 @@ def build_transform_eval(
     ops.append(transforms.ToTensor())
     ops.append(transforms.Normalize(tuple(mean), tuple(std)))
     return transforms.Compose(ops)
+
 
 def build_transform_tinyvit_train(
     mean: Sequence[float],
@@ -94,6 +99,7 @@ def build_transform_tinyvit_train(
     ))
     return transforms.Compose(ops)
 
+
 def build_transform_tinyvit_eval(
     mean: Sequence[float],
     std: Sequence[float],
@@ -106,3 +112,21 @@ def build_transform_tinyvit_eval(
     ops.append(transforms.ToTensor())
     ops.append(transforms.Normalize(tuple(mean), tuple(std)))
     return transforms.Compose(ops)
+
+def build_base_transform_for_cityscapes(
+    mean: Sequence[float],
+    std: Sequence[float],
+    image_size: tuple[int, int] | None = None,
+) -> transforms.Compose:
+    ops: list = []
+    if image_size is not None:
+        ops.append(detection_transforms.DetectionResize(image_size))
+    ops.append(detection_transforms.DetectionToTensor())
+    ops.append(detection_transforms.DetectionNormalize(mean, std))
+    return detection_transforms.DetectionCompose(ops)
+
+# def build_eval_transform_for_cityscapes(
+#     mean: Sequence[float],
+#     std: Sequence[float],
+#     image_size: tuple[int, int] | None = None,
+# ) -> transforms.Compose:
