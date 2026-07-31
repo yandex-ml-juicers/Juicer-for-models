@@ -182,11 +182,13 @@ def main(cfg: DictConfig) -> float:
         )
     result = trainer.fit()
 
+    if cfg.task_type == "classification":
+        result = result["best_acc"]
+    elif cfg.task_type == "detection":
+        result = result["best_map"]
+
     if task is not None:
-        if cfg.task_type == "classification":
-            task.get_logger().report_single_value("best_eval_acc", result["best_acc"])
-        elif cfg.task_type == "detection":
-            task.get_logger().report_single_value("best_eval_map", result["best_map"])
+        task.get_logger().report_single_value("best_eval_acc", result)
         task.close()
 
     # Возврат метрики делает скрипт совместимым с hydra-свиперами
