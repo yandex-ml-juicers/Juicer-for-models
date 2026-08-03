@@ -45,6 +45,9 @@ data:
   loader:
     # Кроп 512x1024 при 31M параметров: 8 картинок на ~24 ГБ с amp
     batch_size: 8
+    # Валидация в полном разрешении 1024x2048 — вчетверо больше пикселей,
+    # плюс skip-связи U-Net держатся до декодера. Батч 8 здесь = OOM.
+    eval_batch_size: 2
     num_workers: 8
     pin_memory: true
     persistent_workers: true

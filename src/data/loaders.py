@@ -34,9 +34,12 @@ def base_loader(cfg: DictConfig, task_type: str, seed: int) -> tuple[DataLoader,
         generator=make_generator(seed),
         **common,
     )
+
+    eval_batch_size = cfg.loader.get("eval_batch_size", None) or cfg.loader.batch_size
+
     eval_loader = DataLoader(
         eval_dataset,
-        batch_size=cfg.loader.batch_size,
+        batch_size=eval_batch_size,
         shuffle=False,
         **common,
     )
