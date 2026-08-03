@@ -25,7 +25,7 @@ from tqdm import tqdm
 from src.losses.base import DistillationLoss
 from src.models.feature_extractor import FeatureExtractor
 from src.utils.logger import MetricsHistory, get_logger
-from src.utils.metrics import AverageMeter, accuracy, ConfusionMatrixAccumulator, count_parameters, build_param_table
+from src.utils.metrics import AverageMeter, accuracy, ConfusionMatrixAccumulator, IoUAccumulator, count_parameters, build_param_table
 
 log = get_logger(__name__)
 
@@ -761,7 +761,7 @@ class DetectionTrainer:
 
             other_train_metrics = {**{key: meter.avg for key, meter in meters_avg.items()}, **meters_other}
 
-            return train_loss_components, other_train_metrics
+        return train_loss_components, other_train_metrics
 
     def _save_checkpoint(
         self,
@@ -772,6 +772,329 @@ class DetectionTrainer:
         checkpoint = {
             "epoch": epoch,
             "best_map": best_map,
+            "student_state": self.student.state_dict(),
+            "criterion_state": self.criterion.state_dict(),
+            "optimizer_state": self.optimizer.state_dict(),
+            "scheduler_state": (
+                self.scheduler.state_dict()
+                if self.scheduler is not None
+                else None
+            ),
+            "scaler_state": self.scaler.state_dict(),
+        }
+        torch.save(checkpoint, self.output_dir / filename)
+
+
+@torch.no_grad()
+def segmentation_evaluate(
+    model: nn.Module,
+    loader: DataLoader,
+    device: torch.device,
+    num_classes: int,
+    ignore_index: int = 255,
+    limit_batches: int | None = None,
+) -> tuple[float, dict[str, float]]:
+    """Возвращает (средний CE-лосс, {miou, pixel_acc}). Всегда в fp32.
+
+    Лосс считается обычной кросс-энтропией, а не self.criterion: на валидации
+    интересна метрика самой модели, а не значение дистилляционного лосса,
+    которое к тому же требовало бы учителя.
+    """
+    was_training = model.training
+    model.eval()
+
+    loss_meter = AverageMeter()
+    iou = IoUAccumulator(num_classes, device, ignore_index)
+
+    for step, (images, masks) in enumerate(loader):
+        if limit_batches is not None and step >= limit_batches:
+            break
+
+        images = images.to(device, non_blocking=True)
+        masks = masks.to(device, non_blocking=True)
+
+        logits = model(images)
+        loss = F.cross_entropy(logits.float(), masks, ignore_index=ignore_index)
+
+        loss_meter.update(loss.item(), images.size(0))
+        iou.update(logits.argmax(dim=1), masks)
+
+    if was_training:
+        model.train()
+
+    return loss_meter.avg, iou.compute()
+
+
+class SegmentationTrainer:
+    """Тренер семантической сегментации.
+
+    Отличия от Trainer, ради которых он отдельный:
+    - цель — mIoU, а не accuracy; лучший чекпоинт выбирается по нему;
+    - метрика копится пиксельной confusion matrix с выбрасыванием ignore_index;
+    - таргет — карта [B, H, W], а не вектор меток.
+
+    Учитель здесь опционален и не используется до появления дистилляционного
+    лосса — интерфейс оставлен тем же, чтобы этап KD не потребовал правок.
+    """
+
+    def __init__(
+        self,
+        *,
+        student: nn.Module,
+        teacher: nn.Module | None,
+        criterion: DistillationLoss,
+        optimizer: torch.optim.Optimizer,
+        scheduler: torch.optim.lr_scheduler.LRScheduler | None,
+        train_loader: DataLoader,
+        eval_loader: DataLoader,
+        num_classes: int,
+        device: torch.device,
+        output_dir: Path,
+        epochs: int,
+        amp: bool = False,
+        grad_clip_norm: float | None = None,
+        limit_train_batches: int | None = None,
+        limit_eval_batches: int | None = None,
+        save_best: bool = True,
+        save_last: bool = True,
+        progress_bar: bool = True,
+        metrics_callback: tuple[Callable, Callable, Callable] | None = None,
+        scalars: dict[str, float | int | str],
+        ignore_index: int = 255,
+    ) -> None:
+        if criterion.requires_teacher and teacher is None:
+            raise ValueError(
+                f"Лосс {type(criterion).__name__} требует учителя, но model/teacher=null. "
+                f"Либо задай учителя, либо возьми loss=ce."
+            )
+
+        self.student = student
+        self.teacher = teacher
+        self.criterion = criterion
+        self.optimizer = optimizer
+        self.scheduler = scheduler
+        self.train_loader = train_loader
+        self.eval_loader = eval_loader
+        self.num_classes = num_classes
+        self.ignore_index = ignore_index
+        self.device = device
+        self.output_dir = Path(output_dir)
+        self.epochs = epochs
+        self.grad_clip_norm = grad_clip_norm
+        self.limit_train_batches = limit_train_batches
+        self.limit_eval_batches = limit_eval_batches
+        self.save_best = save_best
+        self.save_last = save_last
+        self.progress_bar = progress_bar
+        self.metrics_callback_scalar = metrics_callback[0] if metrics_callback is not None else None
+        self.metrics_callback_single = metrics_callback[1] if metrics_callback is not None else None
+        self.metrics_callback_table = metrics_callback[2] if metrics_callback is not None else None
+        self.scalars = scalars
+
+        self.train_iou = IoUAccumulator(self.num_classes, self.device, self.ignore_index)
+
+        self.amp_enabled = amp and device.type == "cuda"
+        self.scaler = GradScaler(device.type, enabled=self.amp_enabled)
+
+        self.student.to(self.device)
+        self.criterion.to(self.device)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+
+        if self.teacher is not None:
+            self.teacher.to(self.device)
+            self.teacher.eval()
+            self.teacher.requires_grad_(False)
+
+        if self.metrics_callback_table is not None:
+            self.metrics_callback_table(build_param_table(self.student, self.teacher, self.criterion))
+
+        criterion_params = list(self.criterion.parameters())
+        if criterion_params:
+            optimizer_params = {id(p) for group in optimizer.param_groups for p in group["params"]}
+            missing = [p for p in criterion_params if id(p) not in optimizer_params]
+            if missing:
+                raise ValueError(
+                    "У лосса есть обучаемые параметры (адаптеры), не попавшие в optimizer. "
+                    "Optimizer должен собираться из student.parameters() + criterion.parameters()."
+                )
+
+        self.student_extractor: FeatureExtractor | None = None
+        self.teacher_extractor: FeatureExtractor | None = None
+        if criterion.required_features:
+            layers = list(criterion.required_features)
+            self.student_extractor = FeatureExtractor(self.student, layers)
+            if self.teacher is not None:
+                self.teacher_extractor = FeatureExtractor(self.teacher, layers)
+
+    def fit(self) -> dict:
+        history = MetricsHistory(self.output_dir / "history.csv")
+        best_miou, best_epoch = 0.0, 0
+
+        try:
+            for epoch in range(1, self.epochs + 1):
+                start = time.time()
+                lr = self.optimizer.param_groups[0]["lr"]
+
+                train_loss_components, other_train_metrics = self._train_epoch(epoch)
+                eval_loss, eval_metrics = segmentation_evaluate(
+                    model=self.student,
+                    loader=self.eval_loader,
+                    device=self.device,
+                    num_classes=self.num_classes,
+                    ignore_index=self.ignore_index,
+                    limit_batches=self.limit_eval_batches,
+                )
+
+                if self.scheduler is not None:
+                    self.scheduler.step()
+
+                all_values = {
+                    "epoch": epoch,
+                    "lr": lr,
+                    "eval_loss": eval_loss,
+                    "eval_miou": eval_metrics["miou"],
+                    "eval_pixel_acc": eval_metrics["pixel_acc"],
+                    "time_epoch": round(time.time() - start, 1),
+                    **{f"train_loss_{key}": value for key, value in train_loss_components.items()},
+                    **{f"train_{key}": value for key, value in other_train_metrics.items()},
+                }
+
+                history.append(all_values)
+                if self.metrics_callback_scalar is not None:
+                    self.metrics_callback_scalar(all_values)
+
+                is_best = eval_metrics["miou"] > best_miou
+                if is_best:
+                    best_miou, best_epoch = eval_metrics["miou"], epoch
+                    if self.save_best:
+                        self._save_checkpoint("best.pt", epoch, best_miou)
+                if self.save_last:
+                    self._save_checkpoint("last.pt", epoch, best_miou)
+
+                log.info(
+                    "Эпоха %02d/%d | lr=%.6f | train loss=%.4f | train mIoU=%.4f | "
+                    "eval loss=%.4f | eval mIoU=%.4f | pixel acc=%.4f%s | %.1f c",
+                    epoch,
+                    self.epochs,
+                    lr,
+                    train_loss_components["total"],
+                    other_train_metrics["miou"],
+                    eval_loss,
+                    eval_metrics["miou"],
+                    eval_metrics["pixel_acc"],
+                    " *" if is_best else "",
+                    all_values["time_epoch"],
+                )
+        finally:
+            if self.student_extractor is not None:
+                self.student_extractor.remove()
+            if self.teacher_extractor is not None:
+                self.teacher_extractor.remove()
+
+        log.info("Лучший mIoU: %.4f (эпоха %d)", best_miou, best_epoch)
+        return {"best_miou": best_miou, "best_epoch": best_epoch}
+
+    def _train_epoch(self, epoch: int) -> tuple:
+        self.student.train()
+        self.criterion.train()
+
+        max_grad_norm = -1.0
+        max_weight_norm = -1.0
+
+        self.train_iou.reset()
+
+        meters_avg: dict[str, AverageMeter] = defaultdict(AverageMeter)
+        meters_avg_loss: dict[str, AverageMeter] = defaultdict(AverageMeter)
+        meters_other: dict[str, float | int | str] = {}
+
+        iterator = tqdm(
+            self.train_loader,
+            desc=f"Эпоха {epoch}/{self.epochs}",
+            disable=not self.progress_bar,
+            leave=False,
+        )
+
+        for step, (images, masks) in enumerate(iterator):
+            if self.limit_train_batches is not None and step >= self.limit_train_batches:
+                iterator.close()
+                break
+
+            images = images.to(self.device, non_blocking=True)
+            masks = masks.to(self.device, non_blocking=True)
+            batch_size = images.size(0)
+
+            self.optimizer.zero_grad(set_to_none=True)
+            if self.student_extractor is not None:
+                self.student_extractor.clear()
+            if self.teacher_extractor is not None:
+                self.teacher_extractor.clear()
+
+            teacher_logits = None
+            if self.teacher is not None:
+                with torch.no_grad(), torch.autocast(self.device.type, enabled=self.amp_enabled):
+                    teacher_logits = self.teacher(images)
+
+            with torch.autocast(self.device.type, enabled=self.amp_enabled):
+                student_logits = self.student(images)
+                losses = self.criterion(
+                    student_logits,
+                    teacher_logits,
+                    masks,
+                    student_features=(
+                        self.student_extractor.features if self.student_extractor else None
+                    ),
+                    teacher_features=(
+                        self.teacher_extractor.features if self.teacher_extractor else None
+                    ),
+                )
+
+            self.scaler.scale(losses["total"]).backward()
+            self.scaler.unscale_(self.optimizer)
+
+            params = [p for group in self.optimizer.param_groups for p in group["params"]]
+            clip_threshold = self.grad_clip_norm if self.grad_clip_norm is not None else float("inf")
+            grad_norm = torch.nn.utils.clip_grad_norm_(params, clip_threshold)
+
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+
+            grad_norm_value = float(grad_norm)
+            meters_avg["avg_grad_norm"].update(grad_norm_value, n=1)
+            max_grad_norm = max(max_grad_norm, grad_norm_value)
+
+            with torch.no_grad():
+                weight_norm = torch.norm(torch.stack([p.detach().norm() for p in params]))
+            weight_norm_value = float(weight_norm)
+            meters_avg["avg_weight_norm"].update(weight_norm_value, n=1)
+            max_weight_norm = max(max_weight_norm, weight_norm_value)
+
+            for key, value in losses.items():
+                meters_avg_loss[key].update(value.item(), batch_size)
+
+            with torch.no_grad():
+                self.train_iou.update(student_logits.detach().argmax(dim=1), masks)
+
+            iterator.set_postfix({"loss": f"{losses['total'].item():.3f}"})
+
+        train_loss_components = {key: meter.avg for key, meter in meters_avg_loss.items()}
+
+        meters_other.update(self.train_iou.compute())  # miou, pixel_acc
+        meters_other["max_grad_norm"] = max_grad_norm
+        meters_other["max_weight_norm"] = max_weight_norm
+
+        other_train_metrics = {**{key: meter.avg for key, meter in meters_avg.items()}, **meters_other}
+
+        return train_loss_components, other_train_metrics
+
+    def _save_checkpoint(
+        self,
+        filename: str,
+        epoch: int,
+        best_miou: float,
+    ) -> None:
+        checkpoint = {
+            "epoch": epoch,
+            "best_miou": best_miou,
             "student_state": self.student.state_dict(),
             "criterion_state": self.criterion.state_dict(),
             "optimizer_state": self.optimizer.state_dict(),

@@ -13,7 +13,7 @@ from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
 
 from src.data import base_loader
-from src.training import Trainer, DetectionTrainer
+from src.training import Trainer, DetectionTrainer, SegmentationTrainer
 from src.utils import resolve_device, seed_everything, prediction_postprocessor
 
 log = logging.getLogger(__name__)
@@ -94,6 +94,23 @@ def clearml_reporter(task):
             if key in row:
                 logger.report_scalar(
                     title="detection_metrics",
+                    series=series_name,
+                    value=row[key],
+                    iteration=iterate,
+                )
+
+        # Метрики сегментации
+        segmentation_metrics = {
+            "train_miou": ("segmentation_metrics", "train_mIoU"),
+            "eval_miou": ("segmentation_metrics", "eval_mIoU"),
+            "train_pixel_acc": ("pixel_accuracy", "train"),
+            "eval_pixel_acc": ("pixel_accuracy", "eval"),
+        }
+
+        for key, (title, series_name) in segmentation_metrics.items():
+            if key in row:
+                logger.report_scalar(
+                    title=title,
                     series=series_name,
                     value=row[key],
                     iteration=iterate,
@@ -180,12 +197,31 @@ def main(cfg: DictConfig) -> float:
             targers_mode=cfg.data.dataset.targets_format_mode,
             **cfg.trainer,
         )
+    elif cfg.task_type == "segmentation":
+        trainer = SegmentationTrainer(
+            student=student,
+            teacher=teacher,
+            criterion=criterion,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            train_loader=train_loader,
+            eval_loader=eval_loader,
+            device=device,
+            output_dir=output_dir,
+            metrics_callback=clearml_reporter(task) if task is not None else None,
+            num_classes=cfg.data.dataset.num_classes,
+            scalars=cfg.clearml.scalars,
+            ignore_index=cfg.data.dataset.ignore_index,
+            **cfg.trainer,
+        )
     result = trainer.fit()
 
     if cfg.task_type == "classification":
         result = result["best_acc"]
     elif cfg.task_type == "detection":
         result = result["best_map"]
+    elif cfg.task_type == "segmentation":
+        result = result["best_miou"]
 
     if task is not None:
         task.get_logger().report_single_value("best_eval_acc", result)
