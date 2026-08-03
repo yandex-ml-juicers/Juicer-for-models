@@ -1,0 +1,8 @@
+# U-Net (~31M параметров) для семантической сегментации.
+# занимает слот student.
+_target_: src.models.factory.unet_for_segmentation
+num_classes: ${data.dataset.num_classes}
+in_channels: 3
+base_channels: 64
+depth: 4          # вход должен быть кратен 2**depth: 512x1024 и 1024x2048 подходят, depth=4 
+checkpoint_path: null
