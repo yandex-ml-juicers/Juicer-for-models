@@ -1,0 +1,50 @@
+# @package _global_
+# Учитель сегментации: U-Net с нуля на Cityscapes, 19 классов.
+defaults:
+  - override /data/dataset: cityscapes_seg
+  - override /data/transform/train: cityscapes_seg_transform
+  - override /data/transform/eval: cityscapes_seg_transform
+  - override /model/teacher: null
+  - override /model/student: unet
+  - override /loss: ce
+  - override /optimizer: SGD
+  - override /scheduler: warmup_cosine
+
+name: cityscapes_scratch_unet
+device: cuda
+
+# ConvTranspose2d.backward, max_pool2d.backward и nll_loss2d на CUDA не имеют
+# детерминированных ядер — при deterministic=true запуск падает с RuntimeError.
+deterministic: false
+
+task_type: "segmentation"
+
+clearml:
+  enabled: False
+  tags: [cityscapes, teacher, scratch, unet, segmentation]
+  output_uri: false
+
+trainer:
+  epochs: 100
+  amp: true
+  grad_clip_norm: 1.0
+
+loss:
+  # Void-пиксели Cityscapes не должны попадать в лосс
+  ignore_index: ${data.dataset.ignore_index}
+
+optimizer:
+  lr: 0.01          # SGD+momentum, классический рецепт сегментации
+  weight_decay: 1.0e-4
+
+scheduler:
+  warmup_epochs: 5
+  eta_min: 1.0e-5
+
+data:
+  loader:
+    # Кроп 512x1024 при 31M параметров: 8 картинок на ~24 ГБ с amp
+    batch_size: 8
+    num_workers: 8
+    pin_memory: true
+    persistent_workers: true
