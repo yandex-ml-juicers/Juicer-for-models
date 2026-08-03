@@ -1,3 +1,6 @@
 # Обучение без дистилляции (бейзлайн "ученик с нуля"). Сочетается с model/teacher=null.
 _target_: src.losses.CrossEntropy
 label_smoothing: 0.0
+# -100 = дефолт torch (нет игнорируемых меток). Для сегментации переопределять
+# на data.dataset.ignore_index (255 у Cityscapes).
+ignore_index: -100
