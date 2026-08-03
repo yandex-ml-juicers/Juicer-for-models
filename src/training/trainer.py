@@ -793,12 +793,18 @@ def segmentation_evaluate(
     num_classes: int,
     ignore_index: int = 255,
     limit_batches: int | None = None,
+    amp: bool = False,
 ) -> tuple[float, dict[str, float]]:
-    """Возвращает (средний CE-лосс, {miou, pixel_acc}). Всегда в fp32.
+    """Возвращает (средний CE-лосс, {miou, pixel_acc}).
 
     Лосс считается обычной кросс-энтропией, а не self.criterion: на валидации
     интересна метрика самой модели, а не значение дистилляционного лосса,
     которое к тому же требовало бы учителя.
+
+    amp здесь обязан совпадать с обучением: валидация идёт в полном разрешении
+    1024x2048, а у U-Net skip-связи живут до самого декодера и не освобождаются
+    по ходу forward'а — в fp32 это лишний двукратный расход памяти на пустом месте.
+    Сам лосс всё равно считается в fp32 (logits.float()).
     """
     was_training = model.training
     model.eval()
@@ -813,7 +819,9 @@ def segmentation_evaluate(
         images = images.to(device, non_blocking=True)
         masks = masks.to(device, non_blocking=True)
 
-        logits = model(images)
+        with torch.autocast(device.type, enabled=amp):
+            logits = model(images)
+
         loss = F.cross_entropy(logits.float(), masks, ignore_index=ignore_index)
 
         loss_meter.update(loss.item(), images.size(0))
@@ -943,6 +951,7 @@ class SegmentationTrainer:
                     num_classes=self.num_classes,
                     ignore_index=self.ignore_index,
                     limit_batches=self.limit_eval_batches,
+                    amp=self.amp_enabled,
                 )
 
                 if self.scheduler is not None:
