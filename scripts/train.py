@@ -71,12 +71,11 @@ def clearml_reporter(task):
         for key, value in row.items():
             if (
                 key.startswith("train_loss_")
-                and key != "train_loss_total"
             ):
                 series_name = key.removeprefix("train_loss_")
 
                 logger.report_scalar(
-                    title="detection_loss",
+                    title="loss_components",
                     series=series_name,
                     value=value,
                     iteration=iterate,
