@@ -150,6 +150,127 @@ def timm_model_for_classification(
     return model
     
 
+class UNetDoubleConv(nn.Sequential):
+    """Conv-BN-ReLU x2 — базовый блок U-Net.
+    """
+
+    def __init__(self, in_channels: int, out_channels: int) -> None:
+        super().__init__(
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+        )
+
+
+class UNet(nn.Module):
+    """Классический U-Net: симметричный энкодер-декодер со skip-connections.
+
+    Свёртки с padding=1 сохраняют размер, поэтому выход совпадает по разрешению
+    со входом и логиты [B, num_classes, H, W] можно скармливать cross_entropy
+    напрямую, без интерполяции. Требование: H и W кратны 2**depth
+    (512x1024 и 1024x2048 при depth=4 подходят).
+    """
+
+    def __init__(
+        self,
+        num_classes: int = 19,
+        in_channels: int = 3,
+        base_channels: int = 64,
+        depth: int = 4,
+    ) -> None:
+        super().__init__()
+
+        channels = [base_channels * 2 ** level for level in range(depth + 1)]
+
+        self.encoders = nn.ModuleList()
+        previous_channels = in_channels
+        for level_channels in channels[:-1]:
+            self.encoders.append(UNetDoubleConv(previous_channels, level_channels))
+            previous_channels = level_channels
+
+        self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
+        self.bottleneck = UNetDoubleConv(channels[-2], channels[-1])
+
+        self.upsamples = nn.ModuleList()
+        self.decoders = nn.ModuleList()
+        for level_channels in reversed(channels[:-1]):
+            self.upsamples.append(
+                nn.ConvTranspose2d(level_channels * 2, level_channels, kernel_size=2, stride=2)
+            )
+            # На вход декодера идёт конкатенация апсемпла и skip-связи.
+            self.decoders.append(UNetDoubleConv(level_channels * 2, level_channels))
+
+        self.head = nn.Conv2d(base_channels, num_classes, kernel_size=1)
+
+    def forward(self, images: torch.Tensor) -> torch.Tensor:
+        skips = []
+
+        features = images
+        for encoder in self.encoders:
+            features = encoder(features)
+            skips.append(features)
+            features = self.pool(features)
+
+        features = self.bottleneck(features)
+
+        for upsample, decoder, skip in zip(self.upsamples, self.decoders, reversed(skips)):
+            features = upsample(features)
+            features = torch.cat([skip, features], dim=1)
+            features = decoder(features)
+
+        return self.head(features)
+
+
+def unet_for_segmentation(
+    num_classes: int = 19,
+    in_channels: int = 3,
+    base_channels: int = 64,
+    depth: int = 4,
+    checkpoint_path: str | None = None,
+) -> nn.Module:
+    """U-Net для семантической сегментации.
+
+    checkpoint_path нужен на втором этапе: обученный учитель подгружается
+    из чекпоинта тренера (ключ student_state) и идёт в дистилляцию.
+    """
+    model = UNet(
+        num_classes=num_classes,
+        in_channels=in_channels,
+        base_channels=base_channels,
+        depth=depth,
+    )
+
+    if checkpoint_path is None:
+        return model
+
+    weights_path = Path(to_absolute_path(checkpoint_path))
+    if not weights_path.is_file():
+        raise FileNotFoundError(f"Checkpoint file was not found: {weights_path}")
+
+    checkpoint = torch.load(weights_path, map_location="cpu", weights_only=True)
+
+    if isinstance(checkpoint, dict) and "student_state" in checkpoint:
+        state_dict = checkpoint["student_state"]
+    elif isinstance(checkpoint, dict) and "state_dict" in checkpoint:
+        state_dict = checkpoint["state_dict"]
+    else:
+        state_dict = checkpoint
+
+    state_dict = {
+        key.removeprefix("module."): value
+        for key, value in state_dict.items()
+    }
+
+    model.load_state_dict(state_dict, strict=True)
+
+    print(f"Weights for U-Net has been loaded: {weights_path}")
+
+    return model
+
+
 def lwdetr_small_for_detection(
     num_classes: int = 8,
     disable_custom_kernels: bool = True,
