@@ -15,6 +15,7 @@ from pathlib import Path
 import torch
 from torch import nn
 from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
 from torch.amp.grad_scaler import GradScaler
 import torch.nn.functional as F
 from tqdm import tqdm
@@ -227,6 +228,10 @@ class Trainer:
     def _train_epoch(self, epoch: int) -> tuple:
         self.student.train()
         self.criterion.train()
+
+        sampler = getattr(self.train_loader, "sampler", None)
+        if isinstance(sampler, DistributedSampler):
+            sampler.set_epoch(epoch)
 
         max_grad_norm = -1
         max_weight_norm = -1

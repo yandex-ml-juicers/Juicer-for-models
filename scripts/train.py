@@ -153,7 +153,7 @@ def main(cfg: DictConfig) -> float:
         log.info("Конфиг запуска:\n%s", OmegaConf.to_yaml(cfg))
         log.info("Артефакты запуска: %s", output_dir)
 
-        train_loader, eval_loader = base_loader(cfg.data, seed=cfg.seed)
+        train_loader, eval_loader = base_loader(cfg.data, seed=cfg.seed, dist=dist)
 
         student = instantiate(cfg.model.student).to(device)
         teacher = None
