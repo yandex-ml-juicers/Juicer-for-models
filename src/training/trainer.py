@@ -23,7 +23,7 @@ from tqdm import tqdm
 
 from src.losses.base import DistillationLoss
 from src.models.feature_extractor import FeatureExtractor
-from src.utils.distributed import DistInfo, unwrap
+from src.utils.distributed import DistInfo, unwrap, all_reduce_sum_
 from src.utils.logger import MetricsHistory, get_logger
 from src.utils.metrics import AverageMeter, accuracy, ConfusionMatrixAccumulator, count_parameters, build_param_table
 
@@ -35,28 +35,34 @@ def evaluate(
     model: nn.Module,
     loader: DataLoader,
     device: torch.device,
-    limit_batches: int | None = None,
+    limit_batches: int | None = None, # кол-во батчей для eval на ранк
 ) -> tuple[float, float]:
     """Возвращает (средний CE-лосс, точность) на выборке. Всегда в fp32."""
     was_training = model.training
     model.eval()
 
-    loss_meter, acc_meter = AverageMeter(), AverageMeter()
+    # [сумма лосса, верных ответов, объектов]
+    totals = torch.zeros(3, device=device)
+
     for step, (images, labels) in enumerate(loader):
         if limit_batches is not None and step >= limit_batches:
             break
         images = images.to(device, non_blocking=True)
         labels = labels.to(device, non_blocking=True)
         logits = model(images)
-        loss = F.cross_entropy(logits, labels)
 
-        batch_size = labels.size(0)
-        loss_meter.update(loss.item(), batch_size)
-        acc_meter.update(accuracy(logits, labels), batch_size)
+        totals[0] += F.cross_entropy(logits, labels, reduction="sum")
+        totals[1] += (logits.argmax(dim=1) == labels).sum()
+        totals[2] += labels.size(0)
 
     if was_training:
         model.train()
-    return loss_meter.avg, acc_meter.avg
+
+    all_reduce_sum_(totals)
+    loss_sum, correct, count = totals.tolist()
+    if count == 0:
+        return 0.0, 0.0
+    return loss_sum / count, correct / count
 
 
 class Trainer:
