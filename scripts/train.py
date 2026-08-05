@@ -11,6 +11,7 @@ import hydra
 from hydra.core.hydra_config import HydraConfig
 from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
+from torch import nn
 
 from src.data import base_loader
 from src.training import Trainer
@@ -161,6 +162,11 @@ def main(cfg: DictConfig) -> float:
             teacher = instantiate(cfg.model.teacher).to(device)
         criterion = instantiate(cfg.loss).to(device)
 
+        # заменяем слои BatchNorm до сборки optimizer
+        if cfg.distributed.sync_bn and dist.is_distributed:
+            student = nn.SyncBatchNorm.convert_sync_batchnorm(student)
+            log.info("BatchNorm заменён на SyncBatchNorm")
+
         # Обучаемые параметры лосса (адаптеры feature-KD) оптимизируются вместе с учеником.
         params = list(student.parameters()) + list(criterion.parameters())
         optimizer = instantiate(cfg.optimizer)(params)
@@ -174,7 +180,9 @@ def main(cfg: DictConfig) -> float:
             scheduler=scheduler,
             train_loader=train_loader,
             eval_loader=eval_loader,
-            device=device,
+            dist=dist,
+            find_unused_parameters=cfg.distributed.find_unused_parameters,
+            broadcast_buffers=cfg.distributed.broadcast_buffers,
             output_dir=output_dir,
             metrics_callback=clearml_reporter(task) if task is not None else None,
             num_classes=cfg.data.dataset.num_classes,

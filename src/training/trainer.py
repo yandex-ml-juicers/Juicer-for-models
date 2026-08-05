@@ -14,6 +14,7 @@ from pathlib import Path
 
 import torch
 from torch import nn
+from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from torch.amp.grad_scaler import GradScaler
@@ -22,6 +23,7 @@ from tqdm import tqdm
 
 from src.losses.base import DistillationLoss
 from src.models.feature_extractor import FeatureExtractor
+from src.utils.distributed import DistInfo, unwrap
 from src.utils.logger import MetricsHistory, get_logger
 from src.utils.metrics import AverageMeter, accuracy, ConfusionMatrixAccumulator, count_parameters, build_param_table
 
@@ -81,7 +83,7 @@ class Trainer:
         train_loader: DataLoader,
         eval_loader: DataLoader,
         num_classes: int,
-        device: torch.device,
+        dist: DistInfo,
         output_dir: Path,
         epochs: int,
         amp: bool = False,
@@ -91,6 +93,8 @@ class Trainer:
         save_best: bool = True,
         save_last: bool = True,
         progress_bar: bool = True,
+        find_unused_parameters: bool = False,
+        broadcast_buffers: bool = True,
         metrics_callback: tuple[Callable, Callable, Callable] | None = None,
         scalars: dict[str, float | int | str],
     ) -> None:
@@ -108,7 +112,10 @@ class Trainer:
         self.train_loader = train_loader
         self.eval_loader = eval_loader
         self.num_classes = num_classes
-        self.device = device
+        self.dist = dist
+        self.device = dist.device
+        self.find_unused_parameters = find_unused_parameters
+        self.broadcast_buffers = broadcast_buffers
         self.output_dir = Path(output_dir)
         self.epochs = epochs
         self.grad_clip_norm = grad_clip_norm
@@ -130,10 +137,8 @@ class Trainer:
             self.train_confmat = ConfusionMatrixAccumulator(self.num_classes, self.device)
         
 
-
-        # AMP имеет смысл только на CUDA; на CPU молча работаем в fp32.
-        self.amp_enabled = amp and device.type == "cuda"
-        self.scaler = GradScaler(device.type, enabled=self.amp_enabled)
+        self.amp_enabled = amp and self.device.type == "cuda"
+        self.scaler = GradScaler(self.device.type, enabled=self.amp_enabled)
 
         if self.teacher is not None:
             self.teacher.eval()
@@ -160,6 +165,23 @@ class Trainer:
             if self.teacher is not None:
                 self.teacher_extractor = FeatureExtractor(self.teacher, layers)
 
+        self.student = self._wrap_ddp(self.student)
+
+        if any(parameter.requires_grad for parameter in self.criterion.parameters()):
+            self.criterion = self._wrap_ddp(self.criterion)
+        # учителя не оборачиваем в DDP, т.к. синхронизация между процессами не нужна
+
+    def _wrap_ddp(self, module: nn.Module) -> nn.Module:
+        """Оборачивает модуль в DDP"""
+        if not self.dist.is_distributed:
+            return module
+        return DistributedDataParallel(
+            module,
+            device_ids=[self.dist.local_rank] if self.device.type == "cuda" else None,
+            find_unused_parameters=self.find_unused_parameters,
+            broadcast_buffers=self.broadcast_buffers,
+        )
+
     def fit(self) -> dict:
         history = MetricsHistory(self.output_dir / "history.csv")
         best_acc, best_epoch = 0.0, 0
@@ -172,7 +194,7 @@ class Trainer:
 
                 train_loss_components, other_train_metrics = self._train_epoch(epoch)
                 eval_loss, eval_acc = evaluate(
-                    self.student, self.eval_loader, self.device, self.limit_eval_batches
+                    unwrap(self.student), self.eval_loader, self.device, self.limit_eval_batches
                 )
                 if self.scheduler is not None:
                     self.scheduler.step()

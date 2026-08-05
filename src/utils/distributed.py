@@ -13,7 +13,7 @@ import os
 import socket
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Any
+from typing import Any, overload
 
 import torch
 import torch.distributed as dist
@@ -113,6 +113,14 @@ def cleanup() -> None:
     if dist.is_available() and dist.is_initialized():
         dist.destroy_process_group()
 
+
+@overload
+def unwrap(module: nn.Module) -> nn.Module: ...
+
+
+@overload
+def unwrap(module: None) -> None: ...
+
 def unwrap(module: nn.Module | None) -> nn.Module | None:
     """Достаёт исходный модуль из-под DDP-обёртки.
 
@@ -120,6 +128,11 @@ def unwrap(module: nn.Module | None) -> nn.Module | None:
        При изменении/forward не происходит синхронизации 
        с другими нодами и процессами.
        Работа с локальной моделью.
+
+       None на входе допустим ради учителя, которого может не быть. Перегрузки
+       выше нужны, чтобы это послабление не протекало в остальные вызовы:
+       unwrap(student) статически остаётся Module, а не Module | None.
+
     """
     if isinstance(module, DistributedDataParallel):
         return module.module
