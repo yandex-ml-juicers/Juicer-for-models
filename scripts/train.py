@@ -320,6 +320,11 @@ def main(cfg: DictConfig) -> float:
             student = nn.SyncBatchNorm.convert_sync_batchnorm(student)
             log.info("BatchNorm заменён на SyncBatchNorm")
 
+        # заменяем слои BatchNorm до сборки optimizer
+        if cfg.distributed.sync_bn and dist.is_distributed:
+            student = nn.SyncBatchNorm.convert_sync_batchnorm(student)
+            log.info("BatchNorm заменён на SyncBatchNorm")
+
         # Обучаемые параметры лосса (адаптеры feature-KD) оптимизируются вместе с учеником.
         params = list(student.parameters()) + list(criterion.parameters())
         optimizer = instantiate(cfg.optimizer)(params)
