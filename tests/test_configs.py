@@ -19,17 +19,17 @@ EXPERIMENTS = [
     "scratch/imagenet1k_scratch_resnet18",
 ]
 
-# Сегментация: 4 бейзлайна без дистилляции + 4 метода дистилляции
-# SegFormer-B2 -> SegNeXt-S.
+# Сегментация: бейзлайны без дистилляции + 4 метода дистилляции
+# SegFormer-B2 -> U-Net-base.
 SEGMENTATION_EXPERIMENTS = [
     "scratch/cityscapes_scratch_segformer_b2",
     "scratch/cityscapes_scratch_segformer_b5",
-    "scratch/cityscapes_scratch_segnext_s",
-    "scratch/cityscapes_scratch_segnext_t",
-    "segmentation/vanilla-KD/cityscapes_pixel-KD_segformer_b2_to_segnext_s",
-    "segmentation/CWD/cityscapes_CWD_segformer_b2_to_segnext_s",
-    "segmentation/FitNets/cityscapes_FitNets_segformer_b2_to_segnext_s",
-    "segmentation/DIST/cityscapes_DIST_segformer_b2_to_segnext_s",
+    "scratch/cityscapes_scratch_unet",
+    "scratch/cityscapes_scratch_unet_base",
+    "segmentation/vanilla-KD/cityscapes_pixel-KD_segformer_b2_to_unet_base",
+    "segmentation/CWD/cityscapes_CWD_segformer_b2_to_unet_base",
+    "segmentation/FitNets/cityscapes_FitNets_segformer_b2_to_unet_base",
+    "segmentation/DIST/cityscapes_DIST_segformer_b2_to_unet_base",
 ]
 
 
@@ -100,18 +100,42 @@ def test_segmentation_scratch_experiments_have_no_teacher():
 
 def test_fitnets_channels_match_the_configured_pair():
     """Каналы регрессора обязаны совпадать с реальными ширинами стадий
-    SegFormer-B2 и SegNeXt-S — иначе адаптер соберётся, а форма не сойдётся
-    уже в первом батче."""
-    from src.models import SEGFORMER_VARIANTS, SEGNEXT_VARIANTS
+    SegFormer-B2 и U-Net-base — иначе адаптер соберётся, а форма не сойдётся
+    уже в первом батче.
+
+    Ширины ученика берём не из таблицы, а из собранной модели: у U-Net они
+    зависят и от base_channels, и от depth, и держать их в голове бесполезно.
+    """
+    from src.models import SEGFORMER_VARIANTS, UNET_VARIANTS, UNet
 
     cfg = compose_config(
-        ["experiment=segmentation/FitNets/cityscapes_FitNets_segformer_b2_to_segnext_s"]
+        ["experiment=segmentation/FitNets/cityscapes_FitNets_segformer_b2_to_unet_base"]
     )
     spec = cfg.loss.layers["taps.stage3"]
 
-    # stage3 — третья стадия (индекс 2) в спецификациях обеих архитектур.
-    assert spec.student_channels == SEGNEXT_VARIANTS[cfg.model.student.variant]["embed_dims"][2]
+    student = UNet(num_classes=19, **UNET_VARIANTS[cfg.model.student.variant])
+    assert spec.student_channels == student.tap_channels["stage3"]
+
+    # stage3 — третья стадия (индекс 2) в спецификации MiT.
     assert (
         spec.teacher_channels
         == SEGFORMER_VARIANTS[cfg.model.teacher.variant]["hidden_sizes"][2]
+    )
+
+
+def test_fitnets_requests_only_taps_the_student_actually_has():
+    """У U-Net с depth=4 нет стадии на страйде 32. Если конфиг попросит
+    taps.stage4, FeatureExtractor упадёт только на запуске обучения —
+    ловим здесь."""
+    from src.models import UNET_VARIANTS, UNet
+
+    cfg = compose_config(
+        ["experiment=segmentation/FitNets/cityscapes_FitNets_segformer_b2_to_unet_base"]
+    )
+    student = UNet(num_classes=19, **UNET_VARIANTS[cfg.model.student.variant])
+    available = {f"taps.{name}" for name in student.tap_channels}
+
+    assert set(cfg.loss.layers) <= available, (
+        f"конфиг просит {set(cfg.loss.layers) - available}, "
+        f"а у ученика есть только {sorted(available)}"
     )

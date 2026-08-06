@@ -1,16 +1,23 @@
 """Дистилляция семантической сегментации: лоссы, модели и их стыковка.
 
-Сетевых обращений тут нет: SegFormer собирается с pretrained=None, SegNeXt —
+Сетевых обращений тут нет: SegFormer собирается с pretrained=None, U-Net —
 всегда локально. Тесты, которым нужны скачанные веса, помечены как integration.
 """
 
 import pytest
 import torch
 import torch.nn.functional as F
+from torch import nn
 
 from src.losses import ChannelWiseKD, DISTLoss, FitNetsKD, PixelWiseKD
 from src.losses.segmentation_utils import subsample_spatially
-from src.models import STAGE_TAPS, FeatureExtractor, SegFormer, SegNeXt
+from src.models import (
+    STAGE_TAPS,
+    FeatureExtractor,
+    SegFormer,
+    unet_for_segmentation,
+    unwrap_model,
+)
 
 NUM_CLASSES = 5
 IGNORE_INDEX = 255
@@ -320,38 +327,60 @@ class TestFitNets:
             FitNetsKD(layers={})
 
 
-class TestSegNeXt:
+class TestUNet:
     @pytest.mark.parametrize(
-        "variant,expected_millions", [("tiny", 4.3), ("small", 13.9)]
+        "variant,expected_millions",
+        [("tiny", 1.94), ("small", 4.37), ("base", 7.76), ("large", 17.46), ("full", 31.04)],
     )
-    def test_parameter_count_matches_paper(self, variant, expected_millions):
-        model = SegNeXt(variant=variant, num_classes=19)
+    def test_variant_sizes_match_the_documented_table(self, variant, expected_millions):
+        """Числа продублированы в UNET_VARIANTS и в configs/model/student/unet.yaml;
+        размер ученика — то, по чему сравнивают методы дистилляции, поэтому
+        расхождение таблицы с реальностью должно ловиться сразу."""
+        model = unet_for_segmentation(variant=variant, num_classes=19)
         millions = sum(p.numel() for p in model.parameters()) / 1e6
-        assert abs(millions - expected_millions) < 0.15, millions
+        assert abs(millions - expected_millions) < 0.02, millions
 
     def test_logits_have_input_resolution(self):
-        model = SegNeXt(variant="tiny", num_classes=NUM_CLASSES)
+        model = unet_for_segmentation(variant="tiny", num_classes=NUM_CLASSES)
         logits = model(torch.randn(2, 3, 64, 96))
         assert logits.shape == (2, NUM_CLASSES, 64, 96)
 
     def test_backward_reaches_every_parameter(self):
-        model = SegNeXt(variant="tiny", num_classes=NUM_CLASSES)
+        model = unet_for_segmentation(variant="tiny", num_classes=NUM_CLASSES)
         model(torch.randn(1, 3, 64, 64)).sum().backward()
         without_grad = [name for name, p in model.named_parameters() if p.grad is None]
         assert not without_grad, without_grad
 
     def test_unknown_variant_raises(self):
         with pytest.raises(ValueError):
-            SegNeXt(variant="huge")
+            unet_for_segmentation(variant="huge")
 
-    def test_nmf_is_finite_on_degenerate_input(self):
-        """NMF делит на знаменатели, которые на нулевом входе обращаются
-        в ноль: eps обязан удержать результат конечным."""
-        from src.models.segnext import NMF2D
+    def test_depth4_has_no_stage4_tap(self):
+        """Самая глубокая карта U-Net с depth=4 — боттлнек на страйде 16.
+        Тапа на страйде 32 у него нет, и объявлять его нельзя: FitNets тогда
+        сравнивал бы не то с тем."""
+        model = unet_for_segmentation(variant="base", num_classes=NUM_CLASSES)
+        assert set(model.tap_channels) == {"stage1", "stage2", "stage3"}
+        assert model.tap_channels == {"stage1": 128, "stage2": 256, "stage3": 512}
 
-        module = NMF2D(num_bases=4)
-        output = module(torch.zeros(1, 8, 4, 4))
-        assert torch.isfinite(output).all()
+    def test_depth5_adds_stage4_tap(self):
+        model = unet_for_segmentation(variant="base", depth=5, num_classes=NUM_CLASSES)
+        assert set(model.tap_channels) == {"stage1", "stage2", "stage3", "stage4"}
+        assert model.tap_channels["stage4"] == 32 * 32
+
+    def test_tapped_maps_have_the_stride_their_name_promises(self):
+        """Смысл тапа — страйд, а не порядковый номер слоя."""
+        model = unet_for_segmentation(variant="tiny", num_classes=NUM_CLASSES)
+        layers = [f"taps.{name}" for name in model.tap_channels]
+        extractor = FeatureExtractor(model, layers)
+        try:
+            model(torch.randn(1, 3, 64, 96))
+            for name, stride in (("stage1", 4), ("stage2", 8), ("stage3", 16)):
+                feature = extractor.features[f"taps.{name}"]
+                assert feature.shape[1] == model.tap_channels[name]
+                assert feature.shape[2:] == (64 // stride, 96 // stride)
+        finally:
+            extractor.remove()
 
 
 class TestSegFormer:
@@ -373,22 +402,32 @@ class TestFeatureTapsInterop:
     """Ради чего вообще заведены тапы: снять признаки с двух РАЗНЫХ
     архитектур одним и тем же списком имён слоёв."""
 
-    def test_both_models_expose_the_same_tap_names(self):
-        student = SegNeXt(variant="tiny", num_classes=NUM_CLASSES)
+    def test_teacher_exposes_all_four_taps(self):
+        teacher = SegFormer(variant="b0", num_classes=NUM_CLASSES, pretrained=None)
+        teacher_taps = {n for n, _ in teacher.named_modules() if n.startswith("taps.")}
+        assert teacher_taps == {f"taps.{name}" for name in STAGE_TAPS}
+
+    def test_student_taps_are_a_subset_of_the_teacher_s(self):
+        """У ученика может не быть самых глубоких стадий (U-Net с depth=4
+        доходит до страйда 16). Дистиллировать можно по пересечению —
+        оно и должно быть непустым."""
+        student = unet_for_segmentation(variant="base", num_classes=NUM_CLASSES)
         teacher = SegFormer(variant="b0", num_classes=NUM_CLASSES, pretrained=None)
 
         student_taps = {n for n, _ in student.named_modules() if n.startswith("taps.")}
         teacher_taps = {n for n, _ in teacher.named_modules() if n.startswith("taps.")}
-        expected = {f"taps.{name}" for name in STAGE_TAPS}
 
-        assert student_taps == teacher_taps == expected
+        assert student_taps < teacher_taps
+        assert "taps.stage3" in student_taps
 
-    def test_feature_extractor_captures_matching_stages(self):
-        """SegNeXt-T и SegFormer-B0 имеют одинаковые ширины стадий
-        [32, 64, 160, 256], поэтому карты обязаны совпасть и по форме."""
-        layers = [f"taps.{name}" for name in STAGE_TAPS]
-        student = SegNeXt(variant="tiny", num_classes=NUM_CLASSES)
+    def test_feature_extractor_captures_spatially_aligned_stages(self):
+        """Ширины стадий у U-Net и SegFormer разные — их и согласует регрессор
+        FitNets. Совпадать обязано ПРОСТРАНСТВЕННОЕ разрешение: одинаковое имя
+        тапа означает одинаковый страйд, иначе MSE считался бы по разным сеткам.
+        """
+        student = unet_for_segmentation(variant="base", num_classes=NUM_CLASSES)
         teacher = SegFormer(variant="b0", num_classes=NUM_CLASSES, pretrained=None)
+        layers = [f"taps.{name}" for name in student.tap_channels]
 
         student_extractor = FeatureExtractor(student, layers)
         teacher_extractor = FeatureExtractor(teacher, layers)
@@ -400,19 +439,84 @@ class TestFeatureTapsInterop:
             assert set(student_extractor.features) == set(layers)
             for layer in layers:
                 assert (
-                    student_extractor.features[layer].shape
-                    == teacher_extractor.features[layer].shape
-                )
+                    student_extractor.features[layer].shape[2:]
+                    == teacher_extractor.features[layer].shape[2:]
+                ), layer
         finally:
             student_extractor.remove()
             teacher_extractor.remove()
 
+    def test_requesting_a_tap_the_student_lacks_raises(self):
+        """Ошибка конфига должна всплыть при сборке FeatureExtractor,
+        а не молча пройти в обучение."""
+        student = unet_for_segmentation(variant="base", num_classes=NUM_CLASSES)
+        with pytest.raises(ValueError, match="stage4"):
+            FeatureExtractor(student, ["taps.stage4"])
+
     def test_taps_add_no_parameters_and_no_state(self):
-        """Тапы не должны попадать ни в optimizer, ни в чекпоинт."""
-        model = SegNeXt(variant="tiny", num_classes=NUM_CLASSES)
+        """Тапы не должны попадать ни в optimizer, ни в чекпоинт: иначе
+        добавление тапов в U-Net сломало бы загрузку уже обученных чекпоинтов
+        (load_state_dict идёт со strict=True)."""
+        model = unet_for_segmentation(variant="tiny", num_classes=NUM_CLASSES)
         assert list(model.taps.parameters()) == []
         assert model.taps.state_dict() == {}
         assert not any(key.startswith("taps.") for key in model.state_dict())
+
+
+class _CompiledStub(nn.Module):
+    """Мимикрия под OptimizedModule из torch.compile: оригинал в _orig_mod.
+
+    Настоящий torch.compile в тестах не зовём — он тянет компилятор и
+    зависит от версии; нам нужна только форма обёртки.
+    """
+
+    def __init__(self, module: nn.Module) -> None:
+        super().__init__()
+        self._orig_mod = module
+
+    def forward(self, *args, **kwargs):
+        return self._orig_mod(*args, **kwargs)
+
+
+class TestFeatureExtractorUnwrapping:
+    """Имена тапов приходят из конфига лосса и про обёртки не знают.
+    Под DDP модель называется module.taps.stage3, под torch.compile —
+    _orig_mod.taps.stage3; FeatureExtractor обязан найти тапы в обоих случаях.
+    """
+
+    def test_plain_model_is_returned_as_is(self):
+        model = unet_for_segmentation(variant="tiny", num_classes=NUM_CLASSES)
+        assert unwrap_model(model) is model
+
+    def test_data_parallel_is_stripped(self):
+        """DataParallel и DistributedDataParallel снимаются одной и той же
+        веткой isinstance. DDP здесь не строим: он требует инициализированной
+        process group, а проверяемая ветка кода — та же самая."""
+        inner = nn.Conv2d(3, 4, kernel_size=1)
+        assert unwrap_model(nn.DataParallel(inner)) is inner
+
+    def test_torch_compile_is_stripped(self):
+        inner = nn.Conv2d(3, 4, kernel_size=1)
+        assert unwrap_model(_CompiledStub(inner)) is inner
+
+    def test_nested_wrappers_are_stripped(self):
+        """DDP поверх скомпилированной модели — штатная комбинация."""
+        inner = nn.Conv2d(3, 4, kernel_size=1)
+        assert unwrap_model(nn.DataParallel(_CompiledStub(inner))) is inner
+
+    def test_extractor_finds_taps_through_wrapper(self):
+        """То, ради чего всё: список имён из конфига работает без изменений
+        и для обёрнутой модели."""
+        model = unet_for_segmentation(variant="tiny", num_classes=NUM_CLASSES)
+        layers = [f"taps.{name}" for name in model.tap_channels]
+        wrapped = _CompiledStub(model)
+
+        extractor = FeatureExtractor(wrapped, layers)
+        try:
+            wrapped(torch.randn(1, 3, 64, 96))
+            assert set(extractor.features) == set(layers)
+        finally:
+            extractor.remove()
 
 
 class TestAutocast:
@@ -423,33 +527,28 @@ class TestAutocast:
     Тонкость, ради которой тесты и написаны: autocast перехватывает
     операции по СПИСКУ, а не по типу аргументов. Вызов .float() перед bmm
     или conv2d ничего не гарантирует — autocast приведёт аргументы обратно.
+    Именно поэтому лоссы обязаны отдавать скаляры в fp32.
     """
 
-    def test_nmf_stays_fp32_inside_autocast(self):
-        """NMF делит на почти нулевые знаменатели; в bf16 это NaN."""
-        from src.models.segnext import NMF2D
-
-        captured = {}
-        module = NMF2D(num_bases=4)
-        original_step = module._update_coef
-
-        def spy(x, bases, coef):
-            result = original_step(x, bases, coef)
-            captured["dtype"] = result.dtype
-            return result
-
-        module._update_coef = spy
-        with torch.autocast("cpu", dtype=torch.bfloat16):
-            output = module(torch.randn(1, 8, 4, 6).abs())
-
-        assert captured["dtype"] == torch.float32, "итерации NMF ушли в половинную точность"
-        assert torch.isfinite(output).all()
-
-    def test_segnext_forward_is_finite_under_autocast(self):
-        model = SegNeXt(variant="tiny", num_classes=NUM_CLASSES)
+    def test_unet_forward_is_finite_under_autocast(self):
+        model = unet_for_segmentation(variant="tiny", num_classes=NUM_CLASSES)
         with torch.autocast("cpu", dtype=torch.bfloat16):
             logits = model(torch.randn(1, 3, 64, 96))
         assert torch.isfinite(logits.float()).all()
+
+    def test_taps_survive_autocast(self):
+        """Под AMP снятые карты приходят в половинной точности — FitNets
+        приводит их к fp32 сам, но тап не должен ничего терять по дороге."""
+        model = unet_for_segmentation(variant="tiny", num_classes=NUM_CLASSES)
+        extractor = FeatureExtractor(model, ["taps.stage3"])
+        try:
+            with torch.autocast("cpu", dtype=torch.bfloat16):
+                model(torch.randn(1, 3, 64, 96))
+            feature = extractor.features["taps.stage3"]
+            assert feature.shape == (1, model.tap_channels["stage3"], 4, 6)
+            assert torch.isfinite(feature.float()).all()
+        finally:
+            extractor.remove()
 
     @pytest.mark.parametrize(
         "criterion_factory",
@@ -499,10 +598,12 @@ class TestOptimizationStep:
             lambda: PixelWiseKD(ignore_index=IGNORE_INDEX),
             lambda: ChannelWiseKD(ignore_index=IGNORE_INDEX),
             lambda: DISTLoss(ignore_index=IGNORE_INDEX),
+            # U-Net-tiny даёт на stage3 (боттлнек, страйд 16) 16*16=256 каналов,
+            # SegFormer-B0 — 160. Регрессор их и согласует.
             lambda: FitNetsKD(
                 layers={
                     "taps.stage3": {
-                        "student_channels": 160,
+                        "student_channels": 256,
                         "teacher_channels": 160,
                         "weight": 1.0,
                     }
@@ -513,7 +614,7 @@ class TestOptimizationStep:
     )
     def test_single_step_updates_student(self, criterion_factory):
         torch.manual_seed(0)
-        student = SegNeXt(variant="tiny", num_classes=NUM_CLASSES)
+        student = unet_for_segmentation(variant="tiny", num_classes=NUM_CLASSES)
         teacher = SegFormer(variant="b0", num_classes=NUM_CLASSES, pretrained=None)
         teacher.eval()
         teacher.requires_grad_(False)
@@ -540,7 +641,7 @@ class TestOptimizationStep:
             )
             losses["total"].backward()
 
-            head_grad = student.decode_head.classifier.weight.grad
+            head_grad = student.head.weight.grad
             assert head_grad is not None and head_grad.abs().sum() > 0
             assert torch.isfinite(losses["total"])
         finally:
