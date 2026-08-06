@@ -193,6 +193,7 @@ def main(cfg: DictConfig) -> float:
 
         if task is not None:
             task.get_logger().report_single_value("best_eval_acc", result["best_acc"])
+            task.get_logger().report_single_value("world_size", dist.world_size)
             task.close()
     finally:
         # при падении одного ранка остальные должны корректно

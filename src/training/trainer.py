@@ -189,7 +189,7 @@ class Trainer:
         )
 
     def fit(self) -> dict:
-        history = MetricsHistory(self.output_dir / "history.csv")
+        history = MetricsHistory(self.output_dir / "history.csv") if self.dist.is_main else None
         best_acc, best_epoch = 0.0, 0
 
         try:
@@ -208,6 +208,8 @@ class Trainer:
                 all_values = {
                     "epoch": epoch,
                     "lr": lr,
+                    "world_size": self.dist.world_size,
+                    "global_batch_size": (self.train_loader.batch_size or 0) * self.dist.world_size,
                     "eval_loss": eval_loss,
                     "eval_acc": eval_acc,
                     "time_epoch": round(time.time() - start, 1),
@@ -215,7 +217,8 @@ class Trainer:
                     **{f"train_{key}": value for key, value in other_train_metrics.items()},
                 }
 
-                history.append(all_values)
+                if history is not None:
+                    history.append(all_values)
                 if self.metrics_callback_scalar is not None:
                     self.metrics_callback_scalar(all_values)
 
@@ -273,7 +276,7 @@ class Trainer:
         iterator = tqdm(
             self.train_loader,
             desc=f"Эпоха {epoch}/{self.epochs}",
-            disable=not self.progress_bar,
+            disable=not self.progress_bar or not self.dist.is_main,
             leave=False,
         )
 
@@ -381,12 +384,16 @@ class Trainer:
         return train_loss_components, other_train_metrics
 
     def _save_checkpoint(self, filename: str, epoch: int, best_acc: float) -> None:
+        if not self.dist.is_main:
+            return
+
         checkpoint = {
             "epoch": epoch,
             "best_acc": best_acc,
-            "student_state": self.student.state_dict(),
+            "world_size": self.dist.world_size,
+            "student_state": unwrap(self.student).state_dict(),
             # Состояние лосса = адаптеры каналов (у CrossEntropy/HintonKD пусто).
-            "criterion_state": self.criterion.state_dict(),
+            "criterion_state": unwrap(self.criterion).state_dict(),
             "optimizer_state": self.optimizer.state_dict(),
             "scheduler_state": self.scheduler.state_dict() if self.scheduler else None,
             "scaler_state": self.scaler.state_dict(),
