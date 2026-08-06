@@ -4,5 +4,16 @@ from src.losses.feature_kd import FeatureKD
 from src.losses.hinton import HintonKD
 from src.losses.mgd import MGDLoss
 from src.losses.relational import SimilarityPreservationLoss
+from src.losses.aid_teacher_adaptation import AIDTeacherAdaptationLoss
+from src.losses.lwdetr_small_loss import LWDETRLoss
 
-__all__ = ["CrossEntropy", "DistillationLoss", "FeatureKD", "HintonKD", "MGDLoss", "SimilarityPreservationLoss", "AIDTeacherAdaptationLoss"]
+__all__ = [
+    "CrossEntropy", 
+    "DistillationLoss", 
+    "FeatureKD", 
+    "HintonKD", 
+    "MGDLoss", 
+    "SimilarityPreservationLoss", 
+    "AIDTeacherAdaptationLoss",
+    "LWDETRLoss"
+]

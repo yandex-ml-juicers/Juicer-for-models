@@ -1,0 +1,16 @@
+build:
+  _target_: src.data.datasets.cityscapes_segmentation
+  # каталог, внутри которого лежат leftImg8bit/ и gtFine/
+  root: data/raw/cityscapes
+  ignore_index: 255
+
+num_classes: 19       # оценочные trainId'ы Cityscapes, без ignore
+ignore_index: 255     # пиксели вне 19 классов; не участвуют ни в лоссе, ни в mIoU
+
+image_size: [1024, 2048]   # родное разрешение, используется на eval
+crop_size: [512, 1024]     # размер train-кропа
+scale_range: [0.5, 2.0]    # диапазон случайного масштаба перед кропом
+
+normalize:
+  mean: [0.485, 0.456, 0.406]
+  std: [0.229, 0.224, 0.225]

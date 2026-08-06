@@ -17,6 +17,7 @@ def resolve_device(device: str = "auto") -> torch.device:
     if resolved.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("В конфиге запрошена CUDA, но torch.cuda.is_available() == False")
     if resolved.type == "cuda":
+        #torch.cuda.set_device(resolved)
         log.info("Устройство: %s (%s)", resolved, torch.cuda.get_device_name(resolved))
     else:
         log.info("Устройство: %s", resolved)

@@ -7,7 +7,7 @@ from src.data.transforms import base_transform
 from src.utils.seed import make_generator, seed_worker
 
 
-def base_loader(cfg: DictConfig, seed: int) -> tuple[DataLoader, DataLoader]:
+def base_loader(cfg: DictConfig, task_type: str, seed: int) -> tuple[DataLoader, DataLoader]:
     """Возвращает (train_loader, eval_loader)."""
     train_transform = instantiate(cfg.transform.train)
     eval_transform = instantiate(cfg.transform.eval)
@@ -23,6 +23,10 @@ def base_loader(cfg: DictConfig, seed: int) -> tuple[DataLoader, DataLoader]:
         persistent_workers=cfg.loader.persistent_workers and num_workers > 0,
         worker_init_fn=seed_worker,
     )
+
+    if task_type == "detection":
+        common["collate_fn"] = detection_collate_fn
+
     train_loader = DataLoader(
         train_dataset,
         batch_size=cfg.loader.batch_size,
@@ -30,10 +34,22 @@ def base_loader(cfg: DictConfig, seed: int) -> tuple[DataLoader, DataLoader]:
         generator=make_generator(seed),
         **common,
     )
+
+    eval_batch_size = cfg.loader.get("eval_batch_size", None) or cfg.loader.batch_size
+
     eval_loader = DataLoader(
         eval_dataset,
-        batch_size=cfg.loader.batch_size,
+        batch_size=eval_batch_size,
         shuffle=False,
         **common,
     )
     return train_loader, eval_loader
+
+
+def detection_collate_fn(
+    batch: list[tuple[torch.Tensor, dict[str, torch.Tensor]]],
+) -> tuple[
+    tuple[torch.Tensor, ...],
+    tuple[dict[str, torch.Tensor], ...],
+]:
+    return tuple(zip(*batch))

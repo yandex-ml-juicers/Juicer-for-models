@@ -1,4 +1,5 @@
 batch_size: 64
+eval_batch_size: null   # null — тот же, что batch_size
 num_workers: 0
 pin_memory: false
 persistent_workers: false
