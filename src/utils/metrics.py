@@ -14,6 +14,8 @@ import torch.nn.functional as F
 
 from src.utils.distributed import all_reduce_sum_
 
+from src.utils.distributed import all_reduce_sum_
+
 def accuracy(logits: torch.Tensor, targets: torch.Tensor) -> float:
     """Доля правильных ответов по argmax логитов, в [0, 1]."""
     predictions = logits.argmax(dim=1)
