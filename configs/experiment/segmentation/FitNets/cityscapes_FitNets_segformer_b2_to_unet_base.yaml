@@ -1,0 +1,71 @@
+# @package _global_
+# FitNets hint loss (arXiv:1412.6550): SegFormer-B2 -> U-Net-base.
+# Единственный из четырёх методов, который дистиллирует не выход, а
+# промежуточные признаки — и единственный, у которого есть обучаемые
+# параметры (регрессор 1x1 внутри лосса; train.py кладёт их в optimizer).
+#
+# Бейзлайн для этого прогона — scratch/cityscapes_scratch_unet_base.
+defaults:
+  - override /data/dataset: cityscapes_seg
+  - override /data/transform/train: cityscapes_seg_transform
+  - override /data/transform/eval: cityscapes_seg_transform
+  - override /model/teacher: segformer
+  - override /model/student: unet
+  - override /loss: fitnets
+  - override /optimizer: adamw
+  - override /scheduler: warmup_cosine
+
+name: cityscapes_FitNets_segformer_b2_to_unet_base
+device: cuda
+deterministic: false
+
+task_type: "segmentation"
+
+clearml:
+  enabled: True
+  tags: [cityscapes, KD, FitNets, segformer-b2, unet-base, segmentation]
+  scalars: []
+  reuse_last_task_id: False
+  continue_last_task: False
+  output_uri: false
+
+trainer:
+  epochs: 100
+  amp: true
+  grad_clip_norm: 1.0
+
+loss:
+  ce_weight: 1.0
+  hint_weight: 1.0
+  logits_weight: 0.0   # чистая абляция hint-лосса, без KD по логитам
+  # Стадия 3 = страйд 16. У SegFormer-B2 там 320 каналов, у U-Net с
+  # base_channels=32 это боттлнек на 512 каналов — регрессор 1x1 их и
+  # согласует. stage4 у U-Net с depth=4 не существует, см. configs/loss/fitnets.yaml.
+  layers:
+    taps.stage3: { student_channels: 512, teacher_channels: 320, weight: 1.0 }
+
+# U-Net обучается с нуля (ImageNet-инициализации у него нет), поэтому lr выше,
+# чем в конфигах с предобученным энкодером.
+optimizer:
+  lr: 3.0e-4
+  weight_decay: 1.0e-2
+
+scheduler:
+  warmup_epochs: 5
+  eta_min: 1.0e-6
+
+data:
+  loader:
+    batch_size: 8
+    eval_batch_size: 4
+    num_workers: 8
+    pin_memory: true
+    persistent_workers: true
+
+model:
+  student:
+    variant: base
+  teacher:
+    variant: b2
+    pretrained: cityscapes
+    checkpoint_path: null
