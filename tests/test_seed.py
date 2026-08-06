@@ -84,11 +84,11 @@ def test_dataloader_order_is_reproducible():
     cfg = OmegaConf.create(FAKE_DATA_CFG)
 
     seed_everything(42)
-    train_a, _ = base_loader(cfg, seed=42)
+    train_a, _ = base_loader(cfg, "classification", seed=42)
     batches_a = [labels.clone() for _, labels in train_a]
 
     seed_everything(42)
-    train_b, _ = base_loader(cfg, seed=42)
+    train_b, _ = base_loader(cfg, "classification", seed=42)
     batches_b = [labels.clone() for _, labels in train_b]
 
     assert len(batches_a) == len(batches_b)

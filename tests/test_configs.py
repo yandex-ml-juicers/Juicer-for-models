@@ -10,12 +10,26 @@ from hydra.utils import instantiate
 
 from src.losses import DistillationLoss
 
+# Пути от configs/experiment/ — эксперименты разложены по подкаталогам.
 EXPERIMENTS = [
-    "b1_vanilla_kd",
-    "b1_scratch",
-    "b2_feature_kd",
-    "b2_scratch",
-    "imagenet1k_scratch_resnet18",
+    "baseline/b1_resnet56_to_resnet20_kd",
+    "baseline/b1_scratch",
+    "baseline/b2_feature_kd",
+    "baseline/b2_scratch",
+    "scratch/imagenet1k_scratch_resnet18",
+]
+
+# Сегментация: 4 бейзлайна без дистилляции + 4 метода дистилляции
+# SegFormer-B2 -> SegNeXt-S.
+SEGMENTATION_EXPERIMENTS = [
+    "scratch/cityscapes_scratch_segformer_b2",
+    "scratch/cityscapes_scratch_segformer_b5",
+    "scratch/cityscapes_scratch_segnext_s",
+    "scratch/cityscapes_scratch_segnext_t",
+    "segmentation/vanilla-KD/cityscapes_pixel-KD_segformer_b2_to_segnext_s",
+    "segmentation/CWD/cityscapes_CWD_segformer_b2_to_segnext_s",
+    "segmentation/FitNets/cityscapes_FitNets_segformer_b2_to_segnext_s",
+    "segmentation/DIST/cityscapes_DIST_segformer_b2_to_segnext_s",
 ]
 
 
@@ -31,7 +45,7 @@ def test_default_config_composes():
     assert cfg.trainer.epochs > 0
 
 
-@pytest.mark.parametrize("experiment", EXPERIMENTS)
+@pytest.mark.parametrize("experiment", EXPERIMENTS + SEGMENTATION_EXPERIMENTS)
 def test_experiment_composes_and_is_consistent(experiment):
     cfg = compose_config([f"experiment={experiment}"])
 
@@ -48,18 +62,56 @@ def test_experiment_composes_and_is_consistent(experiment):
 
 
 def test_feature_kd_declares_layers():
-    cfg = compose_config(["experiment=b2_feature_kd"])
+    cfg = compose_config(["experiment=baseline/b2_feature_kd"])
     criterion = instantiate(cfg.loss)
     assert criterion.required_features == ("layer1", "layer2", "layer3", "layer4")
     assert len(list(criterion.parameters())) == 4  # по одной 1x1-свёртке на слой
 
 
 def test_scratch_experiments_have_no_teacher():
-    for experiment in ["b1_scratch", "b2_scratch"]:
+    for experiment in ["baseline/b1_scratch", "baseline/b2_scratch"]:
         cfg = compose_config([f"experiment={experiment}"])
         assert cfg.model.get("teacher") is None
 
 
 def test_scheduler_t_max_follows_epochs():
-    cfg = compose_config(["experiment=b1_vanilla_kd", "trainer.epochs=7"])
+    cfg = compose_config(["experiment=baseline/b1_resnet56_to_resnet20_kd", "trainer.epochs=7"])
     assert cfg.scheduler.T_max == 7
+
+
+@pytest.mark.parametrize("experiment", SEGMENTATION_EXPERIMENTS)
+def test_segmentation_experiments_are_wired_for_segmentation(experiment):
+    cfg = compose_config([f"experiment={experiment}"])
+
+    assert cfg.task_type == "segmentation"
+    # ignore_index должен доехать до лосса, иначе void-пиксели Cityscapes
+    # станут двадцатым «классом» и испортят обучение.
+    assert cfg.loss.ignore_index == cfg.data.dataset.ignore_index
+    assert cfg.data.dataset.num_classes == 19
+
+
+def test_segmentation_scratch_experiments_have_no_teacher():
+    for experiment in SEGMENTATION_EXPERIMENTS:
+        if "scratch" not in experiment:
+            continue
+        cfg = compose_config([f"experiment={experiment}"])
+        assert cfg.model.get("teacher") is None
+
+
+def test_fitnets_channels_match_the_configured_pair():
+    """Каналы регрессора обязаны совпадать с реальными ширинами стадий
+    SegFormer-B2 и SegNeXt-S — иначе адаптер соберётся, а форма не сойдётся
+    уже в первом батче."""
+    from src.models import SEGFORMER_VARIANTS, SEGNEXT_VARIANTS
+
+    cfg = compose_config(
+        ["experiment=segmentation/FitNets/cityscapes_FitNets_segformer_b2_to_segnext_s"]
+    )
+    spec = cfg.loss.layers["taps.stage3"]
+
+    # stage3 — третья стадия (индекс 2) в спецификациях обеих архитектур.
+    assert spec.student_channels == SEGNEXT_VARIANTS[cfg.model.student.variant]["embed_dims"][2]
+    assert (
+        spec.teacher_channels
+        == SEGFORMER_VARIANTS[cfg.model.teacher.variant]["hidden_sizes"][2]
+    )
