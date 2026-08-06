@@ -1,0 +1,18 @@
+# SegFormer в роли замороженного учителя (этап дистилляции).
+#
+# Два способа получить учителя:
+#   1) обучить его самим (experiment=scratch/cityscapes_scratch_segformer_b2)
+#      и указать сюда checkpoint_path до best.pt этого прогона — так учитель
+#      и ученик видели ровно один и тот же train-сплит;
+#   2) pretrained: cityscapes — взять nvidia/segformer-b2-finetuned-cityscapes
+#      как готового сильного учителя (обучен на других аугментациях и
+#      расписании, зато не требует первого этапа).
+_target_: src.models.factory.segformer_for_segmentation
+variant: b2
+
+num_classes: ${data.dataset.num_classes}
+pretrained: cityscapes
+align_corners: false
+
+checkpoint_path: null
+weights_dir: data/weights

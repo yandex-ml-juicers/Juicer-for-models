@@ -1,0 +1,20 @@
+# SegFormer (Xie et al., NeurIPS 2021) в слоте ученика — используется для
+# обучения самих учителей (эксперименты scratch SegFormer-B2 / B5).
+_target_: src.models.factory.segformer_for_segmentation
+variant: b2             # b0 | b1 | b2 | b3 | b4 | b5
+
+num_classes: ${data.dataset.num_classes}
+
+# null       — случайная инициализация целиком;
+# imagenet   — энкодер MiT с ImageNet (nvidia/mit-b*), голова декодера случайна;
+# cityscapes — готовая дообученная nvidia/segformer-*-finetuned-cityscapes.
+pretrained: imagenet
+
+align_corners: false
+
+# Чекпоинт нашего тренера (ключ student_state); при заданном checkpoint_path
+# pretrained игнорируется.
+checkpoint_path: null
+
+# Веса Hugging Face кладутся в <weights_dir>/huggingface.
+weights_dir: data/weights

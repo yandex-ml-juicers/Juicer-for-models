@@ -1,13 +1,15 @@
 """Фабрики моделей. Каждая функция — точка входа для _target_ в конфигах
 configs/model/teacher/*.yaml и configs/model/student/*.yaml.
 
+Здесь только сборка: сами архитектуры лежат в отдельных модулях
+(src/models/segformer.py, src/models/unet.py), а работа с весами —
+в src/utils/checkpoints.py, потому что она общая для всех задач.
+
 Заморозка учителя здесь НЕ делается: это политика обучения, а не свойство
 модели, и ею владеет Trainer.
 """
 
 import timm
-from pathlib import Path
-
 import torch
 from torch import nn
 from torchvision import models as tv_models
@@ -16,7 +18,9 @@ from torchvision.models import get_model
 
 from transformers import LwDetrConfig, LwDetrForObjectDetection
 
-from hydra.utils import to_absolute_path
+from src.models.segformer import SegFormer
+from src.models.unet import UNET_VARIANTS, UNet
+from src.utils.checkpoints import load_checkpoint_into, resolve_weights_dir
 
 
 def from_torch_hub(repo: str, name: str, pretrained: bool = False) -> nn.Module:
@@ -72,38 +76,9 @@ def torchvision_model_for_classification(
 
     if checkpoint_path is None:
         return model
-    
-    weights_path = Path(to_absolute_path(checkpoint_path))
-    if not weights_path.is_file():
-        raise FileNotFoundError(f"Weights file was not found: {weights_path}")
 
-    checkpoint = torch.load(weights_path, map_location="cpu", weights_only=True)
-    if not isinstance(checkpoint, dict):
-        raise TypeError(f"A checkpoint with a dict-style weight was expected, but it was received {type(checkpoint)}")
+    return load_checkpoint_into(model, checkpoint_path, model_name)
 
-    if "model_state_dict" in checkpoint:
-        state_dict = checkpoint["model_state_dict"]
-    elif "student_state" in checkpoint:
-        state_dict = checkpoint["student_state"]
-    elif "state_dict" in checkpoint:
-        state_dict = checkpoint["state_dict"]
-    elif "model" in checkpoint and isinstance(checkpoint["model"], dict):
-        state_dict = checkpoint["model"]
-    else:
-        state_dict = checkpoint
-
-    cleaned_state_dict = {}
-
-    state_dict = {
-        key.removeprefix("module."): value
-        for key, value in state_dict.items()
-    }
-
-    model.load_state_dict(state_dict, strict=True)
-
-    print(f"Weights for {model_name} has been loaded: {weights_path}")
-
-    return model
 
 def timm_model_for_classification(
     model_name: str, 
@@ -123,152 +98,87 @@ def timm_model_for_classification(
     if checkpoint_path is None:
         return model
 
-    weights_path = Path(to_absolute_path(checkpoint_path))
-    if not weights_path.is_file():
-        raise FileNotFoundError(f"Checkpoint file was not found: {weights_path}")
-
-    checkpoint = torch.load(weights_path, map_location="cpu", weights_only=True)
-
-    if isinstance(checkpoint, dict) and "student_state" in checkpoint:
-        state_dict = checkpoint["student_state"]
-    elif isinstance(checkpoint, dict) and "state_dict" in checkpoint:
-        state_dict = checkpoint["state_dict"]
-    elif isinstance(checkpoint, dict) and "model" in checkpoint:
-        state_dict = checkpoint["model"]
-    else:
-        state_dict = checkpoint
-
-    state_dict = {
-        key.removeprefix("module."): value
-        for key, value in state_dict.items()
-    }
-
-    model.load_state_dict(state_dict, strict=True)
-
-    print(f"Weights for {model_name} has been loaded: {weights_path}")
-
-    return model
-    
-
-class UNetDoubleConv(nn.Sequential):
-    """Conv-BN-ReLU x2 — базовый блок U-Net.
-    """
-
-    def __init__(self, in_channels: int, out_channels: int) -> None:
-        super().__init__(
-            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True),
-        )
-
-
-class UNet(nn.Module):
-    """Классический U-Net: симметричный энкодер-декодер со skip-connections.
-
-    Свёртки с padding=1 сохраняют размер, поэтому выход совпадает по разрешению
-    со входом и логиты [B, num_classes, H, W] можно скармливать cross_entropy
-    напрямую, без интерполяции. Требование: H и W кратны 2**depth
-    (512x1024 и 1024x2048 при depth=4 подходят).
-    """
-
-    def __init__(
-        self,
-        num_classes: int = 19,
-        in_channels: int = 3,
-        base_channels: int = 64,
-        depth: int = 4,
-    ) -> None:
-        super().__init__()
-
-        channels = [base_channels * 2 ** level for level in range(depth + 1)]
-
-        self.encoders = nn.ModuleList()
-        previous_channels = in_channels
-        for level_channels in channels[:-1]:
-            self.encoders.append(UNetDoubleConv(previous_channels, level_channels))
-            previous_channels = level_channels
-
-        self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
-        self.bottleneck = UNetDoubleConv(channels[-2], channels[-1])
-
-        self.upsamples = nn.ModuleList()
-        self.decoders = nn.ModuleList()
-        for level_channels in reversed(channels[:-1]):
-            self.upsamples.append(
-                nn.ConvTranspose2d(level_channels * 2, level_channels, kernel_size=2, stride=2)
-            )
-            # На вход декодера идёт конкатенация апсемпла и skip-связи.
-            self.decoders.append(UNetDoubleConv(level_channels * 2, level_channels))
-
-        self.head = nn.Conv2d(base_channels, num_classes, kernel_size=1)
-
-    def forward(self, images: torch.Tensor) -> torch.Tensor:
-        skips = []
-
-        features = images
-        for encoder in self.encoders:
-            features = encoder(features)
-            skips.append(features)
-            features = self.pool(features)
-
-        features = self.bottleneck(features)
-
-        for upsample, decoder, skip in zip(self.upsamples, self.decoders, reversed(skips)):
-            features = upsample(features)
-            features = torch.cat([skip, features], dim=1)
-            features = decoder(features)
-
-        return self.head(features)
+    return load_checkpoint_into(model, checkpoint_path, model_name)
 
 
 def unet_for_segmentation(
     num_classes: int = 19,
     in_channels: int = 3,
-    base_channels: int = 64,
-    depth: int = 4,
+    variant: str = "full",
+    base_channels: int | None = None,
+    depth: int | None = None,
     checkpoint_path: str | None = None,
 ) -> nn.Module:
     """U-Net для семантической сегментации.
 
-    checkpoint_path нужен на втором этапе: обученный учитель подгружается
-    из чекпоинта тренера (ключ student_state) и идёт в дистилляцию.
+    Args:
+        variant: именованный размер из UNET_VARIANTS
+            (tiny ~1.9M | small ~4.4M | base ~7.8M | large ~17.4M | full ~31.0M).
+        base_channels, depth: точечное переопределение варианта. None —
+            взять из спецификации. Оба рычага дорогие: число параметров
+            примерно квадратично по base_channels, а +1 к depth добавляет
+            самый широкий уровень и умножает размер примерно вчетверо
+            (base_channels=32: depth=4 -> 7.8M, depth=5 -> 31.1M). Для
+            подбора размера крутите base_channels; depth поднимайте только
+            если нужен тап на страйде 32 — и тогда вход обязан быть кратен 32.
+        checkpoint_path: чекпоинт нашего тренера (ключ student_state) — так
+            обученный на первом этапе U-Net становится учителем.
     """
+    if variant not in UNET_VARIANTS:
+        raise ValueError(
+            f"Неизвестный вариант U-Net: {variant!r}. Доступны: {sorted(UNET_VARIANTS)}"
+        )
+
+    spec = UNET_VARIANTS[variant]
     model = UNet(
         num_classes=num_classes,
         in_channels=in_channels,
-        base_channels=base_channels,
-        depth=depth,
+        base_channels=spec["base_channels"] if base_channels is None else base_channels,
+        depth=spec["depth"] if depth is None else depth,
     )
 
     if checkpoint_path is None:
         return model
 
-    weights_path = Path(to_absolute_path(checkpoint_path))
-    if not weights_path.is_file():
-        raise FileNotFoundError(f"Checkpoint file was not found: {weights_path}")
+    return load_checkpoint_into(model, checkpoint_path, f"U-Net-{variant}")
 
-    checkpoint = torch.load(weights_path, map_location="cpu", weights_only=True)
 
-    if isinstance(checkpoint, dict) and "student_state" in checkpoint:
-        state_dict = checkpoint["student_state"]
-    elif isinstance(checkpoint, dict) and "state_dict" in checkpoint:
-        state_dict = checkpoint["state_dict"]
-    else:
-        state_dict = checkpoint
+def segformer_for_segmentation(
+    variant: str = "b2",
+    num_classes: int = 19,
+    pretrained: str | None = "imagenet",
+    checkpoint_path: str | None = None,
+    weights_dir: str | None = None,
+    align_corners: bool = False,
+) -> nn.Module:
+    """SegFormer-B{0..5} для семантической сегментации.
 
-    state_dict = {
-        key.removeprefix("module."): value
-        for key, value in state_dict.items()
-    }
+    Args:
+        pretrained: None | "imagenet" (энкодер MiT с ImageNet) |
+            "cityscapes" (готовая дообученная модель nvidia/segformer-*).
+            Игнорируется, если задан checkpoint_path.
+        checkpoint_path: чекпоинт нашего тренера — так модель, обученная
+            на этапе scratch, подставляется учителем в дистилляцию.
+        weights_dir: куда качать веса; по умолчанию data/weights.
 
-    model.load_state_dict(state_dict, strict=True)
+    Веса Hugging Face кладутся в <weights_dir>/huggingface: hub сам
+    проверяет, что уже скачано, поэтому повторный запуск ничего не тянет.
+    """
+    cache_dir = str(resolve_weights_dir(weights_dir) / "huggingface")
 
-    print(f"Weights for U-Net has been loaded: {weights_path}")
+    # Если веса всё равно будут перезаписаны чекпоинтом, качать их незачем.
+    model = SegFormer(
+        variant=variant,
+        num_classes=num_classes,
+        pretrained=None if checkpoint_path is not None else pretrained,
+        cache_dir=cache_dir,
+        align_corners=align_corners,
+    )
 
-    return model
+    if checkpoint_path is None:
+        return model
+
+    return load_checkpoint_into(model, checkpoint_path, f"SegFormer-{variant.upper()}")
 
 
 def lwdetr_small_for_detection(
