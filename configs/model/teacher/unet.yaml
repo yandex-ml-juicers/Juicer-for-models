@@ -1,9 +1,13 @@
 # Обученный U-Net в роли замороженного учителя (этап дистилляции).
 # checkpoint_path обязателен: без него в учителя пойдут случайные веса.
 # Путь — до best.pt из outputs/<name>/<дата>/ прогона cityscapes_scratch_unet.
+#
+# variant/base_channels/depth обязаны совпадать с теми, на которых обучался
+# чекпоинт: load_state_dict идёт со strict=True и упадёт при расхождении.
 _target_: src.models.factory.unet_for_segmentation
+variant: full
 num_classes: ${data.dataset.num_classes}
 in_channels: 3
-base_channels: 64
+base_channels: null
 depth: 4
 checkpoint_path: null

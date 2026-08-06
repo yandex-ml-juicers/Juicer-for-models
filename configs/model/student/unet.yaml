@@ -1,8 +1,23 @@
-# U-Net (~31M параметров) для семантической сегментации.
-# занимает слот student.
+# U-Net для семантической сегментации, слот student.
+#
+# Размер задаётся вариантом (замер тестом test_unet_variant_sizes):
+#   tiny  base_channels=16  ~1.9M
+#   small base_channels=24  ~4.4M   <- размер DeepLabV3+/MobileNetV2 (4.38M)
+#   base  base_channels=32  ~7.8M   <- вариант по умолчанию для дистилляции
+#   large base_channels=48  ~17.5M
+#   full  base_channels=64  ~31.0M  <- классический U-Net из статьи
+#
+# Учитель SegFormer-B2 — 27.5M, поэтому full в роли ученика бессмысленен:
+# ученик получится крупнее учителя.
 _target_: src.models.factory.unet_for_segmentation
+variant: full
 num_classes: ${data.dataset.num_classes}
 in_channels: 3
-base_channels: 64
-depth: 4          # вход должен быть кратен 2**depth: 512x1024 и 1024x2048 подходят, depth=4 
+
+# null — взять из спецификации варианта. Прямое переопределение нужно редко:
+# depth=5 даёт тап на страйде 32 (stage4), но требует входа, кратного 32,
+# и учетверяет число параметров.
+base_channels: null
+depth: 4          # вход должен быть кратен 2**depth: 512x1024 и 1024x2048 подходят
+
 checkpoint_path: null
