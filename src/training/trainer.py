@@ -25,7 +25,7 @@ from src.losses.base import DistillationLoss
 from src.models.feature_extractor import FeatureExtractor
 from src.utils.distributed import DistInfo, unwrap, all_reduce_sum_
 from src.utils.logger import MetricsHistory, get_logger
-from src.utils.metrics import AverageMeter, accuracy, ConfusionMatrixAccumulator, count_parameters, build_param_table
+from src.utils.metrics import AverageMeter, accuracy, ConfusionMatrixAccumulator, count_parameters, build_param_table, sync_meters
 
 log = get_logger(__name__)
 
@@ -364,7 +364,11 @@ class Trainer:
 
             iterator.set_postfix({"loss": f"{losses['total'].item():.3f}"})
 
+        sync_meters(meters_avg_loss, self.device)
+        sync_meters(meters_avg, self.device)
+
         if self.train_confmat is not None:
+            self.train_confmat.synchronize()
             meters_other.update(self.train_confmat.compute()) # pr, rec, F1
 
         train_loss_components = {key: meter.avg for key, meter in meters_avg_loss.items()} # train_loss_components

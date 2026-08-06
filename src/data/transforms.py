@@ -90,7 +90,7 @@ def build_transform_tinyvit_train(
         p=0.25,
         scale=(0.02, 0.20),
         ratio=(0.3, 3.3), 
-        value="random"
+        value="random" # type: ignore
     ))
     return transforms.Compose(ops)
 

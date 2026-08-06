@@ -1,8 +1,16 @@
-"""Метрики и агрегаторы."""
+"""Метрики и агрегаторы.
+
+Все накопители здесь хранят АДДИТИВНЫЕ величины -- суммы и счётчики (а не
+готовые средние).
+"""
+
+from collections.abc import Mapping
 
 import pandas as pd
 import torch
 import torch.nn as nn
+
+from src.utils.distributed import all_reduce_sum_
 
 def accuracy(logits: torch.Tensor, targets: torch.Tensor) -> float:
     """Доля правильных ответов по argmax логитов, в [0, 1]."""
@@ -10,8 +18,7 @@ def accuracy(logits: torch.Tensor, targets: torch.Tensor) -> float:
     return (predictions == targets).float().mean().item()
 
 def count_parameters(model: nn.Module) -> dict:
-    '''Считает колиечество параметров у модели
-    '''
+    """Считает колиечество параметров у модели"""
     total = sum(p.numel() for p in model.parameters())
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     buffers = sum(b.numel() for b in model.buffers())
@@ -60,6 +67,26 @@ class AverageMeter:
     def avg(self) -> float:
         return self.sum / self.count if self.count != 0 else self.sum
 
+
+def sync_meters(meters: Mapping[str, AverageMeter], device: torch.device) -> None:
+    """Сводит метрики со всех процессов: складывает их суммы и счётчики"""
+    if not meters:
+        return
+
+    # нужна сортировка, чтобы на всех GPU складывались одинаковые объекты
+    names = sorted(meters)
+    packed = torch.tensor(
+        [[meters[name].sum, meters[name].count] for name in names],
+        dtype=torch.float64, # берём float64 для меньшей погрешности
+        device=device,
+    )
+    all_reduce_sum_(packed)
+
+    for name, (total, count) in zip(names, packed.tolist()):
+        meters[name].sum = total
+        meters[name].count = int(count)
+
+
 class ConfusionMatrixAccumulator:
     """Копит confusion matrix по батчам без хранения сырых предсказаний.
     Память — O(num_classes^2), не зависит от размера датасета/числа батчей.
@@ -82,6 +109,10 @@ class ConfusionMatrixAccumulator:
 
     def reset(self) -> None:
         self.matrix.zero_()
+
+    def synchronize(self) -> None:
+        """Складывает матрицы всех процессов. Звать ДО compute()."""
+        all_reduce_sum_(self.matrix)
 
     def compute(self) -> dict[str, float]:
         """precision/recall/F1 (macro), выведенные из накопленной матрицы
