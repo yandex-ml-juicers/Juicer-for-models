@@ -23,7 +23,9 @@ task_type: "segmentation"
 clearml:
   enabled: True
   tags: [cityscapes, KD, CWD, segformer-b2, unet-base, segmentation]
-  scalars: []
+  # Схожесть ученика с учителем по пикселям: KL и доля совпавших argmax'ов.
+  # Считаются по подвыборке пикселей на probe-батчах, цена — доли процента эпохи.
+  scalars: ['KL_divergence', 'agreement_rate']
   reuse_last_task_id: False
   continue_last_task: False
   output_uri: false

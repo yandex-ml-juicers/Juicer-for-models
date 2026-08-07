@@ -19,6 +19,7 @@ from torchvision.models import get_model
 from transformers import LwDetrConfig, LwDetrForObjectDetection
 
 from src.models.segformer import SegFormer
+from src.models.stochastic_depth import apply_stochastic_depth
 from src.models.unet import UNET_VARIANTS, UNet
 from src.utils.checkpoints import load_checkpoint_into, resolve_weights_dir
 
@@ -55,14 +56,25 @@ def cifar_resnet18(num_classes: int = 10) -> nn.Module:
     return model
 
 def torchvision_model_for_classification(
-    model_name: str, 
+    model_name: str,
     num_classes: int = 1000,
-    weights: str | WeightsEnum | None = None, 
-    checkpoint_path: str | None = None
+    weights: str | WeightsEnum | None = None,
+    checkpoint_path: str | None = None,
+    drop_path_rate: float = 0.0,
+    drop_path_mode: str = "linear",
 ) -> nn.Module:
     """
     Function for load models from torchvision
     Editing the last layer for current num of classes
+
+    drop_path_rate > 0 включает stochastic depth в residual-блоках
+    (только ResNet-семейство; подробности и ограничения — в
+    src/models/stochastic_depth.py). У ShuffleNet residual-сложения нет,
+    и включение drop_path_rate для него осознанно падает с ошибкой,
+    а не молча ничего не делает.
+
+    Ключи state_dict от этого не меняются, поэтому чекпоинт модели,
+    обученной с drop_path_rate > 0, грузится и в модель без него.
     """
 
     if isinstance(weights, str):
@@ -74,6 +86,9 @@ def torchvision_model_for_classification(
         num_classes=num_classes
     )
 
+    if drop_path_rate > 0:
+        apply_stochastic_depth(model, drop_path_rate, mode=drop_path_mode)
+
     if checkpoint_path is None:
         return model
 
@@ -81,12 +96,22 @@ def torchvision_model_for_classification(
 
 
 def timm_model_for_classification(
-    model_name: str, 
+    model_name: str,
     pretrained: bool = False,
-    checkpoint_path: str | None = None, 
+    checkpoint_path: str | None = None,
     num_classes: int = 100,
+    drop_path_rate: float | None = None,
     **kwargs: any,
 ) -> nn.Module:
+    """drop_path_rate — stochastic depth средствами самого timm.
+
+    None означает "не передавать аргумент вовсе": у timm для каждой
+    архитектуры свой дефолт, и затирать его нулём без причины не нужно.
+    Модели без поддержки drop_path timm отвергает сам, с внятной ошибкой.
+    """
+
+    if drop_path_rate is not None:
+        kwargs["drop_path_rate"] = drop_path_rate
 
     model = timm.create_model(
         model_name,
@@ -108,6 +133,7 @@ def unet_for_segmentation(
     base_channels: int | None = None,
     depth: int | None = None,
     checkpoint_path: str | None = None,
+    dropout: float = 0.0,
 ) -> nn.Module:
     """U-Net для семантической сегментации.
 
@@ -123,6 +149,10 @@ def unet_for_segmentation(
             если нужен тап на страйде 32 — и тогда вход обязан быть кратен 32.
         checkpoint_path: чекпоинт нашего тренера (ключ student_state) — так
             обученный на первом этапе U-Net становится учителем.
+        dropout: Dropout2d на боттлнеке (регуляризация вместо stochastic
+            depth, которую в U-Net применять не к чему — residual-блоков там
+            нет). Параметров не добавляет, поэтому старые чекпоинты грузятся
+            без изменений.
     """
     if variant not in UNET_VARIANTS:
         raise ValueError(
@@ -135,6 +165,7 @@ def unet_for_segmentation(
         in_channels=in_channels,
         base_channels=spec["base_channels"] if base_channels is None else base_channels,
         depth=spec["depth"] if depth is None else depth,
+        dropout=dropout,
     )
 
     if checkpoint_path is None:
@@ -150,6 +181,8 @@ def segformer_for_segmentation(
     checkpoint_path: str | None = None,
     weights_dir: str | None = None,
     align_corners: bool = False,
+    drop_path_rate: float | None = None,
+    classifier_dropout_prob: float | None = None,
 ) -> nn.Module:
     """SegFormer-B{0..5} для семантической сегментации.
 
@@ -160,6 +193,11 @@ def segformer_for_segmentation(
         checkpoint_path: чекпоинт нашего тренера — так модель, обученная
             на этапе scratch, подставляется учителем в дистилляцию.
         weights_dir: куда качать веса; по умолчанию data/weights.
+        drop_path_rate: stochastic depth в блоках трансформера. None —
+            дефолт transformers (0.1). Для B4/B5 и длинных расписаний
+            имеет смысл поднимать до 0.2-0.3.
+        classifier_dropout_prob: dropout перед головой декодера. None —
+            дефолт transformers (0.1).
 
     Веса Hugging Face кладутся в <weights_dir>/huggingface: hub сам
     проверяет, что уже скачано, поэтому повторный запуск ничего не тянет.
@@ -173,6 +211,8 @@ def segformer_for_segmentation(
         pretrained=None if checkpoint_path is not None else pretrained,
         cache_dir=cache_dir,
         align_corners=align_corners,
+        drop_path_rate=drop_path_rate,
+        classifier_dropout_prob=classifier_dropout_prob,
     )
 
     if checkpoint_path is None:
@@ -213,7 +253,5 @@ def lwdetr_small_for_detection(
         label2id=label2id,
         disable_custom_kernels=disable_custom_kernels,
     )
-
-    return LwDetrForObjectDetection(config)
 
     return LwDetrForObjectDetection(config)

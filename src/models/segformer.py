@@ -48,7 +48,35 @@ IMAGENET_REPO = "nvidia/mit-{variant}"
 CITYSCAPES_REPO = "nvidia/segformer-{variant}-finetuned-cityscapes-1024-1024"
 
 
-def segformer_config(variant: str, num_classes: int) -> SegformerConfig:
+def regularization_overrides(
+    drop_path_rate: float | None,
+    classifier_dropout_prob: float | None,
+) -> dict[str, float]:
+    """Только те регуляризационные поля конфига, что заданы явно.
+
+    None означает "не трогать": у SegformerConfig свои дефолты
+    (drop_path_rate=0.1, classifier_dropout_prob=0.1), и затирать их
+    молча — значит незаметно изменить рецепт статьи.
+    """
+    overrides: dict[str, float] = {}
+    if drop_path_rate is not None:
+        if not 0.0 <= drop_path_rate < 1.0:
+            raise ValueError(f"drop_path_rate должен быть в [0, 1), получено {drop_path_rate}")
+        overrides["drop_path_rate"] = float(drop_path_rate)
+    if classifier_dropout_prob is not None:
+        if not 0.0 <= classifier_dropout_prob < 1.0:
+            raise ValueError(
+                f"classifier_dropout_prob должен быть в [0, 1), получено {classifier_dropout_prob}"
+            )
+        overrides["classifier_dropout_prob"] = float(classifier_dropout_prob)
+    return overrides
+
+
+def segformer_config(
+    variant: str,
+    num_classes: int,
+    **overrides: float,
+) -> SegformerConfig:
     if variant not in SEGFORMER_VARIANTS:
         raise ValueError(
             f"Неизвестный вариант SegFormer: {variant!r}. Доступны: {sorted(SEGFORMER_VARIANTS)}"
@@ -57,6 +85,7 @@ def segformer_config(variant: str, num_classes: int) -> SegformerConfig:
         num_labels=num_classes,
         **SEGFORMER_COMMON,
         **SEGFORMER_VARIANTS[variant],
+        **overrides,
     )
 
 
@@ -71,6 +100,12 @@ class SegFormer(nn.Module):
                         (2975 картинок) не обучается до вменяемого mIoU;
         "cityscapes"  — полностью дообученная модель nvidia/segformer-*-
                         finetuned-cityscapes-1024-1024 (учитель «из коробки»).
+
+    drop_path_rate — stochastic depth внутри блоков трансформера; он у
+    SegFormer встроен и включён по умолчанию (0.1 в SegformerConfig), так что
+    этот аргумент не добавляет регуляризацию, а даёт ею управлять из конфига.
+    classifier_dropout_prob — dropout перед головой декодера (дефолт тоже 0.1).
+    None у обоих означает "оставить дефолт transformers".
     """
 
     def __init__(
@@ -80,6 +115,8 @@ class SegFormer(nn.Module):
         pretrained: str | None = "imagenet",
         cache_dir: str | None = None,
         align_corners: bool = False,
+        drop_path_rate: float | None = None,
+        classifier_dropout_prob: float | None = None,
     ) -> None:
         super().__init__()
         if variant not in SEGFORMER_VARIANTS:
@@ -91,8 +128,15 @@ class SegFormer(nn.Module):
         self.align_corners = align_corners
         self.hidden_sizes: Sequence[int] = SEGFORMER_VARIANTS[variant]["hidden_sizes"]
 
+        # Для from_pretrained те же ключи уходят в конфиг как kwargs: веса
+        # от значений dropout'ов не зависят, меняется только поведение
+        # на обучении.
+        overrides = regularization_overrides(drop_path_rate, classifier_dropout_prob)
+
         if pretrained is None:
-            self.model = SegformerForSemanticSegmentation(segformer_config(variant, num_classes))
+            self.model = SegformerForSemanticSegmentation(
+                segformer_config(variant, num_classes, **overrides)
+            )
         elif pretrained == "imagenet":
             self.model = SegformerForSemanticSegmentation.from_pretrained(
                 IMAGENET_REPO.format(variant=variant),
@@ -101,6 +145,7 @@ class SegFormer(nn.Module):
                 # id2label в nvidia/mit-* описывает 1000 классов ImageNet,
                 # а голова у нас на num_classes: без этого флага загрузка падает.
                 ignore_mismatched_sizes=True,
+                **overrides,
             )
         elif pretrained == "cityscapes":
             self.model = SegformerForSemanticSegmentation.from_pretrained(
@@ -108,6 +153,7 @@ class SegFormer(nn.Module):
                 num_labels=num_classes,
                 cache_dir=cache_dir,
                 ignore_mismatched_sizes=True,
+                **overrides,
             )
         else:
             raise ValueError(

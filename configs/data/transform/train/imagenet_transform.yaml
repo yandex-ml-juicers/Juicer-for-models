@@ -1,4 +1,17 @@
+# Базовый train-рецепт ImageNet: RandomResizedCrop + горизонтальный флип.
+#
+# Значения совпадают с уже посчитанными бейзлайнами — менять их здесь нельзя.
+# Усиленный набор лежит рядом: imagenet_strong_transform.yaml.
 _target_: src.data.transforms.build_transform_train
 mean: ${data.dataset.normalize.mean}
 std: ${data.dataset.normalize.std}
 image_size: ${data.dataset.image_size}
+
+hflip_p: 0.5
+
+# Рычаги, выключенные в базовом рецепте — оставлены явно, чтобы были видны
+# из конфига. Mixup/CutMix задаются отдельно: они смешивают РАЗНЫЕ примеры,
+# а значит живут в тренере (augment=mixup_cutmix), а не здесь.
+rand_augment_num_ops: 0     # 2 — стандартный ImageNet-рецепт
+rand_augment_magnitude: 9
+random_erasing_p: 0.0       # 0.25 — значение из статьи и из timm
