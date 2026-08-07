@@ -48,7 +48,7 @@ class DistInfo:
         return self.world_size > 1
 
 
-def _find_free_port() -> int:
+def find_free_port() -> int:
     """Ищем свободный TCP-порт для rendezvous.
         IP уже знаем, нужно найти порт
     """
@@ -67,7 +67,7 @@ def setup(device_cfg: str = "auto", backend: str = "auto", timeout_minutes: int 
     os.environ.setdefault("WORLD_SIZE", "1")
     # если один процесс (1 GPU), то не будем выходить за пределы сервера
     os.environ.setdefault("MASTER_ADDR", "127.0.0.1") 
-    os.environ.setdefault("MASTER_PORT", str(_find_free_port()))
+    os.environ.setdefault("MASTER_PORT", str(find_free_port()))
 
     rank = int(os.environ["RANK"])
     local_rank = int(os.environ["LOCAL_RANK"])

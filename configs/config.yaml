@@ -44,7 +44,7 @@ clearml:
 hydra:
   # запуск одного эксперимента
   run:
-    dir: ${oc.env:JUICER_RUN_DIR,outputs/${name}/${oc.env:TORCHELASTIC_RUN_ID,${now:%Y-%m-%d_%H-%M-%S}}}
+    dir: outputs/${name}/${oc.env:JUICER_RUN_ID,${oc.env:TORCHELASTIC_RUN_ID,${now:%Y-%m-%d_%H-%M-%S}}}
   
   # мультизапуск с флагом -m  
   sweep:
