@@ -101,6 +101,8 @@ def clearml_reporter(task):
         logger.report_scalar(title="accuracy", series="train", value=row["train_acc"], iteration=iterate)
         logger.report_scalar(title="accuracy", series="eval", value=row["eval_acc"], iteration=iterate)
         logger.report_scalar(title="lr", series="lr", value=row["lr"], iteration=iterate)
+        logger.report_scalar(title="time_epoch", series="seconds",
+                             value=row["time_epoch"], iteration=iterate)
         if "train_precision" in row.keys():
             logger.report_scalar(title="precision", series="train", value=row["train_precision"], iteration=iterate)
             logger.report_scalar(title="recall", series="train", value=row["train_recall"], iteration=iterate)
