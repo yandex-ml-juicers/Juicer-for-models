@@ -114,21 +114,33 @@ def build_transform_tinyvit_eval(
 def build_base_transform_for_cityscapes(
     mean: Sequence[float],
     std: Sequence[float],
+    train: bool = True,
     image_size: tuple[int, int] | None = None,
 ) -> transforms.Compose:
     ops: list = []
-    if image_size is not None:
-        ops.append(detection_transforms.DetectionResize(image_size))
+    if train:
+        ops.append(detection_transforms.DetectionRandomHorizontalFlip(p=0.5))
+        ops.append(detection_transforms.DetectionColorJitter(
+            brightness=0.2,
+            contrast=0.2,
+            saturation=0.2,
+            hue=0.05,
+        ))
+        ops.append(detection_transforms.DetectionRandomResize(
+            [
+                (512, 1024),
+                (576, 1152),
+                (640, 1280),
+                (704, 1408),
+            ]
+        ),)
+    else:
+        if image_size is not None:
+            ops.append(detection_transforms.DetectionResize(image_size))
+
     ops.append(detection_transforms.DetectionToTensor())
     ops.append(detection_transforms.DetectionNormalize(mean, std))
     return detection_transforms.DetectionCompose(ops)
-
-# def build_eval_transform_for_cityscapes(
-#     mean: Sequence[float],
-#     std: Sequence[float],
-#     image_size: tuple[int, int] | None = None,
-# ) -> transforms.Compose:
-
 
 def build_segmentation_transform_train(
     mean: Sequence[float],

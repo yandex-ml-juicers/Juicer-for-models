@@ -4,6 +4,7 @@ from collections.abc import Callable, Sequence
 import torch
 from PIL import Image
 from torch import Tensor
+from torchvision import transforms
 from torchvision.transforms import functional as F
 
 class DetectionCompose:
@@ -68,6 +69,83 @@ class DetectionResize:
             target["area"] = (target["area"] * scale_x * scale_y)
 
         return image, target
+
+class DetectionRandomHorizontalFlip:
+    """Randomly flips the image and bounding boxes horizontally."""
+
+    def __init__(self, p: float = 0.5) -> None:
+        self.p = p
+
+    def __call__(
+        self,
+        image: Image.Image | Tensor,
+        target: dict[str, Tensor],
+    ) -> tuple[Image.Image | Tensor, dict[str, Tensor]]:
+        if random.random() >= self.p:
+            return image, target
+
+        if isinstance(image, Image.Image):
+            width, _ = image.size
+        else:
+            _, width = image.shape[-2:]
+
+        image = F.hflip(image)
+
+        target = target.copy()
+        boxes = target["boxes"].clone()
+
+        if boxes.numel() > 0:
+            boxes[:, [0, 2]] = width - boxes[:, [2, 0]]
+
+        target["boxes"] = boxes
+
+        return image, target
+
+class DetectionColorJitter:
+    """Randomly changes image brightness, contrast, saturation and hue."""
+
+    def __init__(
+        self,
+        brightness: float = 0.0,
+        contrast: float = 0.0,
+        saturation: float = 0.0,
+        hue: float = 0.0,
+    ) -> None:
+        self.transform = transforms.ColorJitter(
+            brightness=brightness,
+            contrast=contrast,
+            saturation=saturation,
+            hue=hue,
+        )
+
+    def __call__(
+        self,
+        image: Image.Image | Tensor,
+        target: dict[str, Tensor],
+    ) -> tuple[Image.Image | Tensor, dict[str, Tensor]]:
+        image = self.transform(image)
+
+        return image, target
+
+class DetectionRandomResize:
+    """Randomly chooses one image size and resizes image and bounding boxes."""
+
+    def __init__(
+        self,
+        sizes: Sequence[tuple[int, int]],
+    ) -> None:
+        self.sizes = tuple(sizes)
+
+    def __call__(
+        self,
+        image: Image.Image | Tensor,
+        target: dict[str, Tensor],
+    ) -> tuple[Image.Image | Tensor, dict[str, Tensor]]:
+        size = random.choice(self.sizes)
+
+        resize = DetectionResize(size)
+
+        return resize(image, target)
 
 class DetectionToTensor:
     def __call__(

@@ -1,4 +1,5 @@
 _target_: src.data.transforms.build_base_transform_for_cityscapes
 mean: ${data.dataset.normalize.mean}
 std: ${data.dataset.normalize.std}
+train: True
 image_size: ${data.dataset.image_size}
