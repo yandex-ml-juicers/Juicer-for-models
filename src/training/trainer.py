@@ -681,6 +681,7 @@ class DetectionTrainer:
         meters_avg: dict[str, AverageMeter] = defaultdict(AverageMeter)
         meters_avg_loss: dict[str, AverageMeter] = defaultdict(AverageMeter)
         meters_other: dict[str, float | int | str] = {}
+        meters_map = MeanAveragePrecision(box_format="xyxy", iou_type="bbox")
 
         iterator = tqdm(
             self.train_loader,
@@ -693,6 +694,8 @@ class DetectionTrainer:
             if self.limit_train_batches is not None and step >= self.limit_train_batches:
                 iterator.close()
                 break
+
+            targets_for_meters_map = targets
 
             images = [image.to(self.device, non_blocking=True) for image in images]
             targets = prepare_targets(targets, self.device, self.targers_mode)
@@ -730,6 +733,13 @@ class DetectionTrainer:
                     ),
                 )
 
+            self._update_detection_meters_map(
+                metric=meters_map,
+                student_outputs=student_outputs,
+                images=images,
+                targets=targets_for_meters_map,
+            )
+
             self.scaler.scale(losses["total"]).backward()
             self.scaler.unscale_(self.optimizer)
 
@@ -755,13 +765,64 @@ class DetectionTrainer:
 
             iterator.set_postfix({"loss": f"{losses['total'].item():.3f}"})
 
+            computed_meters_map = meters_map.compute()
+
             train_loss_components = {key: meter.avg for key, meter in meters_avg_loss.items()}
             meters_other["max_grad_norm"] = max_grad_norm
             meters_other["max_weight_norm"] = max_weight_norm
 
-            other_train_metrics = {**{key: meter.avg for key, meter in meters_avg.items()}, **meters_other}
+            other_train_metrics = {
+                **{
+                    key: meter.avg
+                    for key, meter in meters_avg.items()
+                },
+                **meters_other,
+
+                # NEW
+                "map": computed_meters_map["map"].item(),
+                "map_50": computed_meters_map["map_50"].item(),
+                "map_75": computed_meters_map["map_75"].item(),
+                "mar_100": computed_meters_map["mar_100"].item(),
+            }
 
         return train_loss_components, other_train_metrics
+
+    def _update_detection_meters_map(
+        self,
+        metric: MeanAveragePrecision,
+        student_outputs,
+        images,
+        targets,
+    ) -> None:
+        with torch.no_grad():
+            if self.prediction_postprocessor is not None:
+                predictions = self.prediction_postprocessor(student_outputs, images)
+            else:
+                predictions = student_outputs
+
+            predictions_metric = []
+            targets_metric = []
+
+            for prediction, target in zip(predictions, targets):
+                predictions_metric.append(
+                    {
+                        "boxes": (prediction["boxes"].detach().float().cpu()),
+                        "scores": (prediction["scores"].detach().float().cpu()),
+                        "labels": (prediction["labels"].detach().long().cpu() - self.label_offset),
+                    }
+                )
+
+                metric_target = {
+                    "boxes": (target["boxes"].detach().float().cpu()),
+                    "labels": (target["labels"].detach().long().cpu() - self.label_offset),
+                }
+
+                if "area" in target:
+                    metric_target["area"] = (target["area"].detach().float().cpu())
+
+                targets_metric.append(metric_target)
+
+            metric.update(predictions_metric, targets_metric)
 
     def _save_checkpoint(
         self,

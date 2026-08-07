@@ -83,10 +83,17 @@ def clearml_reporter(task):
 
         # Метрики детекции
         detection_metrics = {
-            "eval_map": "mAP",
-            "eval_map_50": "mAP@50",
-            "eval_map_75": "mAP@75",
-            "eval_mar_100": "mAR@100",
+            "train_map": ("mAP", "train"),
+            "eval_map": ("mAP", "eval"),
+
+            "train_map_50": ("mAP@50", "train"),
+            "eval_map_50": ("mAP@50", "eval"),
+
+            "train_map_75": ("mAP@75", "train"),
+            "eval_map_75": ("mAP@75", "eval"),
+
+            "train_mar_100": ("mAR@100", "train"),
+            "eval_mar_100": ("mAR@100", "eval"),
         }
 
         for key, series_name in detection_metrics.items():
