@@ -4,7 +4,6 @@
 # метод рассчитан ровно на случай большого разрыва между учителем и учеником,
 # а разрыв "предобученный трансформер против U-Net с нуля" здесь максимальный
 # из всей сетки.
-#
 # Бейзлайн для этого прогона — scratch/cityscapes_scratch_unet_base.
 defaults:
   - override /data/dataset: cityscapes_seg
@@ -33,7 +32,7 @@ clearml:
   output_uri: false
 
 trainer:
-  epochs: 100
+  epochs: 200
   amp: true
   grad_clip_norm: 1.0
 
@@ -48,17 +47,17 @@ loss:
 # чем в конфигах с предобученным энкодером.
 optimizer:
   lr: 3.0e-4
-  weight_decay: 1.0e-2
+  weight_decay: 1.5e-2
 
 scheduler:
-  warmup_epochs: 5
+  warmup_epochs: 15
   eta_min: 1.0e-6
 
 data:
   loader:
-    batch_size: 8
-    eval_batch_size: 4
-    num_workers: 8
+    batch_size: 20
+    eval_batch_size: 10
+    num_workers: 20
     pin_memory: true
     persistent_workers: true
 

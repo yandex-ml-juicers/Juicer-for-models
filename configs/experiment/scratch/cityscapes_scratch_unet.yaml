@@ -1,5 +1,9 @@
 # @package _global_
-# Учитель сегментации: U-Net с нуля на Cityscapes, 19 классов.
+# Бейзлайн для дистилляции: U-Net-base (~7.8M) с нуля, без учителя.
+#
+# Отдельный от cityscapes_scratch_unet конфиг нужен потому, что тот обучает
+# full (~31M). Прирост от дистилляции измеряется относительно ученика ТОГО ЖЕ
+# размера — иначе сравнивается не метод, а ёмкость модели.
 defaults:
   - override /data/dataset: cityscapes_seg
   - override /data/transform/train: cityscapes_seg_transform
@@ -21,38 +25,35 @@ task_type: "segmentation"
 
 clearml:
   enabled: True
-  tags: [cityscapes, teacher, scratch, unet, segmentation]
+  tags: [cityscapes, student, scratch, unet, segmentation]
   scalars: []
-  reuse_last_task_id: False
+  reuse_last_task_id: True
   continue_last_task: False
   output_uri: false
 
 trainer:
-  epochs: 100
+  epochs: 300
   amp: true
   grad_clip_norm: 1.0
 
 loss:
   # Void-пиксели Cityscapes не должны попадать в лосс
   ignore_index: ${data.dataset.ignore_index}
-  label_smoothing: 0.08
+  label_smoothing: 0.05
 
 optimizer:
   lr: 3.0e-4
-  weight_decay: 1.0e-2
-
-
-#scheduler:
-#  warmup_epochs: 5
-#  eta_min: 1.0e-5
+  weight_decay: 1.5e-2
 
 data:
   loader:
-    # Кроп 512x1024 при 31M параметров: 8 картинок на ~24 ГБ с amp
-    batch_size: 12
-    # Валидация в полном разрешении 1024x2048 — вчетверо больше пикселей,
-    # плюс skip-связи U-Net держатся до декодера. Батч 8 здесь = OOM.
-    eval_batch_size: 8
-    num_workers: 8
+    # Модель вчетверо легче full-варианта, батч можно поднять.
+    batch_size: 20
+    eval_batch_size: 10
+    num_workers: 20
     pin_memory: true
     persistent_workers: true
+
+model:
+  student:
+    variant: base
