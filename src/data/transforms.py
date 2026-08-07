@@ -126,14 +126,15 @@ def build_base_transform_for_cityscapes(
             saturation=0.2,
             hue=0.05,
         ))
-        ops.append(detection_transforms.DetectionRandomResize(
-            [
-                (512, 1024),
-                (576, 1152),
-                (640, 1280),
-                (704, 1408),
-            ]
-        ),)
+        # ops.append(detection_transforms.DetectionRandomResize(
+        #     [
+        #         (512, 1024),
+        #         (576, 1152),
+        #         (640, 1280),
+        #         (704, 1408),
+        #     ]
+        # ),)
+        ops.append(detection_transforms.DetectionResize(image_size))
     else:
         if image_size is not None:
             ops.append(detection_transforms.DetectionResize(image_size))

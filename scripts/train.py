@@ -96,10 +96,10 @@ def clearml_reporter(task):
             "eval_mar_100": ("mAR@100", "eval"),
         }
 
-        for key, series_name in detection_metrics.items():
+        for key, (title, series_name) in detection_metrics.items():
             if key in row:
                 logger.report_scalar(
-                    title="detection_metrics",
+                    title=title,
                     series=series_name,
                     value=row[key],
                     iteration=iterate,
