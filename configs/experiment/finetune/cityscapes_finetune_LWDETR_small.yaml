@@ -37,10 +37,12 @@ scheduler:
 
 data:
   dataset:
+    image_size: [512, 1024]
     targets_format_mode: "lw-detr-small"
     build:
       label_offset: 0
   loader:
-    batch_size: 16
+    batch_size: 10
     num_workers: 16
     persistent_workers: true
+    pin_memory: true
