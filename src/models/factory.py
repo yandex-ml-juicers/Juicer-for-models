@@ -297,13 +297,13 @@ def lwdetr_small_for_detection(
         for index, class_name in id2label.items()
     }
 
-    config = LwDetrConfig.from_pretrained(
+    model = LwDetrForObjectDetection.from_pretrained(
         lwdetr_small_checkpoint,
+        num_labels=num_classes,
         id2label=id2label,
         label2id=label2id,
         disable_custom_kernels=disable_custom_kernels,
+        ignore_mismatched_sizes=True,
     )
 
-    return LwDetrForObjectDetection(config)
-
-    return LwDetrForObjectDetection(config)
+    return model
