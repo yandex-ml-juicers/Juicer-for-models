@@ -20,6 +20,7 @@ from transformers import LwDetrConfig, LwDetrForObjectDetection
 
 from src.models.segformer import SegFormer
 from src.models.stochastic_depth import apply_stochastic_depth
+from src.models.timm_unet import TIMM_UNET_VARIANTS, TimmUNet
 from src.models.unet import UNET_VARIANTS, UNet
 from src.utils.checkpoints import load_checkpoint_into, resolve_weights_dir
 
@@ -172,6 +173,54 @@ def unet_for_segmentation(
         return model
 
     return load_checkpoint_into(model, checkpoint_path, f"U-Net-{variant}")
+
+
+def timm_unet_for_segmentation(
+    variant: str = "resnet18",
+    num_classes: int = 19,
+    in_channels: int = 3,
+    pretrained: bool = True,
+    encoder_name: str | None = None,
+    dropout: float = 0.0,
+    align_corners: bool = False,
+    checkpoint_path: str | None = None,
+) -> nn.Module:
+    """U-Net с предобученным энкодером из timm.
+
+    Args:
+        variant: именованный энкодер из TIMM_UNET_VARIANTS (размеры — в
+            комментарии к таблице, от 2.3M до 24.5M).
+        pretrained: ГЛАВНЫЙ ПЕРЕКЛЮЧАТЕЛЬ. True — веса энкодера с ImageNet,
+            False — та же архитектура со случайной инициализацией. Пара
+            прогонов true/false и есть честный ответ на вопрос, сколько
+            дало именно предобучение.
+        encoder_name: имя модели timm в обход таблицы (тег весов — после
+            точки, например "convnext_nano.in12k").
+        checkpoint_path: чекпоинт нашего тренера. Если задан, pretrained
+            игнорируется: веса всё равно будут перезаписаны, качать их незачем.
+    """
+    if encoder_name is None:
+        if variant not in TIMM_UNET_VARIANTS:
+            raise ValueError(
+                f"Неизвестный вариант timm-U-Net: {variant!r}. "
+                f"Доступны: {sorted(TIMM_UNET_VARIANTS)}. "
+                f"Либо задайте encoder_name напрямую."
+            )
+        encoder_name = TIMM_UNET_VARIANTS[variant]["encoder_name"]
+
+    model = TimmUNet(
+        encoder_name=encoder_name,
+        num_classes=num_classes,
+        in_channels=in_channels,
+        pretrained=pretrained and checkpoint_path is None,
+        dropout=dropout,
+        align_corners=align_corners,
+    )
+
+    if checkpoint_path is None:
+        return model
+
+    return load_checkpoint_into(model, checkpoint_path, f"TimmUNet-{variant}")
 
 
 def segformer_for_segmentation(
