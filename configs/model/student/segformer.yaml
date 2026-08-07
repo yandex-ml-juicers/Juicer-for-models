@@ -12,6 +12,13 @@ pretrained: imagenet
 
 align_corners: false
 
+# Регуляризация внутри модели. null — оставить дефолт transformers.
+# Stochastic depth у SegFormer встроен и включён по умолчанию (0.1), так что
+# это не «добавить регуляризацию», а «управлять ею из конфига».
+# Для B4/B5 и длинных расписаний имеет смысл поднимать до 0.2-0.3.
+drop_path_rate: null            # дефолт SegformerConfig — 0.1
+classifier_dropout_prob: null   # dropout перед головой декодера, дефолт 0.1
+
 # Чекпоинт нашего тренера (ключ student_state); при заданном checkpoint_path
 # pretrained игнорируется.
 checkpoint_path: null

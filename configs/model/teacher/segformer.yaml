@@ -14,5 +14,10 @@ num_classes: ${data.dataset.num_classes}
 pretrained: cityscapes
 align_corners: false
 
+# Учитель заморожен и всегда в eval, поэтому ни drop-path, ни dropout на нём
+# не срабатывают. Ключи оставлены для симметрии со слотом student.
+drop_path_rate: null
+classifier_dropout_prob: null
+
 checkpoint_path: null
 weights_dir: data/weights

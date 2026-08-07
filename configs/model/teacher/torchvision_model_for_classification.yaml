@@ -1,3 +1,9 @@
 _target_: src.models.factory.torchvision_model_for_classification
 model_name: resnet18
 num_classes: ${data.dataset.num_classes}
+
+# Учитель всегда в eval и заморожен, поэтому stochastic depth ему не нужен:
+# на инференсе блоки не выключаются в любом случае. Ключ оставлен только для
+# симметрии со слотом student — менять его здесь смысла нет.
+drop_path_rate: 0.0
+drop_path_mode: linear
