@@ -311,7 +311,7 @@ class Trainer:
 
 
             grad_norm_value = grad_norm.item()
-            meters_avg["avg_grad_norm"].update(grad_norm_value, n=1)    # средняя градиент
+            meters_avg["avg_grad_norm"].update(grad_norm_value, n=1)    # средний градиент
             if grad_norm_value > max_grad_norm:
                 max_grad_norm = grad_norm_value # максимальный градиент
             
@@ -1068,14 +1068,17 @@ class SegmentationTrainer:
             self.scaler.update()
 
             grad_norm_value = float(grad_norm)
-            meters_avg["avg_grad_norm"].update(grad_norm_value, n=1)
-            max_grad_norm = max(max_grad_norm, grad_norm_value)
+            if grad_norm.isfinite():
+                meters_avg["avg_grad_norm"].update(grad_norm_value, n=1)
+                max_grad_norm = max(max_grad_norm, grad_norm_value)
 
             with torch.no_grad():
-                weight_norm = torch.norm(torch.stack([p.detach().norm() for p in params]))
-            weight_norm_value = float(weight_norm)
-            meters_avg["avg_weight_norm"].update(weight_norm_value, n=1)
-            max_weight_norm = max(max_weight_norm, weight_norm_value)
+                weight_norm = torch.nn.utils.parameters_to_vector(params).norm()
+                weight_norm_value = float(weight_norm)
+                
+            if weight_norm.isfinite():
+                meters_avg["avg_weight_norm"].update(weight_norm_value, n=1)
+                max_weight_norm = max(max_weight_norm, weight_norm_value)
 
             for key, value in losses.items():
                 meters_avg_loss[key].update(value.item(), batch_size)

@@ -41,93 +41,98 @@ def init_clearml(cfg: DictConfig):
     return task
 
 
+import math
+import pandas as pd
+
+
 def clearml_reporter(task):
     """
     title = график в UI, series = линия на нём
     """
     logger = task.get_logger()
 
-    def report_scalar(row: dict, iteration: str = 'epoch') -> None:
-    
-        iterate = row[iteration]
-        logger.report_scalar(title="loss", series="train", value=row["train_loss_total"], iteration=iterate)
-        logger.report_scalar(title="loss", series="eval", value=row["eval_loss"], iteration=iterate)
-        if "accuracy" in row.keys():
-            logger.report_scalar(title="accuracy", series="train", value=row["train_acc"], iteration=iterate)
-            logger.report_scalar(title="accuracy", series="eval", value=row["eval_acc"], iteration=iterate)
-        logger.report_scalar(title="lr", series="lr", value=row["lr"], iteration=iterate)
-        if "train_precision" in row.keys():
-            logger.report_scalar(title="precision", series="train", value=row["train_precision"], iteration=iterate)
-            logger.report_scalar(title="recall", series="train", value=row["train_recall"], iteration=iterate)
-            logger.report_scalar(title="F1", series="train", value=row["train_F1"], iteration=iterate)
-        if "train_KL_divergence" in row.keys():
-            logger.report_scalar(title="KL", series="train_KL", value=row["train_KL_divergence"], iteration=iterate)
-            logger.report_scalar(title="agreement_rate", series="train_agreement_rate", value=row["train_agreement_rate"], iteration=iterate)
-        logger.report_scalar(title="grad_norm", series="train_avg_grad_norm", value=row["train_avg_grad_norm"], iteration=iterate)
-        logger.report_scalar(title="grad_norm", series="train_max_grad_norm", value=row["train_max_grad_norm"], iteration=iterate)
-        logger.report_scalar(title="weight_norm", series="train_avg_weight_norm", value=row["train_avg_weight_norm"], iteration=iterate)
-        logger.report_scalar(title="weight_norm", series="train_max_weight_norm", value=row["train_max_weight_norm"], iteration=iterate)
+    def report_scalar(row: dict, iteration: str = "epoch") -> None:
+        if iteration not in row:
+            return
 
+        iterate = int(row[iteration])
+
+        def _safe_report(title: str, series: str, val):
+            """Вспомогательная функция: логирует только корректные численные значения."""
+            if val is None:
+                return
+            if isinstance(val, (int, float)):
+                if not math.isinf(val) and not math.isnan(val):
+                    logger.report_scalar(title=title, series=series, value=float(val), iteration=iterate)
+
+        # 1. Основные лоссы
+        if "train_loss_total" in row:
+            _safe_report("loss", "train", row["train_loss_total"])
+        if "eval_loss" in row:
+            _safe_report("loss", "eval", row["eval_loss"])
+
+        # 2. Learning Rate
+        if "lr" in row:
+            _safe_report("lr", "lr", row["lr"])
+
+        # 3. Метрики точности (Classification)
+        if "train_acc" in row:
+            _safe_report("accuracy", "train", row["train_acc"])
+        if "eval_acc" in row:
+            _safe_report("accuracy", "eval", row["eval_acc"])
+
+        # 4. Precision / Recall / F1
+        if "train_precision" in row:
+            _safe_report("precision", "train", row["train_precision"])
+            _safe_report("recall", "train", row["train_recall"])
+            _safe_report("F1", "train", row["train_F1"])
+
+        # 5. Дистилляция / KL
+        if "train_KL_divergence" in row:
+            _safe_report("KL", "train_KL", row["train_KL_divergence"])
+            _safe_report("agreement_rate", "train_agreement_rate", row["train_agreement_rate"])
+
+        # 6. Нормы градиентов и весов
+        _safe_report("grad_norm", "train_avg_grad_norm", row.get("train_avg_grad_norm"))
+        _safe_report("grad_norm", "train_max_grad_norm", row.get("train_max_grad_norm"))
+        _safe_report("weight_norm", "train_avg_weight_norm", row.get("train_avg_weight_norm"))
+        _safe_report("weight_norm", "train_max_weight_norm", row.get("train_max_weight_norm"))
+
+        # 7. Компоненты лосса (ОДИН ЦИКЛ вместо двух)
         for key, value in row.items():
-            if (
-                key.startswith("train_loss_")
-            ):
+            # Логируем все отдельные компоненты лосса (например: train_loss_ce, train_loss_kd)
+            if key.startswith("train_loss_") and key != "train_loss_total":
                 series_name = key.removeprefix("train_loss_")
+                _safe_report("loss_components", series_name, value)
 
-                logger.report_scalar(
-                    title="loss_components",
-                    series=series_name,
-                    value=value,
-                    iteration=iterate,
-                )
-
-        # Метрики детекции
+        # 8. Метрики детекции
         detection_metrics = {
             "eval_map": "mAP",
             "eval_map_50": "mAP@50",
             "eval_map_75": "mAP@75",
             "eval_mar_100": "mAR@100",
         }
-
         for key, series_name in detection_metrics.items():
             if key in row:
-                logger.report_scalar(
-                    title="detection_metrics",
-                    series=series_name,
-                    value=row[key],
-                    iteration=iterate,
-                )
+                _safe_report("detection_metrics", series_name, row[key])
 
-        # Метрики сегментации
+        # 9. Метрики сегментации
         segmentation_metrics = {
             "train_miou": ("segmentation_metrics", "train_mIoU"),
             "eval_miou": ("segmentation_metrics", "eval_mIoU"),
             "train_pixel_acc": ("pixel_accuracy", "train"),
             "eval_pixel_acc": ("pixel_accuracy", "eval"),
         }
-
         for key, (title, series_name) in segmentation_metrics.items():
             if key in row:
-                logger.report_scalar(
-                    title=title,
-                    series=series_name,
-                    value=row[key],
-                    iteration=iterate,
-                )
-
-        # Компоненты лосса (train_ce, train_kd, train_feature_*) — одним графиком.
-        for key, value in row.items():
-            if key.startswith("train_loss"):
-                logger.report_scalar(
-                    "loss_components", key.removeprefix("train_"), value, iteration=iterate
-                )
+                _safe_report(title, series_name, row[key])
 
     def report_single(single_values: dict):
         for key, val in single_values.items():
-            task.get_logger().report_single_value(key, val)
+            logger.report_single_value(key, val)
 
     def report_table(df):
-        task.get_logger().report_table(
+        logger.report_table(
             title="parameters",
             series="param_counts",
             iteration=0,
