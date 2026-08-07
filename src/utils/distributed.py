@@ -11,6 +11,8 @@
 import logging
 import os
 import socket
+from collections.abc import Generator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any, overload
@@ -170,6 +172,22 @@ def barrier() -> None:
         пока не дошёл хотя бы один"""
     if _is_active():
         dist.barrier()
+
+
+@contextmanager
+def main_process_first(info: DistInfo) -> Generator[None]:
+    """Пропускает главный ранк вперёд, остальные ждут на барьере.
+
+    После выхода главного ранка из блока остальные проходят его же, но уже
+    по прогретому кэшу
+    """
+    if not info.is_main:
+        barrier()
+    try:
+        yield
+    finally:
+        if info.is_main:
+            barrier()
 
 
 def broadcast_object(obj: Any, device: torch.device, src: int = 0) -> Any:
