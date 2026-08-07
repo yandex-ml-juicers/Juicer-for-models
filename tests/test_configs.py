@@ -26,6 +26,7 @@ SEGMENTATION_EXPERIMENTS = [
     "scratch/cityscapes_scratch_segformer_b5",
     "scratch/cityscapes_scratch_unet",
     "scratch/cityscapes_scratch_unet_base",
+    "scratch/cityscapes_scratch_unet_base_strong_aug",
     "segmentation/vanilla-KD/cityscapes_pixel-KD_segformer_b2_to_unet_base",
     "segmentation/CWD/cityscapes_CWD_segformer_b2_to_unet_base",
     "segmentation/FitNets/cityscapes_FitNets_segformer_b2_to_unet_base",
@@ -96,6 +97,81 @@ def test_segmentation_scratch_experiments_have_no_teacher():
             continue
         cfg = compose_config([f"experiment={experiment}"])
         assert cfg.model.get("teacher") is None
+
+
+class TestBatchAugmentGroup:
+    """Группа augment (Mixup/CutMix) подключается к любому эксперименту
+    одним override'ом и по умолчанию выключена."""
+
+    def test_disabled_by_default(self):
+        assert compose_config([]).get("augment") is None
+
+    @pytest.mark.parametrize("augment", ["mixup_cutmix", "cutmix_segmentation"])
+    def test_augment_configs_instantiate(self, augment):
+        from src.data import MixupCutmix
+
+        cfg = compose_config([f"augment={augment}"])
+        assert isinstance(instantiate(cfg.augment), MixupCutmix)
+
+    def test_segmentation_preset_is_cutmix_only(self):
+        """Линейная смесь двух городских сцен даёт кадр, которого не бывает,
+        и размазанный таргет. Для плотных задач это не рабочий вариант."""
+        cfg = compose_config(["augment=cutmix_segmentation"])
+        assert cfg.augment.mixup_alpha == 0.0
+        assert cfg.augment.cutmix_alpha > 0.0
+
+    def test_can_be_attached_to_an_existing_experiment(self):
+        cfg = compose_config(
+            [
+                "experiment=segmentation/CWD/cityscapes_CWD_segformer_b2_to_unet_base",
+                "augment=cutmix_segmentation",
+            ]
+        )
+        assert cfg.augment is not None
+        assert cfg.task_type == "segmentation"
+
+
+class TestStrongAugmentationExperiment:
+    EXPERIMENT = "scratch/cityscapes_scratch_unet_base_strong_aug"
+
+    def test_differs_from_the_baseline_only_in_augmentation(self):
+        """Пара «базовый / усиленный» имеет смысл, только если всё остальное
+        совпадает: иначе разница в mIoU объясняется не аугментациями."""
+        baseline = compose_config(["experiment=scratch/cityscapes_scratch_unet_base"])
+        strong = compose_config([f"experiment={self.EXPERIMENT}"])
+
+        assert strong.optimizer.lr == baseline.optimizer.lr
+        assert strong.data.loader.batch_size == baseline.data.loader.batch_size
+        assert strong.model.student.variant == baseline.model.student.variant
+        assert strong.loss.label_smoothing == baseline.loss.label_smoothing
+
+    def test_augmentations_are_actually_on(self):
+        cfg = compose_config([f"experiment={self.EXPERIMENT}"])
+
+        assert cfg.augment is not None
+        assert cfg.data.transform.train.cat_max_ratio == 0.75
+        assert cfg.data.transform.train.random_erasing_p > 0
+        assert cfg.model.student.dropout > 0
+
+    def test_evaluation_transform_has_no_augmentation(self):
+        """Аугментации на валидации сделали бы метрику несравнимой
+        с публичными числами."""
+        cfg = compose_config([f"experiment={self.EXPERIMENT}"])
+        assert cfg.data.transform.eval._target_.endswith("build_segmentation_transform_eval")
+
+
+def test_base_segmentation_transform_stays_unchanged():
+    """Базовый рецепт — точка отсчёта для уже посчитанных бейзлайнов.
+    Новые аугментации в нём обязаны быть выключены."""
+    cfg = compose_config(["experiment=scratch/cityscapes_scratch_unet_base"])
+    train_transform = cfg.data.transform.train
+
+    assert train_transform.color_jitter == 0.4
+    assert train_transform.hflip_p == 0.5
+    assert train_transform.hue == 0.0
+    assert train_transform.cat_max_ratio is None
+    assert train_transform.blur_p == 0.0
+    assert train_transform.random_erasing_p == 0.0
 
 
 def test_fitnets_channels_match_the_configured_pair():
