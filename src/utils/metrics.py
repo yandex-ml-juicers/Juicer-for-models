@@ -1,8 +1,10 @@
 """Метрики и агрегаторы."""
 
+import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 def accuracy(logits: torch.Tensor, targets: torch.Tensor) -> float:
     """Доля правильных ответов по argmax логитов, в [0, 1]."""
@@ -34,7 +36,7 @@ def build_param_table(student=None, teacher=None, criterion=None) -> pd.DataFram
         rows["Criterion"] = count_parameters(criterion)
     if teacher is not None:
         rows["Teacher"] = count_parameters(teacher)
-    if rows is {}:
+    if not rows:
         return None
     df = pd.DataFrame.from_dict(rows, orient="index")
     df.index.name = "module"
@@ -121,10 +123,159 @@ class IoUAccumulator:
         }
 
     def per_class_iou(self) -> torch.Tensor:
+        """IoU по каждому классу; NaN там, где класса не было в разметке.
+
+        NaN, а не ноль: класс, которого не было в выборке, ничем себя не
+        проявил, и нулевой столбик на графике читался бы как "модель его
+        полностью провалила". Условие "класс был" — то же, что в compute(),
+        поэтому среднее ненулевых столбиков в точности равно mIoU.
+        """
         cm = self.matrix.float()
         tp = cm.diagonal()
         union = cm.sum(dim=0) + cm.sum(dim=1) - tp
-        return tp / union.clamp_min(1e-12)
+        return torch.where(cm.sum(dim=1) > 0, tp / union.clamp_min(1e-12), torch.nan)
+
+    def normalized_matrix(self) -> torch.Tensor:
+        """Матрица ошибок, нормированная по строкам: доля пикселей класса i, ушедшая в класс j.
+
+        Строки — истинные классы, поэтому диагональ читается как recall.
+        Без нормировки карта бесполезна: road занимает треть кадра и давит
+        абсолютными числами всё остальное.
+        """
+        cm = self.matrix.float()
+        return cm / cm.sum(dim=1, keepdim=True).clamp_min(1e-12)
+
+
+class TeacherSimilarity:
+    """Насколько плотные предсказания ученика повторяют учительские.
+
+    Аналог KL/agreement из классификации, но для карт [B, C, H, W]. Прямой
+    перенос кода классификации сюда не годится по двум причинам:
+    - `reduction="batchmean"` делит сумму на B, а не на число пикселей, то есть
+      значение выросло бы в H*W раз и не сравнивалось бы между разрешениями;
+    - честный проход по всем пикселям кропа 512x1024 при batch=8 — это ~80 млн
+      значений на softmax, сопоставимо по цене с самим шагом обучения ради
+      диагностики.
+
+    Поэтому метрика считается по случайной подвыборке пикселей: `pixels_per_batch`
+    позиций на батч (одни и те же позиции для всех картинок батча — картинки
+    всё равно разные, а gather так дешевле). Оценка остаётся несмещённой,
+    цена — доли процента шага.
+
+    Пиксели с ignore_index выбрасываются: там нет разметки, и метрика должна
+    быть сравнима с mIoU, который считается по тем же валидным пикселям.
+    """
+
+    def __init__(
+        self,
+        num_classes: int,
+        device: torch.device,
+        ignore_index: int = 255,
+        pixels_per_batch: int = 8192,
+        samples_per_update: int = 4096,
+        max_samples: int = 131072,
+    ) -> None:
+        self.num_classes = num_classes
+        self.device = device
+        self.ignore_index = ignore_index
+        self.pixels_per_batch = pixels_per_batch
+        self.samples_per_update = samples_per_update
+        self.max_samples = max_samples
+        self.reset()
+
+    def reset(self) -> None:
+        # Всё копится тензорами на устройстве: .item() ни разу за эпоху,
+        # то есть ни одной лишней синхронизации с GPU внутри цикла.
+        self.kl_sum = torch.zeros((), dtype=torch.float64, device=self.device)
+        self.agree_sum = torch.zeros((), dtype=torch.float64, device=self.device)
+        self.pixels = torch.zeros((), dtype=torch.float64, device=self.device)
+        self.class_agree = torch.zeros(self.num_classes, dtype=torch.float64, device=self.device)
+        self.class_total = torch.zeros(self.num_classes, dtype=torch.float64, device=self.device)
+        self.kl_samples: list[torch.Tensor] = []
+        self.kept_samples = 0
+
+    @torch.no_grad()
+    def update(
+        self,
+        student_logits: torch.Tensor,
+        teacher_logits: torch.Tensor,
+        targets: torch.Tensor,
+    ) -> None:
+        """student_logits/teacher_logits — [B, C, H, W], targets — [B, H, W]."""
+        if teacher_logits.shape[1] != student_logits.shape[1]:
+            raise ValueError(
+                f"У ученика {student_logits.shape[1]} классов, у учителя "
+                f"{teacher_logits.shape[1]}: сравнивать предсказания нечем."
+            )
+        if teacher_logits.shape[2:] != student_logits.shape[2:]:
+            # Голова учителя с другим страйдом (см. align_logits в losses):
+            # приводим ДО прореживания, иначе выбранные позиции перестанут
+            # соответствовать друг другу. Случай редкий, копия здесь допустима.
+            teacher_logits = F.interpolate(
+                teacher_logits.detach().float(),
+                size=student_logits.shape[2:],
+                mode="bilinear",
+                align_corners=False,
+            )
+
+        student = student_logits.detach().flatten(2)  # [B, C, HW], view без копии
+        teacher = teacher_logits.detach().flatten(2)
+        labels = targets.detach().flatten(1)  # [B, HW]
+
+        num_pixels = student.shape[2]
+        if self.pixels_per_batch < num_pixels:
+            index = torch.randint(num_pixels, (self.pixels_per_batch,), device=student.device)
+            student = student.index_select(2, index)
+            teacher = teacher.index_select(2, index)
+            labels = labels.index_select(1, index)
+
+        # fp32 независимо от AMP: KL живёт в хвостах распределения, а их fp16 съедает.
+        log_student = F.log_softmax(student.float(), dim=1)
+        log_teacher = F.log_softmax(teacher.float(), dim=1)
+
+        valid = labels != self.ignore_index
+
+        # KL(teacher || student) — направление то же, что в F.kl_div(log_s, p_t).
+        kl = (log_teacher.exp() * (log_teacher - log_student)).sum(dim=1)[valid]
+        agree = (log_student.argmax(dim=1) == log_teacher.argmax(dim=1))[valid]
+        labels = labels[valid]
+
+        self.kl_sum += kl.sum()
+        self.agree_sum += agree.sum()
+        self.pixels += kl.numel()
+        self.class_agree += torch.bincount(
+            labels[agree], minlength=self.num_classes
+        ).to(self.class_agree.dtype)
+        self.class_total += torch.bincount(
+            labels, minlength=self.num_classes
+        ).to(self.class_total.dtype)
+
+        # Немного значений с каждого вызова — чтобы гистограмма описывала эпоху
+        # целиком, а не первый её батч.
+        if self.kept_samples < self.max_samples:
+            self.kl_samples.append(kl[: self.samples_per_update].float())
+            self.kept_samples += self.kl_samples[-1].numel()
+
+    def compute(self) -> dict[str, float]:
+        """Средние по эпохе. Пустой аккумулятор -> пустой словарь (метрик не было)."""
+        if float(self.pixels) == 0.0:
+            return {}
+        return {
+            "KL_divergence": float(self.kl_sum / self.pixels),
+            "agreement_rate": float(self.agree_sum / self.pixels),
+        }
+
+    def per_class_agreement(self) -> np.ndarray:
+        """Доля совпадений с учителем внутри каждого GT-класса; NaN — класса не было."""
+        total = self.class_total.clamp_min(1.0)
+        agreement = torch.where(self.class_total > 0, self.class_agree / total, torch.nan)
+        return agreement.cpu().numpy()
+
+    def kl_sample_values(self) -> np.ndarray:
+        """Выборка попиксельных KL за эпоху — сырьё для гистограммы."""
+        if not self.kl_samples:
+            return np.empty(0, dtype=np.float32)
+        return torch.cat(self.kl_samples).cpu().numpy()
 
 
 class ConfusionMatrixAccumulator:
