@@ -52,10 +52,13 @@ class UNet(nn.Module):
         in_channels: int = 3,
         base_channels: int = 64,
         depth: int = 4,
+        dropout: float = 0.0,
     ) -> None:
         super().__init__()
         if depth < 2:
             raise ValueError(f"depth должен быть >= 2, получено {depth}")
+        if not 0.0 <= dropout < 1.0:
+            raise ValueError(f"dropout должен быть в [0, 1), получено {dropout}")
 
         self.depth = int(depth)
         self.base_channels = int(base_channels)
@@ -70,6 +73,15 @@ class UNet(nn.Module):
 
         self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
         self.bottleneck = UNetDoubleConv(channels[-2], channels[-1])
+
+        # Dropout2d (а не обычный dropout): в свёрточной карте соседние
+        # пиксели одного канала сильно скоррелированы, и выключение отдельных
+        # активаций почти ничего не регуляризует — выключать надо канал целиком.
+        # Стоит только на боттлнеке: это самое широкое и самое переобучающееся
+        # место сети, а в декодере dropout ломает skip-связи.
+        # Модуль без параметров и буферов, поэтому state_dict не меняется
+        # и старые чекпоинты грузятся как раньше.
+        self.dropout = nn.Dropout2d(p=dropout) if dropout > 0 else nn.Identity()
 
         self.upsamples = nn.ModuleList()
         self.decoders = nn.ModuleList()
@@ -118,7 +130,12 @@ class UNet(nn.Module):
             features = self.pool(features)
 
         features = self.bottleneck(features)
+        # Тап снимается ДО dropout'а: при depth=4 это и есть stage3, по которому
+        # идёт feature-дистилляция, и сравнивать с учителем нужно чистую карту,
+        # а не ту, где случайная половина каналов обнулена. Регуляризуется при
+        # этом всё, что ниже по течению, — декодер получает уже отключённые каналы.
         self._tap(2 ** self.depth, features)
+        features = self.dropout(features)
 
         for upsample, decoder, skip in zip(self.upsamples, self.decoders, reversed(skips)):
             features = upsample(features)

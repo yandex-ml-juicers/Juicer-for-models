@@ -9,6 +9,11 @@ from src.models.factory import (
 from src.models.feature_extractor import FeatureExtractor, unwrap_model
 from src.models.feature_taps import STAGE_TAP_STRIDES, STAGE_TAPS, FeatureTaps
 from src.models.segformer import SEGFORMER_VARIANTS, SegFormer
+from src.models.stochastic_depth import (
+    StochasticDepthBatchNorm2d,
+    apply_stochastic_depth,
+    linear_drop_path_rates,
+)
 from src.models.unet import UNET_VARIANTS, UNet
 
 __all__ = [
@@ -19,9 +24,12 @@ __all__ = [
     "STAGE_TAP_STRIDES",
     "SegFormer",
     "SEGFORMER_VARIANTS",
+    "StochasticDepthBatchNorm2d",
     "UNET_VARIANTS",
     "UNet",
+    "apply_stochastic_depth",
     "cifar_resnet18",
+    "linear_drop_path_rates",
     "from_detectors",
     "from_torch_hub",
     "segformer_for_segmentation",

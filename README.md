@@ -42,6 +42,28 @@ python scripts/train.py data/dataset=fake_cifar10 '~model/teacher' loss=ce \
 python scripts/eval.py experiment=b2_feature_kd ckpt_path=outputs/<name>/<run>/best.pt
 ```
 
+## Аугментации и регуляризации
+
+По умолчанию включён только базовый набор (crop + flip + jitter), чтобы
+бейзлайны оставались сравнимыми. Всё остальное подключается конфигом:
+
+```bash
+# Mixup + CutMix (классификация) / CutMix (сегментация) — группа augment
+python scripts/train.py experiment=<...> augment=mixup_cutmix
+python scripts/train.py experiment=<...> augment=cutmix_segmentation
+
+# усиленный набор аугментаций одного примера
+python scripts/train.py experiment=<...> data/transform/train=cityscapes_seg_strong_transform
+python scripts/train.py experiment=<...> data/transform/train=imagenet_strong_transform
+
+# регуляризация внутри модели
+python scripts/train.py experiment=<...> model.student.drop_path_rate=0.2   # SegFormer / timm / ResNet
+python scripts/train.py experiment=<...> model.student.dropout=0.1          # U-Net
+```
+
+Что каждый рычаг делает, когда его включать и почему для сегментации нужен
+CutMix, а не Mixup — в [docs/augmentations.md](docs/augmentations.md).
+
 Артефакты каждого запуска — в `outputs/<name>/<дата_время>/`:
 `.hydra/config.yaml` (полный снапшот конфига), `train.log`, `history.csv`
 (метрики и все компоненты лосса по эпохам), `best.pt` / `last.pt`.
