@@ -23,7 +23,7 @@ from tqdm import tqdm
 
 from src.losses.base import DistillationLoss
 from src.models.feature_extractor import FeatureExtractor
-from src.utils.distributed import DistInfo, unwrap, all_reduce_sum_
+from src.utils.distributed import DistInfo, unwrap, all_reduce_sum_, all_reduce_max_
 from src.utils.logger import MetricsHistory, get_logger
 from src.utils.metrics import AverageMeter, accuracy, ConfusionMatrixAccumulator, count_parameters, build_param_table, sync_meters
 
@@ -376,8 +376,9 @@ class Trainer:
 
         train_loss_components = {key: meter.avg for key, meter in meters_avg_loss.items()} # train_loss_components
 
-        meters_other["max_grad_norm"] = max_grad_norm
-        meters_other["max_weight_norm"] = max_weight_norm
+        max_norms = torch.tensor([max_grad_norm, max_weight_norm], device=self.device)
+        all_reduce_max_(max_norms)
+        meters_other["max_grad_norm"], meters_other["max_weight_norm"] = max_norms.tolist()
 
         other_train_metrics = {**{key: meter.avg for key, meter in meters_avg.items()}, **meters_other}
 
