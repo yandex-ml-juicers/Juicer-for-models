@@ -101,6 +101,67 @@ class DetectionRandomHorizontalFlip:
 
         return image, target
 
+class DetectionRandomResizedCrop:
+    """Random crop followed by resize to the given output size."""
+
+    def __init__(
+        self,
+        size: tuple[int, int],
+        scale: tuple[float, float] = (0.5, 1.0),
+        ratio: tuple[float, float] = (0.75, 1.33),
+    ) -> None:
+        self.size = size
+        self.scale = scale
+        self.ratio = ratio
+
+    def __call__(
+        self,
+        image: Image.Image | Tensor,
+        target: dict[str, Tensor],
+    ) -> tuple[Image.Image | Tensor, dict[str, Tensor]]:
+
+        top, left, height, width = transforms.RandomResizedCrop.get_params(image, scale=self.scale, ratio=self.ratio)
+
+        # Crop image
+        image = F.crop(image, top=top, left=left, height=height, width=width)
+
+        target = target.copy()
+        boxes = target["boxes"].clone()
+
+        if boxes.numel() > 0:
+            # Move boxes into cropped image coordinates
+            boxes[:, [0, 2]] -= left
+            boxes[:, [1, 3]] -= top
+
+            # Clip boxes to crop borders
+            boxes[:, [0, 2]].clamp_(0, width)
+            boxes[:, [1, 3]].clamp_(0, height)
+
+            # Remove boxes that disappeared after crop
+            keep = ((boxes[:, 2] > boxes[:, 0]) & (boxes[:, 3] > boxes[:, 1]))
+
+            boxes = boxes[keep]
+
+            target["boxes"] = boxes
+            target["labels"] = target["labels"][keep]
+
+            if "iscrowd" in target:
+                target["iscrowd"] = target["iscrowd"][keep]
+
+            # Recalculate area after crop
+            if "area" in target:
+                target["area"] = ((boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1]))
+
+        else:
+            target["boxes"] = boxes
+
+        target["size"] = torch.tensor([height, width], dtype=torch.int64)
+
+        # Resize crop to final image size
+        resize = DetectionResize(self.size)
+
+        return resize(image, target)
+
 class DetectionColorJitter:
     """Randomly changes image brightness, contrast, saturation and hue."""
 
@@ -127,25 +188,25 @@ class DetectionColorJitter:
 
         return image, target
 
-class DetectionRandomResize:
-    """Randomly chooses one image size and resizes image and bounding boxes."""
-
+class DetectionGaussianBlur:
     def __init__(
         self,
-        sizes: Sequence[tuple[int, int]],
+        kernel_size: int = 5,
+        sigma: tuple[float, float] = (0.1, 2.0),
+        p: float = 0.2,
     ) -> None:
-        self.sizes = tuple(sizes)
+        self.transform = transforms.GaussianBlur(kernel_size=kernel_size, sigma=sigma)
+        self.p = p
 
     def __call__(
         self,
         image: Image.Image | Tensor,
         target: dict[str, Tensor],
-    ) -> tuple[Image.Image | Tensor, dict[str, Tensor]]:
-        size = random.choice(self.sizes)
+    ):
+        if random.random() < self.p:
+            image = self.transform(image)
 
-        resize = DetectionResize(size)
-
-        return resize(image, target)
+        return image, target
 
 class DetectionToTensor:
     def __call__(

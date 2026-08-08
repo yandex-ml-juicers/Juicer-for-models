@@ -119,22 +119,26 @@ def build_base_transform_for_cityscapes(
 ) -> transforms.Compose:
     ops: list = []
     if train:
-        ops.append(detection_transforms.DetectionRandomHorizontalFlip(p=0.5))
+        ops.append(
+                detection_transforms.DetectionRandomResizedCrop(
+                    size=image_size,
+                    scale=(0.6, 1.0),
+                    ratio=(0.8, 1.25),
+                )
+            )
         ops.append(detection_transforms.DetectionColorJitter(
             brightness=0.2,
             contrast=0.2,
             saturation=0.2,
             hue=0.05,
         ))
-        # ops.append(detection_transforms.DetectionRandomResize(
-        #     [
-        #         (512, 1024),
-        #         (576, 1152),
-        #         (640, 1280),
-        #         (704, 1408),
-        #     ]
-        # ),)
-        ops.append(detection_transforms.DetectionResize(image_size))
+        ops.append(
+            detection_transforms.DetectionGaussianBlur(
+                kernel_size=5,
+                sigma=(0.1, 2.0),
+                p=0.2,
+            )
+        )
     else:
         if image_size is not None:
             ops.append(detection_transforms.DetectionResize(image_size))
