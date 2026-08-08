@@ -14,4 +14,5 @@ __all__ = [
     "seed_everything",
     "seed_worker",
     "prediction_postprocessor"
+    "prepare_targets"
 ]
