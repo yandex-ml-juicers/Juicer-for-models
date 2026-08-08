@@ -408,7 +408,11 @@ def _grad_worker(rank: int, world_size: int, port: int, result_queue) -> None:
         model = _fixed_model().to(info.device)
         wrapped = _wrap(model, info)
 
+        # Данные переносим руками. DDP сам двигает на устройство только входы
+        # forward'а, а метки идут мимо него — прямо в лосс.
         features, labels = _fixed_batch()
+        features = features.to(info.device)
+        labels = labels.to(info.device)
         shard = slice(rank * (GRAD_BATCH // world_size), (rank + 1) * (GRAD_BATCH // world_size))
 
         # reduction="mean" по своему шарду; DDP усредняет эти средние по рангам.
@@ -455,7 +459,10 @@ def test_ddp_gradient_equals_single_process_full_batch(world_size):
     results = [queue.get() for _ in range(world_size)]
 
     for row in results:
-        assert torch.allclose(torch.tensor(row["grad"]), expected, atol=1e-6), (
+        # Допуск не нулевой: эталон считается на CPU, а ранки могут считать на
+        # GPU другими ядрами и с другим порядком сложения. Настоящая поломка
+        # синхронизации даёт расхождение на порядки больше.
+        assert torch.allclose(torch.tensor(row["grad"]), expected, atol=1e-5, rtol=1e-4), (
             f"градиент на ранке {row['rank']} разошёлся с однопроцессным"
         )
 
