@@ -16,6 +16,8 @@ from torchvision.models import get_model
 
 from transformers import LwDetrConfig, LwDetrForObjectDetection
 
+from ultralytics.nn.tasks import DetectionModel
+
 from hydra.utils import to_absolute_path
 
 
@@ -306,4 +308,13 @@ def lwdetr_small_for_detection(
         ignore_mismatched_sizes=True,
     )
 
+    return model
+
+def yolov8n(num_classes: int = 8):
+    model = DetectionModel(
+        cfg="yolov8n.yaml",
+        ch=3,
+        nc=num_classes,
+        verbose=False,
+    )
     return model

@@ -1,0 +1,2 @@
+_target_: src.models.factory.yolov8n
+num_classes: 8
