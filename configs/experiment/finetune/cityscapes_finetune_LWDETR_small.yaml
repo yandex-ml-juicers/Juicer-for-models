@@ -6,10 +6,10 @@ defaults:
   - override /model/teacher: null
   - override /model/student: lwdetr
   - override /loss: lwdetr_small_loss
-  - override /optimizer: adam
+  - override /optimizer: adamw
   - override /scheduler: warmup_cosine
 
-name: cityscapes_scartch_LWDETR_small
+name: cityscapes_finetune_LWDETR_small
 device: cuda
 deterministic: false
 
@@ -17,7 +17,7 @@ task_type: "detection"
 
 clearml:
   enabled: True
-  tags: [cityscapes, teacher, scratch, LW-DETR-small]
+  tags: [cityscapes, teacher, finetune, LW-DETR-small]
   output_uri: false
 
 trainer:
@@ -42,7 +42,7 @@ data:
     build:
       label_offset: 0
   loader:
-    batch_size: 10
-    num_workers: 16
+    batch_size: 16
+    num_workers: 8
     persistent_workers: true
     pin_memory: true
