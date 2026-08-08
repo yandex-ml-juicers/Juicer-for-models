@@ -8,6 +8,7 @@
 """
 
 import time
+from types import SimpleNamespace
 from collections import defaultdict
 from collections.abc import Callable, Sequence
 from pathlib import Path
@@ -26,6 +27,7 @@ from src.losses.base import DistillationLoss
 from src.models.feature_extractor import FeatureExtractor
 from src.utils.logger import MetricsHistory, get_logger
 from src.utils.metrics import AverageMeter, accuracy, ConfusionMatrixAccumulator, IoUAccumulator, count_parameters, build_param_table
+from src.utils.prepare_targets import prepare_targets
 
 log = get_logger(__name__)
 
@@ -358,50 +360,6 @@ class Trainer:
             "scaler_state": self.scaler.state_dict(),
         }
         torch.save(checkpoint, self.output_dir / filename)
-
-
-def prepare_targets(
-    targets: Sequence[dict],
-    device: torch.device | str,
-    mode: str,
-) -> list[dict]:
-    if mode == "lw-detr-small":
-        prepared_targets = []
-
-        for target in targets:
-            class_labels = target["labels"].to(device=device, dtype=torch.long, non_blocking=True)
-            boxes = target["boxes"].to(device=device, dtype=torch.float32, non_blocking=True)
-
-            size = target["size"].to(device=device, dtype=torch.float32, non_blocking=True)
-            height, width = size.unbind()
-
-            boxes = box_convert(boxes, in_fmt="xyxy", out_fmt="cxcywh")
-            scale = torch.stack([width, height, width, height])
-            boxes = (boxes / scale).clamp(0.0, 1.0)
-
-            prepared_targets.append(
-                {
-                    "class_labels": class_labels,
-                    "boxes": boxes,
-                }
-            )
-
-        return prepared_targets
-
-    return [
-        {
-            key: (
-                value.to(
-                    device,
-                    non_blocking=True,
-                )
-                if isinstance(value, Tensor)
-                else value
-            )
-            for key, value in target.items()
-        }
-        for target in targets
-    ]
 
 
 @torch.no_grad()
@@ -765,25 +723,25 @@ class DetectionTrainer:
 
             iterator.set_postfix({"loss": f"{losses['total'].item():.3f}"})
 
-            computed_meters_map = meters_map.compute()
+        computed_meters_map = meters_map.compute()
 
-            train_loss_components = {key: meter.avg for key, meter in meters_avg_loss.items()}
-            meters_other["max_grad_norm"] = max_grad_norm
-            meters_other["max_weight_norm"] = max_weight_norm
+        train_loss_components = {key: meter.avg for key, meter in meters_avg_loss.items()}
+        meters_other["max_grad_norm"] = max_grad_norm
+        meters_other["max_weight_norm"] = max_weight_norm
 
-            other_train_metrics = {
-                **{
-                    key: meter.avg
-                    for key, meter in meters_avg.items()
-                },
-                **meters_other,
+        other_train_metrics = {
+            **{
+                key: meter.avg
+                for key, meter in meters_avg.items()
+            },
+            **meters_other,
 
-                # NEW
-                "map": computed_meters_map["map"].item(),
-                "map_50": computed_meters_map["map_50"].item(),
-                "map_75": computed_meters_map["map_75"].item(),
-                "mar_100": computed_meters_map["mar_100"].item(),
-            }
+            # NEW
+            "map": computed_meters_map["map"].item(),
+            "map_50": computed_meters_map["map_50"].item(),
+            "map_75": computed_meters_map["map_75"].item(),
+            "mar_100": computed_meters_map["mar_100"].item(),
+        }
 
         return train_loss_components, other_train_metrics
 
@@ -795,6 +753,25 @@ class DetectionTrainer:
         targets,
     ) -> None:
         with torch.no_grad():
+            outputs_for_metric = student_outputs
+
+            # LW-DETR использует несколько query-групп во время train.
+            # Для метрики берем только первую группу, как при inference.
+            config = getattr(self.student, "config", None)
+
+            if (
+                config is not None
+                and getattr(config, "group_detr", 1) > 1
+                and hasattr(student_outputs, "logits")
+                and hasattr(student_outputs, "pred_boxes")
+            ):
+                num_queries = config.num_queries
+
+                outputs_for_metric = SimpleNamespace(
+                    logits=student_outputs.logits[:, :num_queries].detach(),
+                    pred_boxes=student_outputs.pred_boxes[:, :num_queries].detach(),
+                )
+
             if self.prediction_postprocessor is not None:
                 predictions = self.prediction_postprocessor(student_outputs, images)
             else:
@@ -804,11 +781,23 @@ class DetectionTrainer:
             targets_metric = []
 
             for prediction, target in zip(predictions, targets):
+                boxes = prediction["boxes"]
+                scores = prediction["scores"]
+                labels = prediction["labels"]
+
+                # Оставляем максимум 100 лучших detections
+                if scores.numel() > 100:
+                    topk_indices = torch.topk(scores, k=100).indices
+
+                    boxes = boxes[topk_indices]
+                    scores = scores[topk_indices]
+                    labels = labels[topk_indices]
+
                 predictions_metric.append(
                     {
-                        "boxes": (prediction["boxes"].detach().float().cpu()),
-                        "scores": (prediction["scores"].detach().float().cpu()),
-                        "labels": (prediction["labels"].detach().long().cpu() - self.label_offset),
+                        "boxes": boxes.detach().float().cpu(),
+                        "scores": scores.detach().float().cpu(),
+                        "labels": (labels.detach().long().cpu() - self.label_offset),
                     }
                 )
 
