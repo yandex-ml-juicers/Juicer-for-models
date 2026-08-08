@@ -7,13 +7,14 @@
 # Бейзлайн для этого прогона — scratch/cityscapes_scratch_unet_base.
 defaults:
   - override /data/dataset: cityscapes_seg
-  - override /data/transform/train: cityscapes_seg_transform
+  - override /data/transform/train: cityscapes_seg_strong_transform
   - override /data/transform/eval: cityscapes_seg_transform
   - override /model/teacher: segformer
-  - override /model/student: unet
+  - override /model/student: timm_unet
   - override /loss: fitnets
   - override /optimizer: adamw
   - override /scheduler: warmup_cosine
+  - override /augment: cutmix_segmentation
 
 name: cityscapes_FitNets_segformer_b2_to_unet_base
 device: cuda
@@ -27,6 +28,9 @@ clearml:
   # Схожесть ученика с учителем по пикселям: KL и доля совпавших argmax'ов.
   # Считаются по подвыборке пикселей на probe-батчах, цена — доли процента эпохи.
   scalars: ['KL_divergence', 'agreement_rate']
+  plots:
+    enabled: true
+    every_n_epochs: 20
   reuse_last_task_id: False
   continue_last_task: False
   output_uri: false
@@ -39,21 +43,19 @@ trainer:
 loss:
   ce_weight: 1.0
   hint_weight: 1.0
-  logits_weight: 0.0   # чистая абляция hint-лосса, без KD по логитам
-  # Стадия 3 = страйд 16. У SegFormer-B2 там 320 каналов, у U-Net с
-  # base_channels=32 это боттлнек на 512 каналов — регрессор 1x1 их и
-  # согласует. stage4 у U-Net с depth=4 не существует, см. configs/loss/fitnets.yaml.
+  logits_weight: 0.0
+  # У предобученного энкодера есть стадия на страйде 32, поэтому доступен
+  # и stage4 — в отличие от classic U-Net с depth=4.
   layers:
-    taps.stage3: { student_channels: 512, teacher_channels: 320, weight: 1.0 }
+    taps.stage3: { student_channels: 112, teacher_channels: 320, weight: 1.0 }
+    taps.stage4: { student_channels: 320, teacher_channels: 512, weight: 1.0 }
 
-# U-Net обучается с нуля (ImageNet-инициализации у него нет), поэтому lr выше,
-# чем в конфигах с предобученным энкодером.
 optimizer:
-  lr: 3.0e-4
-  weight_decay: 1.0e-2
+  lr: 3.25e-4
+  weight_decay: 3.0e-2
 
 scheduler:
-  warmup_epochs: 5
+  warmup_epochs: 10
   eta_min: 1.0e-6
 
 data:
@@ -66,7 +68,9 @@ data:
 
 model:
   student:
-    variant: base
+    variant: efficientnet_b0
+    pretrained: true
+    dropout: 0.1
   teacher:
     variant: b2
     pretrained: cityscapes

@@ -21,45 +21,42 @@ task_type: "segmentation"
 
 clearml:
   enabled: True
-  tags: [cityscapes, student, scratch, timm-unet, pretrained, segmentation]
-  scalars: []
-  reuse_last_task_id: False
+  tags: [cityscapes, student, scratch, timm_unet, segmentation]
+  scalars: ['KL_divergence', 'agreement_rate']
+  plots:
+    enabled: true
+    every_n_epochs: 20
+  reuse_last_task_id: True
   continue_last_task: False
   output_uri: false
 
+
 trainer:
-  epochs: 150
+  epochs: 100
   amp: true
   grad_clip_norm: 1.0
 
 loss:
   ignore_index: ${data.dataset.ignore_index}
-  label_smoothing: 0.0
+  label_smoothing: 0.05
 
-# Предобученному энкодеру нужен lr НИЖЕ, чем сети с нуля: на 3e-4 первые
-# батчи со случайным декодером сносят ImageNet-признаки быстрее, чем те
-# успевают пригодиться. Плюс warmup.
-#
-# Идеально было бы дать энкодеру lr в 10 раз меньше декодера, но тренер
-# собирает optimizer одной группой из student.parameters() — раздельных
-# param groups сейчас нет. Единый пониженный lr + warmup — рабочая замена.
 optimizer:
-  lr: 1.0e-4
-  weight_decay: 1.0e-2
+  lr: 3.25e-4
+  weight_decay: 3.0e-2
 
 scheduler:
-  warmup_epochs: 5
+  warmup_epochs: 10
   eta_min: 1.0e-6
 
 data:
   loader:
-    batch_size: 16
-    eval_batch_size: 8
-    num_workers: 16
+    batch_size: 8
+    eval_batch_size: 4
+    num_workers: 8
     pin_memory: true
     persistent_workers: true
 
 model:
   student:
-    variant: resnet18
+    variant: efficientnet_b0
     pretrained: true

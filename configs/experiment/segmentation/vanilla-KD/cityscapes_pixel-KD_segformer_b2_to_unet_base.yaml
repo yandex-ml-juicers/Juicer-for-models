@@ -6,13 +6,14 @@
 # Бейзлайн для этого прогона — scratch/cityscapes_scratch_unet_base.
 defaults:
   - override /data/dataset: cityscapes_seg
-  - override /data/transform/train: cityscapes_seg_transform
+  - override /data/transform/train: cityscapes_seg_strong_transform
   - override /data/transform/eval: cityscapes_seg_transform
   - override /model/teacher: segformer
-  - override /model/student: unet
+  - override /model/student: timm_unet
   - override /loss: pixel_kd
   - override /optimizer: adamw
   - override /scheduler: warmup_cosine
+  - override /augment: cutmix_segmentation
 
 name: cityscapes_pixel-KD_segformer_b2_to_unet_base
 device: cuda
@@ -22,16 +23,17 @@ task_type: "segmentation"
 
 clearml:
   enabled: True
-  tags: [cityscapes, KD, pixel-KD, segformer-b2, unet-base, segmentation]
-  # Схожесть ученика с учителем по пикселям: KL и доля совпавших argmax'ов.
-  # Считаются по подвыборке пикселей на probe-батчах, цена — доли процента эпохи.
+  tags: [cityscapes, KD, pixel-KD, segformer-b2, unet-smal, segmentation]
   scalars: ['KL_divergence', 'agreement_rate']
-  reuse_last_task_id: False
+  plots:
+    enabled: true
+    every_n_epochs: 20
+  reuse_last_task_id: True
   continue_last_task: False
   output_uri: false
 
 trainer:
-  epochs: 200
+  epochs: 100
   amp: true
   grad_clip_norm: 1.0
 
@@ -39,27 +41,27 @@ loss:
   temperature: 4.0
   alpha: 0.5
 
-# U-Net обучается с нуля (ImageNet-инициализации у него нет), поэтому lr выше,
-# чем в конфигах с предобученным энкодером.
 optimizer:
-  lr: 3.0e-4
-  weight_decay: 1.5e-2
+  lr: 3.25e-4
+  weight_decay: 3.0e-2
 
 scheduler:
-  warmup_epochs: 15
+  warmup_epochs: 10
   eta_min: 1.0e-6
 
 data:
   loader:
-    batch_size: 20
-    eval_batch_size: 10
-    num_workers: 20
+    batch_size: 8
+    eval_batch_size: 4
+    num_workers: 8
     pin_memory: true
     persistent_workers: true
 
 model:
   student:
-    variant: base
+    variant: efficientnet_b0
+    pretrained: true
+    dropout: 0.1
   teacher:
     variant: b2
     pretrained: cityscapes

@@ -12,7 +12,7 @@ defaults:
   - override /model/student: unet
   - override /loss: ce
   - override /optimizer: adamw
-  - override /scheduler: cosine
+  - override /scheduler: warmup_cosine
 
 name: cityscapes_scratch_unet
 device: cuda
@@ -25,14 +25,17 @@ task_type: "segmentation"
 
 clearml:
   enabled: True
-  tags: [cityscapes, student, scratch, unet, segmentation]
-  scalars: []
+  tags: [cityscapes, student, scratch, unet-smal, segmentation]
+  scalars: ['KL_divergence', 'agreement_rate']
+  plots:
+    enabled: true
+    every_n_epochs: 20
   reuse_last_task_id: True
   continue_last_task: False
   output_uri: false
 
 trainer:
-  epochs: 300
+  epochs: 100
   amp: true
   grad_clip_norm: 1.0
 
@@ -42,18 +45,21 @@ loss:
   label_smoothing: 0.05
 
 optimizer:
-  lr: 3.0e-4
-  weight_decay: 1.5e-2
+  lr: 7.5e-4
+  weight_decay: 4.0e-2
+
+scheduler:
+  warmup_epochs: 10
+  eta_min: 1.0e-6
 
 data:
   loader:
-    # Модель вчетверо легче full-варианта, батч можно поднять.
-    batch_size: 20
-    eval_batch_size: 10
-    num_workers: 20
+    batch_size: 8
+    eval_batch_size: 4
+    num_workers: 8
     pin_memory: true
     persistent_workers: true
 
 model:
   student:
-    variant: base
+    variant: small
