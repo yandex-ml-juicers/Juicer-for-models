@@ -29,9 +29,9 @@ from src.data import base_loader
 from src.data.samplers import ShardSampler
 from src.losses.base import DistillationLoss
 from src.losses.cross_entropy import CrossEntropy
+<<<<<<< HEAD
 from src.training import SegmentationTrainer, Trainer, evaluate
 from src.training.trainer import NormTracker, segmentation_evaluate
-from src.utils import distributed as D
 from src.utils.metrics import (
     AverageMeter,
     ConfusionMatrixAccumulator,
@@ -39,9 +39,9 @@ from src.utils.metrics import (
     TeacherSimilarity,
     sync_meters,
 )
-from src.utils.distributed import DistInfo
-
-
+=======
+from src.training import Trainer, evaluate
+from src.utils import distributed as D
 # --------------------------------------------------------------------------
 # ShardSampler
 # --------------------------------------------------------------------------
@@ -106,8 +106,13 @@ def test_batch_size_is_global():
     тот же эксперимент на любом количестве GPU.
     """
     cfg = make_data_cfg()
+<<<<<<< HEAD
     single, _ = base_loader(cfg, "classification", seed=42, dist=fake_dist(0, 1))
     sharded, _ = base_loader(cfg, "classification", seed=42, dist=fake_dist(0, 4))
+=======
+    single, _ = base_loader(cfg, seed=42, dist=fake_dist(0, 1))
+    sharded, _ = base_loader(cfg, seed=42, dist=fake_dist(0, 4))
+>>>>>>> 33fa242 (chore: DDP tests and benchmarks)
 
     assert single.batch_size == cfg.loader.batch_size
     assert sharded.batch_size == cfg.loader.batch_size // 4
@@ -118,14 +123,22 @@ def test_batch_size_not_divisible_raises():
     cfg = make_data_cfg()
     cfg.loader.batch_size = 10
     with pytest.raises(ValueError, match="не делится"):
+<<<<<<< HEAD
         base_loader(cfg, "classification", seed=42, dist=fake_dist(0, 4))
+=======
+        base_loader(cfg, seed=42, dist=fake_dist(0, 4))
+>>>>>>> 33fa242 (chore: DDP tests and benchmarks)
 
 
 def test_train_shards_are_disjoint():
     cfg = make_data_cfg()
     per_rank = []
     for rank in range(2):
+<<<<<<< HEAD
         loader, _ = base_loader(cfg, "classification", seed=42, dist=fake_dist(rank, 2))
+=======
+        loader, _ = base_loader(cfg, seed=42, dist=fake_dist(rank, 2))
+>>>>>>> 33fa242 (chore: DDP tests and benchmarks)
         loader.sampler.set_epoch(0)
         per_rank.append(set(loader.sampler))
 
@@ -136,7 +149,11 @@ def test_set_epoch_changes_order():
     """Без set_epoch перестановка одинакова во всех эпохах — и это молчаливая
     потеря перемешивания, а не ошибка."""
     cfg = make_data_cfg()
+<<<<<<< HEAD
     loader, _ = base_loader(cfg, "classification", seed=42, dist=fake_dist(0, 2))
+=======
+    loader, _ = base_loader(cfg, seed=42, dist=fake_dist(0, 2))
+>>>>>>> 33fa242 (chore: DDP tests and benchmarks)
 
     loader.sampler.set_epoch(0)
     first = list(loader.sampler)
@@ -150,7 +167,11 @@ def test_single_process_path_unchanged():
     """При world_size=1 сэмплеры не подставляются: однопроцессные запуски
     обязаны воспроизводить ранее полученные результаты бит-в-бит."""
     cfg = make_data_cfg()
+<<<<<<< HEAD
     train_loader, eval_loader = base_loader(cfg, "classification", seed=42, dist=None)
+=======
+    train_loader, eval_loader = base_loader(cfg, seed=42, dist=None)
+>>>>>>> 33fa242 (chore: DDP tests and benchmarks)
 
     assert not isinstance(train_loader.sampler, ShardSampler)
     assert not isinstance(eval_loader.sampler, ShardSampler)
@@ -165,10 +186,17 @@ def test_eval_loader_has_no_padding():
     cfg = make_data_cfg()
     total = 0
     for rank in range(4):
+<<<<<<< HEAD
         _, eval_loader = base_loader(cfg, "classification", seed=42, dist=fake_dist(rank, 4))
         total += len(eval_loader.sampler)
 
     _, reference = base_loader(cfg, "classification", seed=42, dist=None)
+=======
+        _, eval_loader = base_loader(cfg, seed=42, dist=fake_dist(rank, 4))
+        total += len(eval_loader.sampler)
+
+    _, reference = base_loader(cfg, seed=42, dist=None)
+>>>>>>> 33fa242 (chore: DDP tests and benchmarks)
     assert total == len(reference.dataset)
 
 
@@ -416,11 +444,15 @@ def _grad_worker(rank: int, world_size: int, port: int, result_queue) -> None:
         model = _fixed_model().to(info.device)
         wrapped = _wrap(model, info)
 
+<<<<<<< HEAD
         # Данные переносим руками. DDP сам двигает на устройство только входы
         # forward'а, а метки идут мимо него — прямо в лосс.
         features, labels = _fixed_batch()
         features = features.to(info.device)
         labels = labels.to(info.device)
+=======
+        features, labels = _fixed_batch()
+>>>>>>> 33fa242 (chore: DDP tests and benchmarks)
         shard = slice(rank * (GRAD_BATCH // world_size), (rank + 1) * (GRAD_BATCH // world_size))
 
         # reduction="mean" по своему шарду; DDP усредняет эти средние по рангам.
@@ -467,10 +499,14 @@ def test_ddp_gradient_equals_single_process_full_batch(world_size):
     results = [queue.get() for _ in range(world_size)]
 
     for row in results:
+<<<<<<< HEAD
         # Допуск не нулевой: эталон считается на CPU, а ранки могут считать на
         # GPU другими ядрами и с другим порядком сложения. Настоящая поломка
         # синхронизации даёт расхождение на порядки больше.
         assert torch.allclose(torch.tensor(row["grad"]), expected, atol=1e-5, rtol=1e-4), (
+=======
+        assert torch.allclose(torch.tensor(row["grad"]), expected, atol=1e-6), (
+>>>>>>> 33fa242 (chore: DDP tests and benchmarks)
             f"градиент на ранке {row['rank']} разошёлся с однопроцессным"
         )
 
@@ -873,6 +909,7 @@ def _plain_loss_worker(rank: int, world_size: int, port: int, result_queue) -> N
         })
     finally:
         D.cleanup()
+<<<<<<< HEAD
 
 
 # --------------------------------------------------------------------------
@@ -1097,3 +1134,5 @@ def test_segmentation_trainer_under_ddp():
     assert results[0]["wrote_history"] and results[0]["wrote_checkpoint"]
     assert results[0]["clean_keys"]
     assert not results[1]["wrote_history"] and not results[1]["wrote_checkpoint"]
+=======
+>>>>>>> 33fa242 (chore: DDP tests and benchmarks)
