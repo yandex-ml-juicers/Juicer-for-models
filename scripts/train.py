@@ -123,11 +123,11 @@ def clearml_reporter(task):
                 )
 
         # Компоненты лосса (train_ce, train_kd, train_feature_*) — одним графиком.
-        for key, value in row.items():
-            if key.startswith("train_loss"):
-                logger.report_scalar(
-                    "loss_components", key.removeprefix("train_"), value, iteration=iterate
-                )
+        # for key, value in row.items():
+        #     if key.startswith("train_loss"):
+        #         logger.report_scalar(
+        #             "loss_components", key.removeprefix("train_"), value, iteration=iterate
+        #         )
 
     def report_single(single_values: dict):
         for key, val in single_values.items():
