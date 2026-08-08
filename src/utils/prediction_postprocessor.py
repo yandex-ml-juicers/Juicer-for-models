@@ -19,12 +19,7 @@ def prediction_postprocessor(
     probabilities = logits.sigmoid()
     scores, predicted_labels = probabilities.max(dim=-1)
 
-    boxes = box_convert(
-        pred_boxes,
-        in_fmt="cxcywh",
-        out_fmt="xyxy",
-    )
-
+    boxes = box_convert(pred_boxes, in_fmt="cxcywh", out_fmt="xyxy")
     predictions = []
 
     for image, image_boxes, image_scores, image_labels in zip(
@@ -35,22 +30,15 @@ def prediction_postprocessor(
     ):
         height, width = image.shape[-2:]
 
-        scale = image_boxes.new_tensor(
-            [width, height, width, height]
-        )
-
+        scale = image_boxes.new_tensor([width, height, width, height])
         image_boxes = image_boxes * scale
-
         keep = image_scores >= score_threshold
 
         predictions.append(
             {
                 "boxes": image_boxes[keep],
                 "scores": image_scores[keep],
-                "labels": (
-                    image_labels[keep].long()
-                    + label_offset
-                ),
+                "labels": (image_labels[keep].long() + label_offset),
             }
         )
 
