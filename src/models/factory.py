@@ -6,14 +6,17 @@ configs/model/teacher/*.yaml и configs/model/student/*.yaml.
 """
 
 import timm
+from pathlib import Path
+
 import torch
 from torch import nn
 from torchvision import models as tv_models
 from torchvision.models._api import WeightsEnum
-
 from torchvision.models import get_model
+
+from transformers import LwDetrConfig, LwDetrForObjectDetection
+
 from hydra.utils import to_absolute_path
-from pathlib import Path
 
 
 def from_torch_hub(repo: str, name: str, pretrained: bool = False) -> nn.Module:
@@ -145,3 +148,162 @@ def timm_model_for_classification(
     print(f"Weights for {model_name} has been loaded: {weights_path}")
 
     return model
+    
+
+class UNetDoubleConv(nn.Sequential):
+    """Conv-BN-ReLU x2 — базовый блок U-Net.
+    """
+
+    def __init__(self, in_channels: int, out_channels: int) -> None:
+        super().__init__(
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+        )
+
+
+class UNet(nn.Module):
+    """Классический U-Net: симметричный энкодер-декодер со skip-connections.
+
+    Свёртки с padding=1 сохраняют размер, поэтому выход совпадает по разрешению
+    со входом и логиты [B, num_classes, H, W] можно скармливать cross_entropy
+    напрямую, без интерполяции. Требование: H и W кратны 2**depth
+    (512x1024 и 1024x2048 при depth=4 подходят).
+    """
+
+    def __init__(
+        self,
+        num_classes: int = 19,
+        in_channels: int = 3,
+        base_channels: int = 64,
+        depth: int = 4,
+    ) -> None:
+        super().__init__()
+
+        channels = [base_channels * 2 ** level for level in range(depth + 1)]
+
+        self.encoders = nn.ModuleList()
+        previous_channels = in_channels
+        for level_channels in channels[:-1]:
+            self.encoders.append(UNetDoubleConv(previous_channels, level_channels))
+            previous_channels = level_channels
+
+        self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
+        self.bottleneck = UNetDoubleConv(channels[-2], channels[-1])
+
+        self.upsamples = nn.ModuleList()
+        self.decoders = nn.ModuleList()
+        for level_channels in reversed(channels[:-1]):
+            self.upsamples.append(
+                nn.ConvTranspose2d(level_channels * 2, level_channels, kernel_size=2, stride=2)
+            )
+            # На вход декодера идёт конкатенация апсемпла и skip-связи.
+            self.decoders.append(UNetDoubleConv(level_channels * 2, level_channels))
+
+        self.head = nn.Conv2d(base_channels, num_classes, kernel_size=1)
+
+    def forward(self, images: torch.Tensor) -> torch.Tensor:
+        skips = []
+
+        features = images
+        for encoder in self.encoders:
+            features = encoder(features)
+            skips.append(features)
+            features = self.pool(features)
+
+        features = self.bottleneck(features)
+
+        for upsample, decoder, skip in zip(self.upsamples, self.decoders, reversed(skips)):
+            features = upsample(features)
+            features = torch.cat([skip, features], dim=1)
+            features = decoder(features)
+
+        return self.head(features)
+
+
+def unet_for_segmentation(
+    num_classes: int = 19,
+    in_channels: int = 3,
+    base_channels: int = 64,
+    depth: int = 4,
+    checkpoint_path: str | None = None,
+) -> nn.Module:
+    """U-Net для семантической сегментации.
+
+    checkpoint_path нужен на втором этапе: обученный учитель подгружается
+    из чекпоинта тренера (ключ student_state) и идёт в дистилляцию.
+    """
+    model = UNet(
+        num_classes=num_classes,
+        in_channels=in_channels,
+        base_channels=base_channels,
+        depth=depth,
+    )
+
+    if checkpoint_path is None:
+        return model
+
+    weights_path = Path(to_absolute_path(checkpoint_path))
+    if not weights_path.is_file():
+        raise FileNotFoundError(f"Checkpoint file was not found: {weights_path}")
+
+    checkpoint = torch.load(weights_path, map_location="cpu", weights_only=True)
+
+    if isinstance(checkpoint, dict) and "student_state" in checkpoint:
+        state_dict = checkpoint["student_state"]
+    elif isinstance(checkpoint, dict) and "state_dict" in checkpoint:
+        state_dict = checkpoint["state_dict"]
+    else:
+        state_dict = checkpoint
+
+    state_dict = {
+        key.removeprefix("module."): value
+        for key, value in state_dict.items()
+    }
+
+    model.load_state_dict(state_dict, strict=True)
+
+    print(f"Weights for U-Net has been loaded: {weights_path}")
+
+    return model
+
+
+def lwdetr_small_for_detection(
+    num_classes: int = 8,
+    disable_custom_kernels: bool = True,
+) -> nn.Module:
+    lwdetr_small_checkpoint = "AnnaZhang/lwdetr_small_60e_coco"
+    cityscapes_classes = [
+        "person",
+        "rider",
+        "car",
+        "truck",
+        "bus",
+        "train",
+        "motorcycle",
+        "bicycle",
+    ]
+
+    id2label = {
+        index: class_name
+        for index, class_name in enumerate(cityscapes_classes)
+    }
+
+    label2id = {
+        class_name: index
+        for index, class_name in id2label.items()
+    }
+
+    config = LwDetrConfig.from_pretrained(
+        lwdetr_small_checkpoint,
+        id2label=id2label,
+        label2id=label2id,
+        disable_custom_kernels=disable_custom_kernels,
+    )
+
+    return LwDetrForObjectDetection(config)
+
+    return LwDetrForObjectDetection(config)

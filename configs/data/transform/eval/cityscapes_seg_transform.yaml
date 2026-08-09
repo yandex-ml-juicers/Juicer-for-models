@@ -1,0 +1,5 @@
+_target_: src.data.transforms.build_segmentation_transform_eval
+mean: ${data.dataset.normalize.mean}
+std: ${data.dataset.normalize.std}
+# null — считать метрику в родном разрешении 1024x2048
+image_size: null

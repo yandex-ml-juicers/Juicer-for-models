@@ -86,6 +86,72 @@ def sync_meters(meters: Mapping[str, AverageMeter], device: torch.device) -> Non
         meters[name].sum = total
         meters[name].count = int(count)
 
+class IoUAccumulator:
+    """Копит пиксельную confusion matrix для mIoU семантической сегментации.
+
+    Отличия от ConfusionMatrixAccumulator, из-за которых это отдельный класс:
+    - пиксели с ignore_index выбрасываются ДО bincount (метка 255 при
+      num_classes=19 иначе вылезла бы за пределы матрицы);
+    - агрегируется IoU = TP / (TP + FP + FN), а не precision/recall.
+
+    Память — O(num_classes^2) независимо от разрешения и размера датасета.
+    """
+
+    def __init__(
+        self,
+        num_classes: int,
+        device: torch.device,
+        ignore_index: int = 255,
+    ) -> None:
+        self.num_classes = num_classes
+        self.ignore_index = ignore_index
+        self.matrix = torch.zeros(num_classes, num_classes, dtype=torch.int64, device=device)
+
+    @torch.no_grad()
+    def update(self, preds: torch.Tensor, labels: torch.Tensor) -> None:
+        """preds, labels — [B, H, W] (или любой формы) с индексами классов.
+        cm[i, j] = число пикселей истинного класса i, предсказанных как j.
+        """
+        preds = preds.reshape(-1).long().to(self.matrix.device)
+        labels = labels.reshape(-1).long().to(self.matrix.device)
+
+        valid = labels != self.ignore_index
+        preds = preds[valid]
+        labels = labels[valid]
+
+        indices = labels * self.num_classes + preds
+        batch_counts = torch.bincount(indices, minlength=self.num_classes ** 2)
+        self.matrix += batch_counts.reshape(self.num_classes, self.num_classes)
+
+    def reset(self) -> None:
+        self.matrix.zero_()
+
+    def compute(self) -> dict[str, float]:
+        """mIoU по классам, встретившимся в выборке, и общая пиксельная точность."""
+        cm = self.matrix.float()
+        total = cm.sum()
+
+        if total == 0:
+            return {"miou": 0.0, "pixel_acc": 0.0}
+
+        tp = cm.diagonal()
+        union = cm.sum(dim=0) + cm.sum(dim=1) - tp
+        iou = tp / union.clamp_min(1e-12)
+
+        # Класс, ни разу не встретившийся в разметке, не должен занижать среднее.
+        present = cm.sum(dim=1) > 0
+
+        return {
+            "miou": iou[present].mean().item() if present.any() else 0.0,
+            "pixel_acc": (tp.sum() / total).item(),
+        }
+
+    def per_class_iou(self) -> torch.Tensor:
+        cm = self.matrix.float()
+        tp = cm.diagonal()
+        union = cm.sum(dim=0) + cm.sum(dim=1) - tp
+        return tp / union.clamp_min(1e-12)
+
 
 class ConfusionMatrixAccumulator:
     """Копит confusion matrix по батчам без хранения сырых предсказаний.

@@ -17,6 +17,8 @@ from src.data import base_loader
 from src.training import Trainer
 from src.utils import distributed, seed_everything
 from src.utils.distributed import DistInfo
+from src.training import Trainer, DetectionTrainer, SegmentationTrainer
+from src.utils import resolve_device, seed_everything, prediction_postprocessor
 
 log = logging.getLogger(__name__)
 
@@ -98,8 +100,9 @@ def clearml_reporter(task):
         iterate = row[iteration]
         logger.report_scalar(title="loss", series="train", value=row["train_loss_total"], iteration=iterate)
         logger.report_scalar(title="loss", series="eval", value=row["eval_loss"], iteration=iterate)
-        logger.report_scalar(title="accuracy", series="train", value=row["train_acc"], iteration=iterate)
-        logger.report_scalar(title="accuracy", series="eval", value=row["eval_acc"], iteration=iterate)
+        if "accuracy" in row.keys():
+            logger.report_scalar(title="accuracy", series="train", value=row["train_acc"], iteration=iterate)
+            logger.report_scalar(title="accuracy", series="eval", value=row["eval_acc"], iteration=iterate)
         logger.report_scalar(title="lr", series="lr", value=row["lr"], iteration=iterate)
         logger.report_scalar(title="time_epoch", series="seconds",
                              value=row["time_epoch"], iteration=iterate)
@@ -115,6 +118,53 @@ def clearml_reporter(task):
         logger.report_scalar(title="weight_norm", series="train_avg_weight_norm", value=row["train_avg_weight_norm"], iteration=iterate)
         logger.report_scalar(title="weight_norm", series="train_max_weight_norm", value=row["train_max_weight_norm"], iteration=iterate)
 
+        for key, value in row.items():
+            if (
+                key.startswith("train_loss_")
+            ):
+                series_name = key.removeprefix("train_loss_")
+
+                logger.report_scalar(
+                    title="loss_components",
+                    series=series_name,
+                    value=value,
+                    iteration=iterate,
+                )
+
+        # Метрики детекции
+        detection_metrics = {
+            "eval_map": "mAP",
+            "eval_map_50": "mAP@50",
+            "eval_map_75": "mAP@75",
+            "eval_mar_100": "mAR@100",
+        }
+
+        for key, series_name in detection_metrics.items():
+            if key in row:
+                logger.report_scalar(
+                    title="detection_metrics",
+                    series=series_name,
+                    value=row[key],
+                    iteration=iterate,
+                )
+
+        # Метрики сегментации
+        segmentation_metrics = {
+            "train_miou": ("segmentation_metrics", "train_mIoU"),
+            "eval_miou": ("segmentation_metrics", "eval_mIoU"),
+            "train_pixel_acc": ("pixel_accuracy", "train"),
+            "eval_pixel_acc": ("pixel_accuracy", "eval"),
+        }
+
+        for key, (title, series_name) in segmentation_metrics.items():
+            if key in row:
+                logger.report_scalar(
+                    title=title,
+                    series=series_name,
+                    value=row[key],
+                    iteration=iterate,
+                )
+
         # Компоненты лосса (train_ce, train_kd, train_feature_*) — одним графиком.
         for key, value in row.items():
             if key.startswith("train_loss"):
@@ -128,10 +178,10 @@ def clearml_reporter(task):
 
     def report_table(df):
         task.get_logger().report_table(
-        title="parameters",
-        series="param_counts",
-        iteration=0,
-        table_plot=df,
+            title="parameters",
+            series="param_counts",
+            iteration=0,
+            table_plot=df,
         )
 
     return report_scalar, report_single, report_table
@@ -145,7 +195,6 @@ def main(cfg: DictConfig) -> float:
         backend=cfg.distributed.backend,
         timeout_minutes=cfg.distributed.timeout_minutes,
     )
-
     try:
         configure_rank_logging(dist)
         output_dir = resolve_output_dir(dist)
@@ -157,7 +206,7 @@ def main(cfg: DictConfig) -> float:
         log.info("Артефакты запуска: %s", output_dir)
 
         with distributed.main_process_first(dist):
-            train_loader, eval_loader = base_loader(cfg.data, seed=cfg.seed, dist=dist)
+            train_loader, eval_loader = base_loader(cfg.data, cfg.task_type, seed=cfg.seed, dist=dist)
 
             student = instantiate(cfg.model.student).to(device)
             teacher = None
@@ -175,37 +224,84 @@ def main(cfg: DictConfig) -> float:
         optimizer = instantiate(cfg.optimizer)(params)
         scheduler = instantiate(cfg.scheduler)(optimizer) if cfg.get("scheduler") is not None else None
 
-        trainer = Trainer(
-            student=student,
-            teacher=teacher,
-            criterion=criterion,
-            optimizer=optimizer,
-            scheduler=scheduler,
-            train_loader=train_loader,
-            eval_loader=eval_loader,
-            dist=dist,
-            find_unused_parameters=cfg.distributed.find_unused_parameters,
-            broadcast_buffers=cfg.distributed.broadcast_buffers,
-            output_dir=output_dir,
-            metrics_callback=clearml_reporter(task) if task is not None else None,
-            num_classes=cfg.data.dataset.num_classes,
-            scalars=cfg.clearml.scalars,
-            **cfg.trainer,
-        )
+        if cfg.task_type == "classification":
+            trainer = Trainer(
+                student=student,
+                teacher=teacher,
+                criterion=criterion,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                train_loader=train_loader,
+                eval_loader=eval_loader,
+                dist=dist,
+                find_unused_parameters=cfg.distributed.find_unused_parameters,
+                broadcast_buffers=cfg.distributed.broadcast_buffers,
+                output_dir=output_dir,
+                metrics_callback=clearml_reporter(task) if task is not None else None,
+                num_classes=cfg.data.dataset.num_classes,
+                scalars=cfg.clearml.scalars,
+                **cfg.trainer,
+            )
+        elif cfg.task_type == "detection":
+            trainer = DetectionTrainer(
+                student=student,
+                teacher=teacher,
+                criterion=criterion,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                train_loader=train_loader,
+                eval_loader=eval_loader,
+                device=device,
+                output_dir=output_dir,
+                metrics_callback=clearml_reporter(task) if task is not None else None,
+                num_classes=cfg.data.dataset.num_classes,
+                scalars=cfg.clearml.scalars,
+                prediction_postprocessor=prediction_postprocessor,
+                label_offset=cfg.data.dataset.build.label_offset,
+                targers_mode=cfg.data.dataset.targets_format_mode,
+                **cfg.trainer,
+            )
+        elif cfg.task_type == "segmentation":
+            trainer = SegmentationTrainer(
+                student=student,
+                teacher=teacher,
+                criterion=criterion,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                train_loader=train_loader,
+                eval_loader=eval_loader,
+                device=device,
+                output_dir=output_dir,
+                metrics_callback=clearml_reporter(task) if task is not None else None,
+                num_classes=cfg.data.dataset.num_classes,
+                scalars=cfg.clearml.scalars,
+                ignore_index=cfg.data.dataset.ignore_index,
+                **cfg.trainer,
+            )
+
+
         result = trainer.fit()
+        if cfg.task_type == "classification":
+            result = result["best_acc"]
+        elif cfg.task_type == "detection":
+            result = result["best_map"]
+        elif cfg.task_type == "segmentation":
+            result = result["best_miou"]
+
 
         if task is not None:
             task.get_logger().report_single_value("best_eval_acc", result["best_acc"])
             task.get_logger().report_single_value("world_size", dist.world_size)
             task.close()
+            
     finally:
         # при падении одного ранка остальные должны корректно
         # закрыть группу, а не висеть в коллективной операции до таймаута.
         distributed.cleanup()
-
+        
     # Возврат метрики делает скрипт совместимым с hydra-свиперами
     # (optuna и т.п. максимизируют возвращаемое значение).
-    return result["best_acc"]
+    return result # type: ignore
 
 
 if __name__ == "__main__":

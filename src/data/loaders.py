@@ -15,7 +15,7 @@ log = logging.getLogger(__name__)
 
 
 def base_loader(
-        cfg: DictConfig, seed: int, dist: DistInfo | None = None
+        cfg: DictConfig, task_type: str, seed: int, dist: DistInfo | None = None
     ) -> tuple[DataLoader, DataLoader]:
     """Возвращает (train_loader, eval_loader).
 
@@ -73,6 +73,8 @@ def base_loader(
         train_sampler = None
         eval_sampler = None
         train_shuffle = True
+    if task_type == "detection":
+        common["collate_fn"] = detection_collate_fn
 
     train_loader = DataLoader(
         train_dataset,
@@ -84,6 +86,9 @@ def base_loader(
         generator=make_generator(seed + rank),
         **common,
     )
+
+    eval_batch_size = cfg.loader.get("eval_batch_size", None) or cfg.loader.batch_size
+
     eval_loader = DataLoader(
         eval_dataset,
         batch_size=batch_size,
@@ -101,3 +106,12 @@ def base_loader(
         len(train_sampler) if train_sampler is not None else len(train_dataset),
     )
     return train_loader, eval_loader
+
+
+def detection_collate_fn(
+    batch: list[tuple[torch.Tensor, dict[str, torch.Tensor]]],
+) -> tuple[
+    tuple[torch.Tensor, ...],
+    tuple[dict[str, torch.Tensor], ...],
+]:
+    return tuple(zip(*batch))

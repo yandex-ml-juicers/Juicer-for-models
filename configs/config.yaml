@@ -24,6 +24,7 @@ deterministic_warn_only: false # лучше держать false
 device: auto  # auto | cuda | cuda:N | cpu
 
 ckpt_path: null
+task_type: 'classification' # Доступны опции ['classification', 'detection', 'segmentation'] 
 
 # Трекинг в ClearML
 # Выключен по умолчанию, чтобы тесты работали оффлайн

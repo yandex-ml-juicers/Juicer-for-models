@@ -20,6 +20,7 @@ def resolve_device(device: str = "auto", local_rank: int = 0) -> torch.device:
     if resolved.type == "cuda" and resolved.index is None:
         resolved = torch.device("cuda", local_rank)
     if resolved.type == "cuda":
+        #torch.cuda.set_device(resolved)
         log.info("Устройство: %s (%s)", resolved, torch.cuda.get_device_name(resolved))
     else:
         log.info("Устройство: %s", resolved)
