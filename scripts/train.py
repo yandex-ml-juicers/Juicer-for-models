@@ -12,10 +12,12 @@ import hydra
 from hydra.core.hydra_config import HydraConfig
 from hydra.utils import instantiate
 from omegaconf import DictConfig, ListConfig, OmegaConf
+from torch import nn
 
 from src.data import base_loader
 from src.training import Trainer, DetectionTrainer, SegmentationTrainer
-from src.utils import resolve_device, seed_everything, prediction_postprocessor
+from src.utils import distributed, seed_everything, prediction_postprocessor
+from src.utils.distributed import DistInfo
 
 log = logging.getLogger(__name__)
 
@@ -41,8 +43,52 @@ def _normalize_stats(dataset_cfg: DictConfig):
     return list(normalize.mean), list(normalize.std)
 
 
-def init_clearml(cfg: DictConfig):
-    if not cfg.clearml.enabled:
+def configure_rank_logging(dist: DistInfo) -> None:
+    """
+    Разводит логи ранков, чтобы они не мешали друг другу.
+    """
+    if dist.is_main:
+        return
+
+    root = logging.getLogger()
+    for handler in list(root.handlers):
+        # ищем обработчик, который пишет в файл
+        if isinstance(handler, logging.FileHandler):
+            path = Path(handler.baseFilename)
+            root.removeHandler(handler)
+            handler.close() # честно закрываем логгер
+            # создаём личный файл для логгера, чтобы избежать гонки
+            rank_handler = logging.FileHandler(
+                path.with_name(f"{path.stem}.rank{dist.rank}{path.suffix}")
+            )
+            rank_handler.setFormatter(handler.formatter)
+            rank_handler.setLevel(handler.level)
+            root.addHandler(rank_handler)
+        elif isinstance(handler, logging.StreamHandler):
+            # в консоль от ранков будем выводить только WARNINGs
+            handler.setLevel(logging.WARNING)
+
+
+def resolve_output_dir(dist: DistInfo) -> Path:
+    """Выбор output_dir, а также проверка
+       на то, что ранки не расходятся
+    """
+    output_dir = Path(HydraConfig.get().runtime.output_dir)
+
+    main_dir = distributed.broadcast_object(str(output_dir), device=dist.device, src=0)
+    if main_dir != str(output_dir):
+        raise RuntimeError(
+            f"Ранки разошлись в директории запуска: rank {dist.rank} получил "
+            f"{output_dir}, а rank 0 — {main_dir}. Значит hydra.run.dir был "
+            f"вычислен в каждом процессе отдельно. Проверь, что задана "
+            f"переменная JUICER_RUN_ID или TORCHELASTIC_RUN_ID."
+        )
+    return output_dir
+
+
+def init_clearml(cfg: DictConfig, dist: DistInfo):
+    # таска создаётся только на главном ранке
+    if not dist.is_main or not cfg.clearml.enabled:
         return None
     from clearml import Task
 
@@ -222,115 +268,150 @@ def clearml_reporter(task):
 
 @hydra.main(config_path="../configs", config_name="config", version_base="1.3")
 def main(cfg: DictConfig) -> float:
-    task = init_clearml(cfg)
-
-    output_dir = Path(HydraConfig.get().runtime.output_dir)
-    log.info("Конфиг запуска:\n%s", OmegaConf.to_yaml(cfg))
-    log.info("Артефакты запуска: %s", output_dir)
-
     seed_everything(cfg.seed, deterministic=cfg.deterministic, warn_only=cfg.deterministic_warn_only)
-    device = resolve_device(cfg.device)
+    dist = distributed.setup(
+        device_cfg=cfg.device,
+        backend=cfg.distributed.backend,
+        timeout_minutes=cfg.distributed.timeout_minutes,
+    )
 
-    train_loader, eval_loader = base_loader(cfg.data, cfg.task_type, seed=cfg.seed)
+    try:
+        configure_rank_logging(dist)
+        output_dir = resolve_output_dir(dist)
+        device = dist.device
 
-    # Mixup/CutMix живут не в трансформе, а в тренере: они смешивают разные
-    # примеры между собой, а трансформ видит только один (см. src/data/batch_augment.py).
-    batch_augment = instantiate(cfg.augment) if cfg.get("augment") is not None else None
-    if batch_augment is not None and cfg.task_type == "detection":
-        raise ValueError(
-            "Mixup/CutMix для детекции не поддержаны: смешивание меняет набор боксов, "
-            "а не только таргет попиксельно. Уберите augment из конфига (augment=null)."
-        )
+        task = init_clearml(cfg, dist)
 
-    student = instantiate(cfg.model.student).to(device)
-    teacher = None
-    if cfg.model.get("teacher") is not None:
-        teacher = instantiate(cfg.model.teacher).to(device)
-    criterion = instantiate(cfg.loss).to(device)
+        log.info("Конфиг запуска:\n%s", OmegaConf.to_yaml(cfg))
+        log.info("Артефакты запуска: %s", output_dir)
 
-    # Обучаемые параметры лосса (адаптеры feature-KD) оптимизируются вместе с учеником.
-    params = list(student.parameters()) + list(criterion.parameters())
-    optimizer = instantiate(cfg.optimizer)(params)  
-    scheduler = instantiate(cfg.scheduler)(optimizer) if cfg.get("scheduler") is not None else None
+        # DDP портирован в Trainer и SegmentationTrainer; DetectionTrainer
+        # его пока не знает и под torchrun обучал бы N независимых моделей,
+        # ничем это не показывая. Падаем на старте, а не через сутки.
+        if dist.is_distributed and cfg.task_type == "detection":
+            raise ValueError(
+                "DetectionTrainer пока не поддерживает распределённый запуск "
+                f"(world_size={dist.world_size}). Запускай детекцию одним процессом: "
+                f"python scripts/train.py ..."
+            )
 
-    if cfg.task_type == "classification":
-        trainer = Trainer(
-            student=student,
-            teacher=teacher,
-            criterion=criterion,
-            optimizer=optimizer,
-            scheduler=scheduler,
-            train_loader=train_loader,
-            eval_loader=eval_loader,
-            device=device,
-            output_dir=output_dir,
-            metrics_callback=clearml_reporter(task) if task is not None else None,
-            num_classes=cfg.data.dataset.num_classes,
-            scalars=cfg.clearml.scalars,
-            batch_augment=batch_augment,
-            **cfg.trainer,
-        )
-    elif cfg.task_type == "detection":
-        trainer = DetectionTrainer(
-            student=student,
-            teacher=teacher,
-            criterion=criterion,
-            optimizer=optimizer,
-            scheduler=scheduler,
-            train_loader=train_loader,
-            eval_loader=eval_loader,
-            device=device,
-            output_dir=output_dir,
-            metrics_callback=clearml_reporter(task) if task is not None else None,
-            num_classes=cfg.data.dataset.num_classes,
-            scalars=cfg.clearml.scalars,
-            prediction_postprocessor=prediction_postprocessor,
-            label_offset=cfg.data.dataset.build.label_offset,
-            targers_mode=cfg.data.dataset.targets_format_mode,
-            **cfg.trainer,
-        )
-    elif cfg.task_type == "segmentation":
-        trainer = SegmentationTrainer(
-            student=student,
-            teacher=teacher,
-            criterion=criterion,
-            optimizer=optimizer,
-            scheduler=scheduler,
-            train_loader=train_loader,
-            eval_loader=eval_loader,
-            device=device,
-            output_dir=output_dir,
-            metrics_callback=clearml_reporter(task) if task is not None else None,
-            num_classes=cfg.data.dataset.num_classes,
-            scalars=cfg.clearml.scalars,
-            ignore_index=cfg.data.dataset.ignore_index,
-            batch_augment=batch_augment,
-            plots=_plain(cfg.clearml.get("plots")),
-            # Имена классов подписывают столбики per-class графиков и оси
-            # матрицы ошибок; без них останутся индексы 0..18.
-            class_names=getattr(train_loader.dataset, "classes", None),
-            # Палитра и нормировка нужны Debug Samples: первая красит маски,
-            # вторая возвращает кадру исходные цвета после Normalize.
-            palette=getattr(train_loader.dataset, "palette", None),
-            normalize=_normalize_stats(cfg.data.dataset),
-            **cfg.trainer,
-        )
-    summary = trainer.fit()
+        # Mixup/CutMix живут не в трансформе, а в тренере: они смешивают разные
+        # примеры между собой, а трансформ видит только один (см. src/data/batch_augment.py).
+        batch_augment = instantiate(cfg.augment) if cfg.get("augment") is not None else None
+        if batch_augment is not None and cfg.task_type == "detection":
+            raise ValueError(
+                "Mixup/CutMix для детекции не поддержаны: смешивание меняет набор боксов, "
+                "а не только таргет попиксельно. Уберите augment из конфига (augment=null)."
+            )
 
-    # Целевая метрика запуска: своя на каждую задачу, имя должно совпадать
-    # с тем, что реально измерено, иначе mIoU уезжает в ClearML как "acc".
-    target_metric = {
-        "classification": "best_acc",
-        "detection": "best_map",
-        "segmentation": "best_miou",
-    }[cfg.task_type]
-    result = summary[target_metric]
+        with distributed.main_process_first(dist):
+            train_loader, eval_loader = base_loader(
+                cfg.data, cfg.task_type, seed=cfg.seed, dist=dist
+            )
 
-    if task is not None:
-        logger = task.get_logger()
-        logger.report_single_value(target_metric, result)
-        logger.report_single_value("best_epoch", summary["best_epoch"])
-        task.close()
+            student = instantiate(cfg.model.student).to(device)
+            teacher = None
+            if cfg.model.get("teacher") is not None:
+                teacher = instantiate(cfg.model.teacher).to(device)
+            criterion = instantiate(cfg.loss).to(device)
+
+        # заменяем слои BatchNorm до сборки optimizer
+        if cfg.distributed.sync_bn and dist.is_distributed:
+            student = nn.SyncBatchNorm.convert_sync_batchnorm(student)
+            log.info("BatchNorm заменён на SyncBatchNorm")
+
+        # Обучаемые параметры лосса (адаптеры feature-KD) оптимизируются вместе с учеником.
+        params = list(student.parameters()) + list(criterion.parameters())
+        optimizer = instantiate(cfg.optimizer)(params)
+        scheduler = instantiate(cfg.scheduler)(optimizer) if cfg.get("scheduler") is not None else None
+
+        if cfg.task_type == "classification":
+            trainer = Trainer(
+                student=student,
+                teacher=teacher,
+                criterion=criterion,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                train_loader=train_loader,
+                eval_loader=eval_loader,
+                dist=dist,
+                find_unused_parameters=cfg.distributed.find_unused_parameters,
+                broadcast_buffers=cfg.distributed.broadcast_buffers,
+                output_dir=output_dir,
+                metrics_callback=clearml_reporter(task) if task is not None else None,
+                num_classes=cfg.data.dataset.num_classes,
+                scalars=cfg.clearml.scalars,
+                batch_augment=batch_augment,
+                **cfg.trainer,
+            )
+        elif cfg.task_type == "detection":
+            trainer = DetectionTrainer(
+                student=student,
+                teacher=teacher,
+                criterion=criterion,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                train_loader=train_loader,
+                eval_loader=eval_loader,
+                device=device,
+                output_dir=output_dir,
+                metrics_callback=clearml_reporter(task) if task is not None else None,
+                num_classes=cfg.data.dataset.num_classes,
+                scalars=cfg.clearml.scalars,
+                prediction_postprocessor=prediction_postprocessor,
+                label_offset=cfg.data.dataset.build.label_offset,
+                targers_mode=cfg.data.dataset.targets_format_mode,
+                **cfg.trainer,
+            )
+        elif cfg.task_type == "segmentation":
+            trainer = SegmentationTrainer(
+                student=student,
+                teacher=teacher,
+                criterion=criterion,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                train_loader=train_loader,
+                eval_loader=eval_loader,
+                dist=dist,
+                find_unused_parameters=cfg.distributed.find_unused_parameters,
+                broadcast_buffers=cfg.distributed.broadcast_buffers,
+                output_dir=output_dir,
+                metrics_callback=clearml_reporter(task) if task is not None else None,
+                num_classes=cfg.data.dataset.num_classes,
+                scalars=cfg.clearml.scalars,
+                ignore_index=cfg.data.dataset.ignore_index,
+                batch_augment=batch_augment,
+                plots=_plain(cfg.clearml.get("plots")),
+                # Имена классов подписывают столбики per-class графиков и оси
+                # матрицы ошибок; без них останутся индексы 0..18.
+                class_names=getattr(train_loader.dataset, "classes", None),
+                # Палитра и нормировка нужны Debug Samples: первая красит маски,
+                # вторая возвращает кадру исходные цвета после Normalize.
+                palette=getattr(train_loader.dataset, "palette", None),
+                normalize=_normalize_stats(cfg.data.dataset),
+                **cfg.trainer,
+            )
+        summary = trainer.fit()
+
+        # Целевая метрика запуска: своя на каждую задачу, имя должно совпадать
+        # с тем, что реально измерено, иначе mIoU уезжает в ClearML как "acc".
+        target_metric = {
+            "classification": "best_acc",
+            "detection": "best_map",
+            "segmentation": "best_miou",
+        }[cfg.task_type]
+        result = summary[target_metric]
+
+        if task is not None:
+            logger = task.get_logger()
+            logger.report_single_value(target_metric, result)
+            logger.report_single_value("best_epoch", summary["best_epoch"])
+            logger.report_single_value("world_size", dist.world_size)
+            task.close()
+    finally:
+        # при падении одного ранка остальные должны корректно
+        # закрыть группу, а не висеть в коллективной операции до таймаута.
+        distributed.cleanup()
 
     # Возврат метрики делает скрипт совместимым с hydra-свиперами
     # (optuna и т.п. максимизируют возвращаемое значение).
