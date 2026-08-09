@@ -13,11 +13,10 @@ defaults:
   - override /loss: cwd
   - override /optimizer: adamw
   - override /scheduler: warmup_cosine
-  # Батч на карту мал, поэтому BatchNorm считаем глобально (см. конфиг группы).
-  - override /distributed: sync_bn
   - override /augment: cutmix_segmentation
+  - override /distributed: sync_bn
 
-name: cityscapes_CWD_segformer_b2_to_unet_base
+name: cityscapes_CWD_segformer_b2_to_unet_small
 device: cuda
 deterministic: false
 
@@ -25,7 +24,7 @@ task_type: "segmentation"
 
 clearml:
   enabled: True
-  tags: [cityscapes, KD, CWD, segformer-b2, unet-base, segmentation]
+  tags: [cityscapes, KD, CWD, segformer-b2, unet-small, segmentation]
   scalars: ['KL_divergence', 'agreement_rate']
   plots:
     enabled: true
@@ -62,7 +61,7 @@ data:
 
 model:
   student:
-    variant: efficientnetv2_b2
+    variant: efficientnet_b0
     pretrained: true
     dropout: 0.1
   teacher:

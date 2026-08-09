@@ -14,11 +14,10 @@ defaults:
   - override /loss: dist
   - override /optimizer: adamw
   - override /scheduler: warmup_cosine
-  # Батч на карту мал, поэтому BatchNorm считаем глобально (см. конфиг группы).
-  - override /distributed: sync_bn
   - override /augment: cutmix_segmentation
+  - override /distributed: sync_bn
 
-name: cityscapes_DIST_segformer_b2_to_unet_base
+name: cityscapes_DIST_segformer_b2_to_timm_unet_base
 device: cuda
 deterministic: false
 
@@ -38,7 +37,7 @@ clearml:
   output_uri: false
 
 trainer:
-  epochs: 100
+  epochs: 150
   amp: true
   grad_clip_norm: 1.0
 
@@ -59,15 +58,15 @@ scheduler:
 
 data:
   loader:
-    batch_size: 8
-    eval_batch_size: 4
-    num_workers: 8
+    batch_size: 16
+    eval_batch_size: 10
+    num_workers: 16
     pin_memory: true
     persistent_workers: true
 
 model:
   student:
-    variant: efficientnet_b0
+    variant: efficientnetv2_b2
     pretrained: true
     dropout: 0.1
   teacher:
