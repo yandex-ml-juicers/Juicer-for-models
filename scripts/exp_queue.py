@@ -1,7 +1,7 @@
 """Очередь экспериментов с поддержкой многокарточных (DDP) задач.
 
-    python scripts/exp_queue.py                          # queue_jobs.yaml рядом со скриптом
-    python scripts/exp_queue.py queue_jobs/my_jobs.yaml    # именной сохранённый батч
+    python scripts/exp_queue.py
+    python scripts/exp_queue.py queue_jobs/my_jobs.yaml
 """
 
 import os
@@ -26,10 +26,25 @@ class GpuPool:
 
     def __init__(self, gpu_ids: list[int]) -> None:
         self._free = list(gpu_ids)
+        self._all = list(gpu_ids)
         self._total = len(gpu_ids)
         self._condition = threading.Condition()
 
-    def acquire(self, count: int) -> list[int]:
+    def acquire(self, count: int, devices: list[int] | None = None) -> list[int]:
+        """Забирает карты: любые `count` штук либо строго перечисленные `devices`."""
+        if devices is not None:
+            unknown = [gpu for gpu in devices if gpu not in self._all]
+            if unknown:
+                raise ValueError(
+                    f"Задача закреплена за картами {devices}, но {unknown} нет "
+                    f"в available_gpus={self._all}. Такая задача не запустится никогда."
+                )
+            with self._condition:
+                self._condition.wait_for(lambda: all(gpu in self._free for gpu in devices))
+                for gpu in devices:
+                    self._free.remove(gpu)
+                return list(devices)
+
         if count > self._total:
             raise ValueError(
                 f"Задача просит {count} GPU, а всего доступно {self._total}. "
@@ -45,10 +60,22 @@ class GpuPool:
             self._condition.notify_all()
 
 
-def normalize(job, default_gpus: int) -> tuple[str, int]:
+def parse_job_args(job, default_gpus: int) -> tuple[str, int, list[int] | None]:
     if isinstance(job, str):
-        return job, default_gpus
-    return job["args"], int(job.get("gpus", default_gpus))
+        return job, default_gpus, None
+
+    devices = job.get("devices")
+    if devices is None:
+        return job["args"], int(job.get("gpus", default_gpus)), None
+
+    devices = [int(gpu) for gpu in devices]
+    declared = job.get("gpus")
+    if declared is not None and int(declared) != len(devices):
+        raise ValueError(
+            f"У задачи gpus={declared}, но devices={devices} — это {len(devices)} карт. "
+            f"Убери gpus или приведи в соответствие."
+        )
+    return job["args"], len(devices), devices
 
 
 def build_command(args: str, num_gpus: int, port: int) -> list[str]:
@@ -56,9 +83,6 @@ def build_command(args: str, num_gpus: int, port: int) -> list[str]:
     if num_gpus == 1:
         return [sys.executable, str(TRAIN_SCRIPT), *args.split()]
     return [
-        # sys.executable -m torch.distributed.run, а не голое "torchrun":
-        # это та же точка входа, но гарантированно из текущего окружения.
-        # На общей машине в PATH легко оказывается torchrun из чужого venv.
         sys.executable,
         "-m",
         "torch.distributed.run",
@@ -70,19 +94,13 @@ def build_command(args: str, num_gpus: int, port: int) -> list[str]:
     ]
 
 
-def resolve_threads_per_process(num_slots: int, configured: int | None) -> int:
-    if configured is not None:
-        return max(1, int(configured))
-    return max(1, (os.cpu_count() or num_slots) // max(1, num_slots))
-
-
 def run_job(job, index: int, pool: GpuPool, default_gpus: int,
-            batch_stamp: str, threads_per_process: int) -> None:
-    args, num_gpus = normalize(job, default_gpus)
-    gpu_ids = pool.acquire(num_gpus)
+            batch_stamp: str) -> None:
+    args, num_gpus, pinned = parse_job_args(job, default_gpus)
+    gpu_ids = pool.acquire(num_gpus, devices=pinned)
     try:
         env = os.environ.copy()
-        env["OMP_NUM_THREADS"] = str(threads_per_process)
+        env["OMP_NUM_THREADS"] = "1"
         env["CUDA_VISIBLE_DEVICES"] = ",".join(str(i) for i in gpu_ids)
 
         port = find_free_port()
@@ -118,18 +136,12 @@ def main() -> None:
     pool = GpuPool(gpu_ids)
     batch_stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
-    threads_per_process = resolve_threads_per_process(
-        len(gpu_ids), cfg.get("threads_per_process", None)
-    )
-
     print(f"Очередь: {len(experiments)} задач на картах {gpu_ids} "
-          f"(по умолчанию {default_gpus} на задачу, "
-          f"{threads_per_process} потоков CPU на процесс)\n")
+          f"(по умолчанию {default_gpus} на задачу\n")
 
     with ThreadPoolExecutor(max_workers=len(gpu_ids)) as executor:
         futures = [
-            executor.submit(run_job, job, index, pool, default_gpus,
-                            batch_stamp, threads_per_process)
+            executor.submit(run_job, job, index, pool, default_gpus, batch_stamp)
             for index, job in enumerate(experiments)
         ]
         for future in futures:

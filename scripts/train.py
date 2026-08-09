@@ -21,6 +21,11 @@ from src.utils.distributed import DistInfo
 
 log = logging.getLogger(__name__)
 
+BEST_METRIC_KEY = {
+    "classification": "best_acc",
+    "detection": "best_map",
+    "segmentation": "best_miou",
+}
 
 def _plain(value):
     """DictConfig/ListConfig -> dict/list, остальное как есть.
@@ -274,9 +279,15 @@ def main(cfg: DictConfig) -> float:
         backend=cfg.distributed.backend,
         timeout_minutes=cfg.distributed.timeout_minutes,
     )
-
     try:
         configure_rank_logging(dist)
+
+        if cfg.task_type not in BEST_METRIC_KEY:
+            raise ValueError(
+                f"task_type={cfg.task_type!r} неизвестен. "
+                f"Доступны: {sorted(BEST_METRIC_KEY)}."
+            )
+
         output_dir = resolve_output_dir(dist)
         device = dist.device
 
@@ -396,23 +407,26 @@ def main(cfg: DictConfig) -> float:
                 normalize=_normalize_stats(cfg.data.dataset),
                 **cfg.trainer,
             )
+        else:
+            # Недостижимо, пока task_type проверяется в начале main(). Нужно
+            # на случай, когда новую задачу добавят в BEST_METRIC_KEY, а ветку
+            # с тренером здесь завести забудут: без этого trainer остался бы
+            # неопределённым и падение случилось бы ниже, с UnboundLocalError.
+            raise AssertionError(cfg.task_type)
+
         summary = trainer.fit()
 
         # Целевая метрика запуска: своя на каждую задачу, имя должно совпадать
         # с тем, что реально измерено, иначе mIoU уезжает в ClearML как "acc".
-        target_metric = {
-            "classification": "best_acc",
-            "detection": "best_map",
-            "segmentation": "best_miou",
-        }[cfg.task_type]
-        result = summary[target_metric]
+        best_metric = summary[BEST_METRIC_KEY[cfg.task_type]]
 
         if task is not None:
             logger = task.get_logger()
-            logger.report_single_value(target_metric, result)
+            logger.report_single_value(BEST_METRIC_KEY[cfg.task_type], best_metric)
             logger.report_single_value("best_epoch", summary["best_epoch"])
             logger.report_single_value("world_size", dist.world_size)
             task.close()
+
     finally:
         # при падении одного ранка остальные должны корректно
         # закрыть группу, а не висеть в коллективной операции до таймаута.
@@ -420,7 +434,7 @@ def main(cfg: DictConfig) -> float:
 
     # Возврат метрики делает скрипт совместимым с hydra-свиперами
     # (optuna и т.п. максимизируют возвращаемое значение).
-    return result
+    return best_metric
 
 
 if __name__ == "__main__":
