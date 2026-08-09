@@ -3,26 +3,35 @@
 
 ## Установка
 
-Требования: Python >= 3.10; для обучения на GPU — PyTorch со сборкой
-CUDA >= 12.8 (драйвер NVIDIA соответствующей версии).
+Требования: Python >= 3.10; для обучения на GPU — PyTorch со сборкой CUDA,
+поддерживающей архитектуру карт
 
 ```bash
-pip install 'torch>=2.7' 'torchvision>=0.22' --index-url https://download.pytorch.org/whl/cu128
-
 pip install -r requirements.txt
 pip install -e . --no-deps        # пакет src/ становится импортируемым
 # для тестов: pip install -e ".[dev]" --no-build-isolation
+
+# Новые cu128 (A100, RTX 30xx/40xx, H100)
+pip install --force-reinstall 'torch>=2.7' 'torchvision>=0.22' --index-url https://download.pytorch.org/whl/cu128
+# Старые cu126 (Tesla V100, compute capability 7.0)
+pip install --force-reinstall 'torch>=2.7' 'torchvision>=0.22' --index-url https://download.pytorch.org/whl/cu126
 ```
 
-На машине без GPU шаг с индексом cu128 пропускается — `requirements.txt`
-поставит обычную сборку, всё работает на CPU (смоуки, тесты). Проверить
-сборку: `python -c "import torch; print(torch.__version__, torch.version.cuda)"`.
+Проверки
+
+```bash
+python -c "import torch; print(torch.__version__); print(torch.cuda.get_arch_list())"
+python -c "import torch; x = torch.randn(1000, 1000).cuda(); print((x @ x).sum().item())"
+```
+
+Для V100 в списке обязан быть `sm_70`. 
+
 
 ## Быстрый старт
 
 ```bash
 # Бейзлайн 1: ванильная дистилляция Хинтона, ResNet-56 -> ResNet-20
-python scripts/train.py experiment=b1_vanilla_kd
+python scripts/train.py experiment=baseline/b1_vanilla_kd
 
 # Контроль к нему: тот же ученик с нуля, без учителя
 python scripts/train.py experiment=b1_scratch
