@@ -10,6 +10,8 @@ defaults:
   - override /loss: ce
   - override /optimizer: adamw
   - override /scheduler: warmup_cosine
+  # Батч на карту мал, поэтому BatchNorm считаем глобально (см. конфиг группы).
+  - override /distributed: sync_bn
 
 name: cityscapes_scratch_segformer_b2
 device: cuda

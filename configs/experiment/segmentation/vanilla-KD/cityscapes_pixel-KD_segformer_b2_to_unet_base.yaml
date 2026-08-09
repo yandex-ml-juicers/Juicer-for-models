@@ -13,6 +13,8 @@ defaults:
   - override /loss: pixel_kd
   - override /optimizer: adamw
   - override /scheduler: warmup_cosine
+  # Батч на карту мал, поэтому BatchNorm считаем глобально (см. конфиг группы).
+  - override /distributed: sync_bn
   - override /augment: cutmix_segmentation
 
 name: cityscapes_pixel-KD_segformer_b2_to_unet_base
