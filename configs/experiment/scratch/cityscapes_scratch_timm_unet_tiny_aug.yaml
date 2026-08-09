@@ -1,31 +1,29 @@
 # @package _global_
-# CWD (arXiv:2011.13256): SegFormer-B2 -> U-Net-base.
-# Softmax берётся по пространству внутри канала, поэтому редкие классы
-# не тонут в фоне — метод и придуман под плотные задачи.
-#
-# Бейзлайн для этого прогона — scratch/cityscapes_scratch_unet_base.
+# U-Net с предобученным энкодером из timm, без дистилляции.
 defaults:
   - override /data/dataset: cityscapes_seg
   - override /data/transform/train: cityscapes_seg_strong_transform
   - override /data/transform/eval: cityscapes_seg_transform
-  - override /model/teacher: segformer
+  - override /model/teacher: null
   - override /model/student: timm_unet
-  - override /loss: cwd
+  - override /loss: ce
   - override /optimizer: adamw
   - override /scheduler: warmup_cosine
-  # Батч на карту мал, поэтому BatchNorm считаем глобально (см. конфиг группы).
-  - override /distributed: sync_bn
   - override /augment: cutmix_segmentation
+  - override /distributed: sync_bn
 
-name: cityscapes_CWD_segformer_b2_to_unet_tiny
+name: cityscapes_scratch_timm_unet_tiny_aug
 device: cuda
+
+# max_pool2d.backward и nll_loss2d на CUDA не имеют детерминированных ядер —
+# при deterministic=true запуск падает с RuntimeError.
 deterministic: false
 
 task_type: "segmentation"
 
 clearml:
   enabled: True
-  tags: [cityscapes, KD, CWD, segformer-b2, unet-tiny, segmentation]
+  tags: [cityscapes, student, scratch, timm_unet, segmentation, aug]
   scalars: ['KL_divergence', 'agreement_rate']
   plots:
     enabled: true
@@ -40,22 +38,21 @@ trainer:
   grad_clip_norm: 1.0
 
 loss:
-  temperature: 4.0
-  ce_weight: 1.0
-  cwd_weight: 3.0
+  ignore_index: ${data.dataset.ignore_index}
+  label_smoothing: 0.05
 
 optimizer:
-  lr: 1.5e-4
+  lr: 3.25e-4
   weight_decay: 3.0e-2
 
 scheduler:
-  warmup_epochs: 15
+  warmup_epochs: 10
   eta_min: 1.0e-6
 
 data:
   loader:
     batch_size: 16
-    eval_batch_size: 12
+    eval_batch_size: 10
     num_workers: 16
     pin_memory: true
     persistent_workers: true
@@ -65,7 +62,3 @@ model:
     variant: mobilenetv2
     pretrained: true
     dropout: 0.1
-  teacher:
-    variant: b2
-    pretrained: cityscapes
-    checkpoint_path: null
