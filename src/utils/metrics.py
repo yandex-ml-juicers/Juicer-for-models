@@ -1,4 +1,10 @@
-"""Метрики и агрегаторы."""
+"""Метрики и агрегаторы.
+
+Все накопители здесь хранят АДДИТИВНЫЕ величины -- суммы и счётчики (а не
+готовые средние).
+"""
+
+from collections.abc import Mapping
 
 import numpy as np
 import pandas as pd
@@ -6,14 +12,15 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from src.utils.distributed import all_reduce_sum_
+
 def accuracy(logits: torch.Tensor, targets: torch.Tensor) -> float:
     """Доля правильных ответов по argmax логитов, в [0, 1]."""
     predictions = logits.argmax(dim=1)
     return (predictions == targets).float().mean().item()
 
 def count_parameters(model: nn.Module) -> dict:
-    '''Считает колиечество параметров у модели
-    '''
+    """Считает колиечество параметров у модели"""
     total = sum(p.numel() for p in model.parameters())
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     buffers = sum(b.numel() for b in model.buffers())
@@ -62,6 +69,26 @@ class AverageMeter:
     def avg(self) -> float:
         return self.sum / self.count if self.count != 0 else self.sum
 
+
+def sync_meters(meters: Mapping[str, AverageMeter], device: torch.device) -> None:
+    """Сводит метрики со всех процессов: складывает их суммы и счётчики"""
+    if not meters:
+        return
+
+    # нужна сортировка, чтобы на всех GPU складывались одинаковые объекты
+    names = sorted(meters)
+    packed = torch.tensor(
+        [[meters[name].sum, meters[name].count] for name in names],
+        dtype=torch.float64, # берём float64 для меньшей погрешности
+        device=device,
+    )
+    all_reduce_sum_(packed)
+
+    for name, (total, count) in zip(names, packed.tolist()):
+        meters[name].sum = total
+        meters[name].count = int(count)
+
+
 class IoUAccumulator:
     """Копит пиксельную confusion matrix для mIoU семантической сегментации.
 
@@ -101,6 +128,16 @@ class IoUAccumulator:
 
     def reset(self) -> None:
         self.matrix.zero_()
+
+    def synchronize(self) -> None:
+        """Складывает матрицы всех процессов. Звать ДО compute().
+
+        Матрица аддитивна, поэтому суммы матриц достаточно: mIoU по ней
+        получится ровно тот же, что и на однопроцессном прогоне по всей
+        выборке. Усреднять готовые mIoU ранков было бы неверно — среднее
+        отношений не равно отношению сумм.
+        """
+        all_reduce_sum_(self.matrix)
 
     def compute(self) -> dict[str, float]:
         """mIoU по классам, встретившимся в выборке, и общая пиксельная точность."""
@@ -265,6 +302,26 @@ class TeacherSimilarity:
             "agreement_rate": float(self.agree_sum / self.pixels),
         }
 
+    def synchronize(self) -> None:
+        """Складывает накопленное со всех процессов. Звать ДО compute().
+
+        Все пять величин — суммы и счётчики, поэтому складываются напрямую,
+        а деление на pixels происходит уже после сведения.
+
+        kl_samples намеренно не трогаем: это выборка попиксельных KL для
+        гистограммы, и выборка одного ранка описывает то же распределение,
+        что и общая. Собирать её по всем процессам пришлось бы
+        all_gather'ом переменной длины — цена несопоставима с пользой.
+        """
+        for tensor in (
+            self.kl_sum,
+            self.agree_sum,
+            self.pixels,
+            self.class_agree,
+            self.class_total,
+        ):
+            all_reduce_sum_(tensor)
+
     def per_class_agreement(self) -> np.ndarray:
         """Доля совпадений с учителем внутри каждого GT-класса; NaN — класса не было."""
         total = self.class_total.clamp_min(1.0)
@@ -300,6 +357,10 @@ class ConfusionMatrixAccumulator:
 
     def reset(self) -> None:
         self.matrix.zero_()
+
+    def synchronize(self) -> None:
+        """Складывает матрицы всех процессов. Звать ДО compute()."""
+        all_reduce_sum_(self.matrix)
 
     def compute(self) -> dict[str, float]:
         """precision/recall/F1 (macro), выведенные из накопленной матрицы
