@@ -16,7 +16,9 @@ from pathlib import Path
 import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
+from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
 from torch.amp.grad_scaler import GradScaler
 from torchmetrics.detection.mean_ap import MeanAveragePrecision
 from torchvision.ops import box_convert
@@ -26,8 +28,10 @@ from tqdm import tqdm
 from src.data.batch_augment import MixedBatch, interpolate_losses
 from src.losses.base import DistillationLoss
 from src.models.feature_extractor import FeatureExtractor
+from src.utils.distributed import DistInfo, unwrap, all_reduce_sum_, all_reduce_max_
 from src.utils.logger import MetricsHistory, get_logger
-from src.utils.metrics import AverageMeter, accuracy, ConfusionMatrixAccumulator, IoUAccumulator, TeacherSimilarity, count_parameters, build_param_table
+
+from src.utils.metrics import AverageMeter, accuracy, ConfusionMatrixAccumulator, IoUAccumulator, TeacherSimilarity, count_parameters, build_param_table, sync_meters
 from src.utils.plots import Plot, bar_plot, distribution_plot, image_plot, matrix_plot
 from src.utils.visualization import default_palette, prediction_panel
 
@@ -81,6 +85,26 @@ class NormTracker:
         if math.isfinite(weight_norm_value):
             self.weight.update(weight_norm_value, n=1)
             self.max_weight = max(self.max_weight, weight_norm_value)
+
+    def synchronize(self, device: torch.device) -> None:
+        """Сводит нормы со всех процессов. Звать ДО results().
+
+        Средние складываются суммами и счётчиками, максимумы берутся
+        максимумом, пропущенные шаги — суммой (сколько всего шагов эпохи
+        потеряно на всех картах вместе).
+
+        grad_values намеренно не собираем: это сырьё для гистограммы, и
+        выборка одного ранка описывает то же распределение, что и общая.
+        """
+        sync_meters({"grad": self.grad, "weight": self.weight}, device)
+
+        maxima = torch.tensor([self.max_grad, self.max_weight], device=device)
+        all_reduce_max_(maxima)
+        self.max_grad, self.max_weight = maxima.tolist()
+
+        skipped = torch.tensor(float(self.skipped_steps), device=device)
+        all_reduce_sum_(skipped)
+        self.skipped_steps = int(skipped.item())
 
     def results(self) -> dict[str, float | int]:
         """Метрики эпохи. NaN = ни одного пригодного шага (ClearML такое не рисует)."""
@@ -139,33 +163,61 @@ def compute_losses(
     return interpolate_losses(losses, losses_b, mixed.lam)
 
 
+def wrap_ddp(
+    module: nn.Module,
+    dist: DistInfo,
+    find_unused_parameters: bool,
+    broadcast_buffers: bool,
+) -> nn.Module:
+    """Оборачивает модуль в DDP; при однопроцессном запуске отдаёт его как есть.
+
+    Звать ПОСЛЕ того, как на модуль навешены хуки FeatureExtractor: хуки
+    живут на подмодулях и переживают обёртку, а вот искать слои по именам
+    в уже обёрнутой модели пришлось бы с префиксом "module.".
+    """
+    if not dist.is_distributed:
+        return module
+    return DistributedDataParallel(
+        module,
+        device_ids=[dist.local_rank] if dist.device.type == "cuda" else None,
+        find_unused_parameters=find_unused_parameters,
+        broadcast_buffers=broadcast_buffers,
+    )
+
+
 @torch.no_grad()
 def evaluate(
     model: nn.Module,
     loader: DataLoader,
     device: torch.device,
-    limit_batches: int | None = None,
+    limit_batches: int | None = None, # кол-во батчей для eval на ранк
 ) -> tuple[float, float]:
     """Возвращает (средний CE-лосс, точность) на выборке. Всегда в fp32."""
     was_training = model.training
     model.eval()
 
-    loss_meter, acc_meter = AverageMeter(), AverageMeter()
+    # [сумма лосса, верных ответов, объектов]
+    totals = torch.zeros(3, device=device)
+
     for step, (images, labels) in enumerate(loader):
         if limit_batches is not None and step >= limit_batches:
             break
         images = images.to(device, non_blocking=True)
         labels = labels.to(device, non_blocking=True)
         logits = model(images)
-        loss = F.cross_entropy(logits, labels)
 
-        batch_size = labels.size(0)
-        loss_meter.update(loss.item(), batch_size)
-        acc_meter.update(accuracy(logits, labels), batch_size)
+        totals[0] += F.cross_entropy(logits, labels, reduction="sum")
+        totals[1] += (logits.argmax(dim=1) == labels).sum()
+        totals[2] += labels.size(0)
 
     if was_training:
         model.train()
-    return loss_meter.avg, acc_meter.avg
+
+    all_reduce_sum_(totals)
+    loss_sum, correct, count = totals.tolist()
+    if count == 0:
+        return 0.0, 0.0
+    return loss_sum / count, correct / count
 
 
 class Trainer:
@@ -192,7 +244,7 @@ class Trainer:
         train_loader: DataLoader,
         eval_loader: DataLoader,
         num_classes: int,
-        device: torch.device,
+        dist: DistInfo,
         output_dir: Path,
         epochs: int,
         amp: bool = False,
@@ -202,6 +254,8 @@ class Trainer:
         save_best: bool = True,
         save_last: bool = True,
         progress_bar: bool = True,
+        find_unused_parameters: bool = False,
+        broadcast_buffers: bool = True,
         metrics_callback: tuple[Callable, Callable, Callable, Callable] | None = None,
         scalars: dict[str, float | int | str],
         batch_augment: Callable | None = None,
@@ -220,7 +274,10 @@ class Trainer:
         self.train_loader = train_loader
         self.eval_loader = eval_loader
         self.num_classes = num_classes
-        self.device = device
+        self.dist = dist
+        self.device = dist.device
+        self.find_unused_parameters = find_unused_parameters
+        self.broadcast_buffers = broadcast_buffers
         self.output_dir = Path(output_dir)
         self.epochs = epochs
         self.grad_clip_norm = grad_clip_norm
@@ -246,10 +303,8 @@ class Trainer:
             self.train_confmat = ConfusionMatrixAccumulator(self.num_classes, self.device)
         
 
-
-        # AMP имеет смысл только на CUDA; на CPU молча работаем в fp32.
-        self.amp_enabled = amp and device.type == "cuda"
-        self.scaler = GradScaler(device.type, enabled=self.amp_enabled)
+        self.amp_enabled = amp and self.device.type == "cuda"
+        self.scaler = GradScaler(self.device.type, enabled=self.amp_enabled)
 
         if self.teacher is not None:
             self.teacher.eval()
@@ -276,8 +331,18 @@ class Trainer:
             if self.teacher is not None:
                 self.teacher_extractor = FeatureExtractor(self.teacher, layers)
 
+        self.student = wrap_ddp(
+            self.student, self.dist, self.find_unused_parameters, self.broadcast_buffers
+        )
+
+        if any(parameter.requires_grad for parameter in self.criterion.parameters()):
+            self.criterion = wrap_ddp(
+                self.criterion, self.dist, self.find_unused_parameters, self.broadcast_buffers
+            )
+        # учителя не оборачиваем в DDP, т.к. синхронизация между процессами не нужна
+
     def fit(self) -> dict:
-        history = MetricsHistory(self.output_dir / "history.csv")
+        history = MetricsHistory(self.output_dir / "history.csv") if self.dist.is_main else None
         best_acc, best_epoch = 0.0, 0
 
         try:
@@ -288,7 +353,7 @@ class Trainer:
 
                 train_loss_components, other_train_metrics = self._train_epoch(epoch)
                 eval_loss, eval_acc = evaluate(
-                    self.student, self.eval_loader, self.device, self.limit_eval_batches
+                    unwrap(self.student), self.eval_loader, self.device, self.limit_eval_batches
                 )
                 if self.scheduler is not None:
                     self.scheduler.step()
@@ -296,6 +361,8 @@ class Trainer:
                 all_values = {
                     "epoch": epoch,
                     "lr": lr,
+                    "world_size": self.dist.world_size,
+                    "global_batch_size": (self.train_loader.batch_size or 0) * self.dist.world_size,
                     "eval_loss": eval_loss,
                     "eval_acc": eval_acc,
                     "time_epoch": round(time.time() - start, 1),
@@ -303,7 +370,8 @@ class Trainer:
                     **{f"train_{key}": value for key, value in other_train_metrics.items()},
                 }
 
-                history.append(all_values)
+                if history is not None:
+                    history.append(all_values)
                 if self.metrics_callback_scalar is not None:
                     self.metrics_callback_scalar(all_values)
 
@@ -345,6 +413,12 @@ class Trainer:
         self.student.train()
         self.criterion.train()
 
+        # Без set_epoch DistributedSampler выдаёт одну и ту же перестановку
+        # каждую эпоху, то есть порядок данных перестаёт меняться.
+        sampler = getattr(self.train_loader, "sampler", None)
+        if isinstance(sampler, DistributedSampler):
+            sampler.set_epoch(epoch)
+
         norms = NormTracker()
 
         if self.train_confmat is not None:
@@ -356,7 +430,7 @@ class Trainer:
         iterator = tqdm(
             self.train_loader,
             desc=f"Эпоха {epoch}/{self.epochs}",
-            disable=not self.progress_bar,
+            disable=not self.progress_bar or not self.dist.is_main,
             leave=False,
         )
 
@@ -445,11 +519,16 @@ class Trainer:
 
             iterator.set_postfix({"loss": f"{losses['total'].item():.3f}"})
 
+        sync_meters(meters_avg_loss, self.device)
+        sync_meters(meters_avg, self.device)
+
         if self.train_confmat is not None:
+            self.train_confmat.synchronize()
             meters_other.update(self.train_confmat.compute()) # pr, rec, F1
 
         train_loss_components = {key: meter.avg for key, meter in meters_avg_loss.items()} # train_loss_components
 
+        norms.synchronize(self.device)
         meters_other.update(norms.results())
 
         other_train_metrics = {**{key: meter.avg for key, meter in meters_avg.items()}, **meters_other}
@@ -457,12 +536,16 @@ class Trainer:
         return train_loss_components, other_train_metrics
 
     def _save_checkpoint(self, filename: str, epoch: int, best_acc: float) -> None:
+        if not self.dist.is_main:
+            return
+
         checkpoint = {
             "epoch": epoch,
             "best_acc": best_acc,
-            "student_state": self.student.state_dict(),
+            "world_size": self.dist.world_size,
+            "student_state": unwrap(self.student).state_dict(),
             # Состояние лосса = адаптеры каналов (у CrossEntropy/HintonKD пусто).
-            "criterion_state": self.criterion.state_dict(),
+            "criterion_state": unwrap(self.criterion).state_dict(),
             "optimizer_state": self.optimizer.state_dict(),
             "scheduler_state": self.scheduler.state_dict() if self.scheduler else None,
             "scaler_state": self.scaler.state_dict(),
@@ -910,6 +993,15 @@ def segmentation_evaluate(
     1024x2048, а у U-Net skip-связи живут до самого декодера и не освобождаются
     по ходу forward'а — в fp32 это лишний двукратный расход памяти на пустом месте.
     Сам лосс всё равно считается в fp32 (logits.float()).
+
+    Под DDP модель приходит уже развёрнутой (без обёртки), а результаты
+    сводятся по всем процессам ПОСЛЕ цикла. Внутри цикла коллективных операций
+    быть не должно: eval идёт по ShardSampler без дополнения дубликатами, у
+    ранков разное число батчей, и они разошлись бы в числе операций.
+
+    mIoU при этом совпадает с однопроцессным прогоном точно — матрица
+    аддитивна. Лосс может разойтись в последних знаках: он взвешен по
+    картинкам батча, а границы батчей у шардов другие.
     """
     was_training = model.training
     model.eval()
@@ -934,6 +1026,9 @@ def segmentation_evaluate(
 
     if was_training:
         model.train()
+
+    sync_meters({"loss": loss_meter}, device)
+    iou.synchronize()
 
     return loss_meter.avg, iou
 
@@ -961,7 +1056,7 @@ class SegmentationTrainer:
         train_loader: DataLoader,
         eval_loader: DataLoader,
         num_classes: int,
-        device: torch.device,
+        dist: DistInfo,
         output_dir: Path,
         epochs: int,
         amp: bool = False,
@@ -971,6 +1066,8 @@ class SegmentationTrainer:
         save_best: bool = True,
         save_last: bool = True,
         progress_bar: bool = True,
+        find_unused_parameters: bool = False,
+        broadcast_buffers: bool = True,
         metrics_callback: tuple[Callable, Callable, Callable, Callable] | None = None,
         scalars: dict[str, float | int | str],
         ignore_index: int = 255,
@@ -995,7 +1092,10 @@ class SegmentationTrainer:
         self.eval_loader = eval_loader
         self.num_classes = num_classes
         self.ignore_index = ignore_index
-        self.device = device
+        self.dist = dist
+        self.device = dist.device
+        self.find_unused_parameters = find_unused_parameters
+        self.broadcast_buffers = broadcast_buffers
         self.output_dir = Path(output_dir)
         self.epochs = epochs
         self.grad_clip_norm = grad_clip_norm
@@ -1047,8 +1147,8 @@ class SegmentationTrainer:
                 pixels_per_batch=int(plots.get("probe_pixels", 8192)),
             )
 
-        self.amp_enabled = amp and device.type == "cuda"
-        self.scaler = GradScaler(device.type, enabled=self.amp_enabled)
+        self.amp_enabled = amp and self.device.type == "cuda"
+        self.scaler = GradScaler(self.device.type, enabled=self.amp_enabled)
 
         self.student.to(self.device)
         self.criterion.to(self.device)
@@ -1080,8 +1180,18 @@ class SegmentationTrainer:
             if self.teacher is not None:
                 self.teacher_extractor = FeatureExtractor(self.teacher, layers)
 
+        self.student = wrap_ddp(
+            self.student, self.dist, self.find_unused_parameters, self.broadcast_buffers
+        )
+
+        if any(parameter.requires_grad for parameter in self.criterion.parameters()):
+            self.criterion = wrap_ddp(
+                self.criterion, self.dist, self.find_unused_parameters, self.broadcast_buffers
+            )
+        # учителя не оборачиваем в DDP, т.к. синхронизация между процессами не нужна
+
     def fit(self) -> dict:
-        history = MetricsHistory(self.output_dir / "history.csv")
+        history = MetricsHistory(self.output_dir / "history.csv") if self.dist.is_main else None
         best_miou, best_epoch = 0.0, 0
 
         # Срез до первого шага (iteration 0): у необученной модели предсказание
@@ -1096,7 +1206,10 @@ class SegmentationTrainer:
 
                 train_loss_components, other_train_metrics, norms = self._train_epoch(epoch)
                 eval_loss, eval_iou = segmentation_evaluate(
-                    model=self.student,
+                    # Именно развёрнутая модель: forward через DDP-обёртку —
+                    # коллективная операция, а число батчей у ранков на eval
+                    # разное (ShardSampler), и они бы разошлись.
+                    model=unwrap(self.student),
                     loader=self.eval_loader,
                     device=self.device,
                     num_classes=self.num_classes,
@@ -1112,6 +1225,8 @@ class SegmentationTrainer:
                 all_values = {
                     "epoch": epoch,
                     "lr": lr,
+                    "world_size": self.dist.world_size,
+                    "global_batch_size": (self.train_loader.batch_size or 0) * self.dist.world_size,
                     "eval_loss": eval_loss,
                     "eval_miou": eval_metrics["miou"],
                     "eval_pixel_acc": eval_metrics["pixel_acc"],
@@ -1120,7 +1235,8 @@ class SegmentationTrainer:
                     **{f"train_{key}": value for key, value in other_train_metrics.items()},
                 }
 
-                history.append(all_values)
+                if history is not None:
+                    history.append(all_values)
                 if self.metrics_callback_scalar is not None:
                     self.metrics_callback_scalar(all_values)
                 if self.plots_enabled:
@@ -1161,6 +1277,12 @@ class SegmentationTrainer:
         self.student.train()
         self.criterion.train()
 
+        # Без set_epoch DistributedSampler выдаёт одну и ту же перестановку
+        # каждую эпоху, то есть порядок данных перестаёт меняться.
+        sampler = getattr(self.train_loader, "sampler", None)
+        if isinstance(sampler, DistributedSampler):
+            sampler.set_epoch(epoch)
+
         norms = NormTracker()
 
         self.train_iou.reset()
@@ -1179,7 +1301,7 @@ class SegmentationTrainer:
         iterator = tqdm(
             self.train_loader,
             desc=f"Эпоха {epoch}/{self.epochs}",
-            disable=not self.progress_bar,
+            disable=not self.progress_bar or not self.dist.is_main,
             leave=False,
         )
 
@@ -1252,6 +1374,16 @@ class SegmentationTrainer:
 
             iterator.set_postfix({"loss": f"{losses['total'].item():.3f}"})
 
+        # Сведение по процессам — здесь, после цикла: число шагов у ранков
+        # одинаково (DistributedSampler дополняет выборку), поэтому в саму
+        # эпоху коллективные операции добавлять не нужно.
+        sync_meters(meters_avg_loss, self.device)
+        sync_meters(meters_avg, self.device)
+        self.train_iou.synchronize()
+        norms.synchronize(self.device)
+        if self.similarity is not None:
+            self.similarity.synchronize()
+
         train_loss_components = {key: meter.avg for key, meter in meters_avg_loss.items()}
 
         meters_other.update(self.train_iou.compute())  # miou, pixel_acc
@@ -1285,10 +1417,16 @@ class SegmentationTrainer:
         Картинки прогоняются по одной: их единицы, а полный кадр 1024x2048
         под U-Net с его skip-связями — не тот тензор, который стоит собирать
         в батч ради экономии сотых долей секунды.
+
+        Под DDP сюда заходит только главный ранк (у остальных нет колбэка
+        графиков), поэтому модель берётся развёрнутой: forward через
+        DDP-обёртку на одном ранке из нескольких — коллективная операция,
+        которую остальные не сделают.
         """
         dataset = self.eval_loader.dataset
-        was_training = self.student.training
-        self.student.eval()
+        student = unwrap(self.student)
+        was_training = student.training
+        student.eval()
 
         plots: list[Plot] = []
         try:
@@ -1298,7 +1436,7 @@ class SegmentationTrainer:
                 mask = mask.to(self.device, non_blocking=True)
 
                 with torch.autocast(self.device.type, enabled=self.amp_enabled):
-                    logits = self.student(image[None])
+                    logits = student(image[None])
                 prediction = logits.float().argmax(dim=1)[0]
 
                 panel = prediction_panel(
@@ -1316,7 +1454,7 @@ class SegmentationTrainer:
                     plots.append(plot)
         finally:
             if was_training:
-                self.student.train()
+                student.train()
             # Хуки лосса сработали и на этих кадрах: карты признаков полного
             # разрешения незачем держать до следующего шага обучения.
             if self.student_extractor is not None:
@@ -1407,11 +1545,17 @@ class SegmentationTrainer:
         epoch: int,
         best_miou: float,
     ) -> None:
+        if not self.dist.is_main:
+            return
+
         checkpoint = {
             "epoch": epoch,
             "best_miou": best_miou,
-            "student_state": self.student.state_dict(),
-            "criterion_state": self.criterion.state_dict(),
+            "world_size": self.dist.world_size,
+            # unwrap: под DDP ключи иначе ушли бы с префиксом "module.",
+            # и чекпоинт не встал бы в обычную модель.
+            "student_state": unwrap(self.student).state_dict(),
+            "criterion_state": unwrap(self.criterion).state_dict(),
             "optimizer_state": self.optimizer.state_dict(),
             "scheduler_state": (
                 self.scheduler.state_dict()
