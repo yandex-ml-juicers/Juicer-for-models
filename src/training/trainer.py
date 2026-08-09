@@ -7,6 +7,7 @@
 - feature-based KD:         teacher=model, loss=FeatureKD (хуки + адаптеры)
 """
 
+import math
 import time
 from collections import defaultdict
 from collections.abc import Callable, Sequence
@@ -24,21 +25,164 @@ from torchvision.ops import box_convert
 
 from tqdm import tqdm
 
+from src.data.batch_augment import MixedBatch, interpolate_losses
 from src.losses.base import DistillationLoss
 from src.models.feature_extractor import FeatureExtractor
 from src.utils.distributed import DistInfo, unwrap, all_reduce_sum_, all_reduce_max_
 from src.utils.logger import MetricsHistory, get_logger
-from src.utils.metrics import (
-    AverageMeter,
-    ConfusionMatrixAccumulator,
-    IoUAccumulator,
-    accuracy,
-    build_param_table,
-    count_parameters,
-    sync_meters,
-)
+
+from src.utils.metrics import AverageMeter, accuracy, ConfusionMatrixAccumulator, IoUAccumulator, TeacherSimilarity, count_parameters, build_param_table, sync_meters
+from src.utils.plots import Plot, bar_plot, distribution_plot, image_plot, matrix_plot
+from src.utils.visualization import default_palette, prediction_panel
 
 log = get_logger(__name__)
+
+
+class NormTracker:
+    """Нормы градиентов и весов за эпоху, устойчивые к пропущенным шагам AMP.
+
+    На переполнении fp16 GradScaler пропускает optimizer.step(), а
+    clip_grad_norm_ на таком шаге возвращает inf (и, если задан grad_clip_norm,
+    домножает градиенты на 1/inf = 0, превращая их в NaN — их отбрасывает уже
+    сам scaler, на веса это не влияет). Такой шаг — не измерение нормы, а
+    сообщение "шага не было", и учитывать его в статистике нельзя:
+    - AverageMeter, получив одно inf, до конца эпохи возвращает inf;
+    - максимум залипает на inf навсегда;
+    - ClearML не умеет рисовать inf и подменяет его нулём с предупреждением
+      "inf value encountered. Reporting it as '0.0'".
+
+    Поэтому непригодные шаги в средние и максимумы не попадают, а их число
+    публикуется отдельной метрикой skipped_steps: по ней видно, как часто AMP
+    срывается, и это уже само по себе полезный диагностический сигнал.
+    """
+
+    def __init__(self) -> None:
+        self.grad = AverageMeter()
+        self.weight = AverageMeter()
+        self.max_grad = -math.inf
+        self.max_weight = -math.inf
+        self.skipped_steps = 0
+        # Все пригодные нормы за эпоху: на графике avg/max видно только коридор,
+        # а форму распределения (тяжёлый хвост, бимодальность) — нет.
+        # Стоит это одного float на шаг, то есть ничего.
+        self.grad_values: list[float] = []
+
+    @torch.no_grad()
+    def update(self, grad_norm: Tensor | float, params: Sequence[Tensor]) -> None:
+        """Учитывает один шаг. grad_norm — ровно то, что вернул clip_grad_norm_."""
+        grad_norm_value = float(grad_norm)
+        if math.isfinite(grad_norm_value):
+            self.grad.update(grad_norm_value, n=1)
+            self.max_grad = max(self.max_grad, grad_norm_value)
+            self.grad_values.append(grad_norm_value)
+        else:
+            self.skipped_steps += 1
+
+        # sqrt(sum ||p||^2) — та же глобальная L2-норма, что у склейки всех
+        # параметров в один вектор, но без её копии в памяти (для 27M параметров
+        # такая копия стоила бы ~110 МБ VRAM и лишнего трафика каждый шаг).
+        weight_norm_value = float(torch.stack([p.detach().norm() for p in params]).norm())
+        if math.isfinite(weight_norm_value):
+            self.weight.update(weight_norm_value, n=1)
+            self.max_weight = max(self.max_weight, weight_norm_value)
+
+    def synchronize(self, device: torch.device) -> None:
+        """Сводит нормы со всех процессов. Звать ДО results().
+
+        Средние складываются суммами и счётчиками, максимумы берутся
+        максимумом, пропущенные шаги — суммой (сколько всего шагов эпохи
+        потеряно на всех картах вместе).
+
+        grad_values намеренно не собираем: это сырьё для гистограммы, и
+        выборка одного ранка описывает то же распределение, что и общая.
+        """
+        sync_meters({"grad": self.grad, "weight": self.weight}, device)
+
+        maxima = torch.tensor([self.max_grad, self.max_weight], device=device)
+        all_reduce_max_(maxima)
+        self.max_grad, self.max_weight = maxima.tolist()
+
+        skipped = torch.tensor(float(self.skipped_steps), device=device)
+        all_reduce_sum_(skipped)
+        self.skipped_steps = int(skipped.item())
+
+    def results(self) -> dict[str, float | int]:
+        """Метрики эпохи. NaN = ни одного пригодного шага (ClearML такое не рисует)."""
+        return {
+            "avg_grad_norm": self.grad.avg if self.grad.count else math.nan,
+            "max_grad_norm": self.max_grad if math.isfinite(self.max_grad) else math.nan,
+            "avg_weight_norm": self.weight.avg if self.weight.count else math.nan,
+            "max_weight_norm": self.max_weight if math.isfinite(self.max_weight) else math.nan,
+            "skipped_steps": self.skipped_steps,
+        }
+
+
+def mix_batch(batch_augment: Callable | None, images: Tensor, targets: Tensor) -> MixedBatch:
+    """Применяет Mixup/CutMix, если он задан; иначе отдаёт батч как есть."""
+    if batch_augment is None:
+        return MixedBatch(images, targets, targets, 1.0)
+
+    return batch_augment(images, targets)
+
+
+def compute_losses(
+    criterion: DistillationLoss,
+    student_logits,
+    teacher_logits,
+    mixed: MixedBatch,
+    student_features: dict | None = None,
+    teacher_features: dict | None = None,
+) -> dict[str, Tensor]:
+    """Значения лосса с учётом смешивания батча.
+
+    При lam < 1 лосс считается по обоим наборам таргетов и линейно
+    интерполируется: это эквивалент смешивания one-hot меток, но не требует,
+    чтобы каждый лосс проекта умел работать с soft-таргетами
+    (обоснование — в src/data/batch_augment.py). Модель при этом прогоняется
+    ОДИН раз: второй вызов идёт по тем же логитам и тем же картам признаков,
+    так что стоит он долю процента шага.
+    """
+    losses = criterion(
+        student_logits,
+        teacher_logits,
+        mixed.targets_a,
+        student_features=student_features,
+        teacher_features=teacher_features,
+    )
+
+    if mixed.lam >= 1.0:
+        return losses
+
+    losses_b = criterion(
+        student_logits,
+        teacher_logits,
+        mixed.targets_b,
+        student_features=student_features,
+        teacher_features=teacher_features,
+    )
+    return interpolate_losses(losses, losses_b, mixed.lam)
+
+
+def wrap_ddp(
+    module: nn.Module,
+    dist: DistInfo,
+    find_unused_parameters: bool,
+    broadcast_buffers: bool,
+) -> nn.Module:
+    """Оборачивает модуль в DDP; при однопроцессном запуске отдаёт его как есть.
+
+    Звать ПОСЛЕ того, как на модуль навешены хуки FeatureExtractor: хуки
+    живут на подмодулях и переживают обёртку, а вот искать слои по именам
+    в уже обёрнутой модели пришлось бы с префиксом "module.".
+    """
+    if not dist.is_distributed:
+        return module
+    return DistributedDataParallel(
+        module,
+        device_ids=[dist.local_rank] if dist.device.type == "cuda" else None,
+        find_unused_parameters=find_unused_parameters,
+        broadcast_buffers=broadcast_buffers,
+    )
 
 
 @torch.no_grad()
@@ -112,8 +256,9 @@ class Trainer:
         progress_bar: bool = True,
         find_unused_parameters: bool = False,
         broadcast_buffers: bool = True,
-        metrics_callback: tuple[Callable, Callable, Callable] | None = None,
+        metrics_callback: tuple[Callable, Callable, Callable, Callable] | None = None,
         scalars: dict[str, float | int | str],
+        batch_augment: Callable | None = None,
     ) -> None:
         if criterion.requires_teacher and teacher is None:
             raise ValueError(
@@ -141,6 +286,10 @@ class Trainer:
         self.save_best = save_best
         self.save_last = save_last
         self.progress_bar = progress_bar
+        # Mixup/CutMix: применяется к уже собранному батчу на устройстве,
+        # только на обучении. На eval смешивания нет никогда — иначе метрика
+        # измеряла бы качество на несуществующих картинках.
+        self.batch_augment = batch_augment
         # Точка стыковки внешнего трекера (ClearML и т.п.): вызывается после
         # каждой эпохи со строкой метрик — той же, что уходит в history.csv.
         # Trainer ничего не знает о трекере, колбэк собирает scripts/train.py.
@@ -182,22 +331,15 @@ class Trainer:
             if self.teacher is not None:
                 self.teacher_extractor = FeatureExtractor(self.teacher, layers)
 
-        self.student = self._wrap_ddp(self.student)
+        self.student = wrap_ddp(
+            self.student, self.dist, self.find_unused_parameters, self.broadcast_buffers
+        )
 
         if any(parameter.requires_grad for parameter in self.criterion.parameters()):
-            self.criterion = self._wrap_ddp(self.criterion)
+            self.criterion = wrap_ddp(
+                self.criterion, self.dist, self.find_unused_parameters, self.broadcast_buffers
+            )
         # учителя не оборачиваем в DDP, т.к. синхронизация между процессами не нужна
-
-    def _wrap_ddp(self, module: nn.Module) -> nn.Module:
-        """Оборачивает модуль в DDP"""
-        if not self.dist.is_distributed:
-            return module
-        return DistributedDataParallel(
-            module,
-            device_ids=[self.dist.local_rank] if self.device.type == "cuda" else None,
-            find_unused_parameters=self.find_unused_parameters,
-            broadcast_buffers=self.broadcast_buffers,
-        )
 
     def fit(self) -> dict:
         history = MetricsHistory(self.output_dir / "history.csv") if self.dist.is_main else None
@@ -271,12 +413,13 @@ class Trainer:
         self.student.train()
         self.criterion.train()
 
+        # Без set_epoch DistributedSampler выдаёт одну и ту же перестановку
+        # каждую эпоху, то есть порядок данных перестаёт меняться.
         sampler = getattr(self.train_loader, "sampler", None)
         if isinstance(sampler, DistributedSampler):
             sampler.set_epoch(epoch)
 
-        max_grad_norm = -1
-        max_weight_norm = -1
+        norms = NormTracker()
 
         if self.train_confmat is not None:
             self.train_confmat.reset()
@@ -299,6 +442,12 @@ class Trainer:
             labels = labels.to(self.device, non_blocking=True)
             batch_size = labels.size(0)
 
+            # Смешивание идёт ДО прогона учителя: учитель обязан видеть ту же
+            # картинку, что и ученик, иначе дистиллируются знания о кадре,
+            # которого ученику не показывали.
+            mixed = mix_batch(self.batch_augment, images, labels)
+            images, labels = mixed.images, mixed.targets_a
+
             self.optimizer.zero_grad(set_to_none=True)
             if self.student_extractor is not None:
                 self.student_extractor.clear()
@@ -312,10 +461,11 @@ class Trainer:
 
             with torch.autocast(self.device.type, enabled=self.amp_enabled):
                 student_logits = self.student(images)
-                losses = self.criterion(
+                losses = compute_losses(
+                    self.criterion,
                     student_logits,
                     teacher_logits,
-                    labels,
+                    mixed,
                     student_features=(
                         self.student_extractor.features if self.student_extractor else None
                     ),
@@ -353,28 +503,19 @@ class Trainer:
             self.scaler.step(self.optimizer)
             self.scaler.update()
 
-
-            grad_norm_value = grad_norm.item()
-            meters_avg["avg_grad_norm"].update(grad_norm_value, n=1)    # средняя градиент
-            if grad_norm_value > max_grad_norm:
-                max_grad_norm = grad_norm_value # максимальный градиент
-            
-            with torch.no_grad():
-                weight_norm = torch.norm(torch.stack([p.detach().norm() for p in params]))
-            weight_norm_value = weight_norm.item()
-            meters_avg["avg_weight_norm"].update(weight_norm_value, n=1)
-            if weight_norm_value > max_weight_norm: 
-                max_weight_norm = weight_norm_value
+            norms.update(grad_norm, params)
 
             for key, value in losses.items():
                 meters_avg_loss[key].update(value.item(), batch_size)
 
+            # При включённом Mixup/CutMix labels — это targets_a, доминирующая
+            # половина смеси (lam >= 0.5 гарантируется sample_lambda). Train-acc
+            # тогда становится оценкой снизу; eval-метрика этим не затронута,
+            # на валидации смешивания нет.
             meters_avg["acc"].update(accuracy(student_logits.float(), labels), batch_size) #train_acc
 
-            probs = torch.softmax(student_logits.detach().float(), dim=1)
-
             if self.train_confmat is not None:
-                self.train_confmat.update(probs.argmax(dim=1), labels)
+                self.train_confmat.update(student_logits.detach().argmax(dim=1), labels)
 
             iterator.set_postfix({"loss": f"{losses['total'].item():.3f}"})
 
@@ -387,9 +528,8 @@ class Trainer:
 
         train_loss_components = {key: meter.avg for key, meter in meters_avg_loss.items()} # train_loss_components
 
-        max_norms = torch.tensor([max_grad_norm, max_weight_norm], device=self.device)
-        all_reduce_max_(max_norms)
-        meters_other["max_grad_norm"], meters_other["max_weight_norm"] = max_norms.tolist()
+        norms.synchronize(self.device)
+        meters_other.update(norms.results())
 
         other_train_metrics = {**{key: meter.avg for key, meter in meters_avg.items()}, **meters_other}
 
@@ -568,7 +708,7 @@ class DetectionTrainer:
         save_best: bool = True,
         save_last: bool = True,
         progress_bar: bool = True,
-        metrics_callback: tuple[Callable, Callable, Callable] | None = None,
+        metrics_callback: tuple[Callable, Callable, Callable, Callable] | None = None,
         scalars: dict[str, float | int | str],
         prediction_postprocessor: Callable | None = None,
         label_offset: int = 1,
@@ -728,8 +868,7 @@ class DetectionTrainer:
         self.student.train()
         self.criterion.train()
 
-        max_grad_norm = -1.0
-        max_weight_norm = -1.0
+        norms = NormTracker()
 
         meters_avg: dict[str, AverageMeter] = defaultdict(AverageMeter)
         meters_avg_loss: dict[str, AverageMeter] = defaultdict(AverageMeter)
@@ -793,26 +932,18 @@ class DetectionTrainer:
             self.scaler.step(self.optimizer)
             self.scaler.update()
 
-            grad_norm_value = float(grad_norm)
-            meters_avg["avg_grad_norm"].update(grad_norm_value, n=1)
-            max_grad_norm = max(max_grad_norm, grad_norm_value)
-
-            with torch.no_grad():
-                weight_norm = torch.norm(torch.stack([p.detach().norm() for p in params]))
-            weight_norm_value = float(weight_norm)
-            meters_avg["avg_weight_norm"].update(weight_norm_value, n=1)
-            max_weight_norm = max(max_weight_norm, weight_norm_value)
+            norms.update(grad_norm, params)
 
             for key, value in losses.items():
                 meters_avg_loss[key].update(value.item(), batch_size)
 
             iterator.set_postfix({"loss": f"{losses['total'].item():.3f}"})
 
-            train_loss_components = {key: meter.avg for key, meter in meters_avg_loss.items()}
-            meters_other["max_grad_norm"] = max_grad_norm
-            meters_other["max_weight_norm"] = max_weight_norm
+        train_loss_components = {key: meter.avg for key, meter in meters_avg_loss.items()}
 
-            other_train_metrics = {**{key: meter.avg for key, meter in meters_avg.items()}, **meters_other}
+        meters_other.update(norms.results())
+
+        other_train_metrics = {**{key: meter.avg for key, meter in meters_avg.items()}, **meters_other}
 
         return train_loss_components, other_train_metrics
 
@@ -847,8 +978,12 @@ def segmentation_evaluate(
     ignore_index: int = 255,
     limit_batches: int | None = None,
     amp: bool = False,
-) -> tuple[float, dict[str, float]]:
-    """Возвращает (средний CE-лосс, {miou, pixel_acc}).
+) -> tuple[float, IoUAccumulator]:
+    """Возвращает (средний CE-лосс, аккумулятор IoU).
+
+    Отдаётся именно аккумулятор, а не готовый {miou, pixel_acc}: из него, кроме
+    скаляров, достаются per-class IoU и матрица ошибок для графиков, и всё это
+    без второго прохода по валидации.
 
     Лосс считается обычной кросс-энтропией, а не self.criterion: на валидации
     интересна метрика самой модели, а не значение дистилляционного лосса,
@@ -858,6 +993,15 @@ def segmentation_evaluate(
     1024x2048, а у U-Net skip-связи живут до самого декодера и не освобождаются
     по ходу forward'а — в fp32 это лишний двукратный расход памяти на пустом месте.
     Сам лосс всё равно считается в fp32 (logits.float()).
+
+    Под DDP модель приходит уже развёрнутой (без обёртки), а результаты
+    сводятся по всем процессам ПОСЛЕ цикла. Внутри цикла коллективных операций
+    быть не должно: eval идёт по ShardSampler без дополнения дубликатами, у
+    ранков разное число батчей, и они разошлись бы в числе операций.
+
+    mIoU при этом совпадает с однопроцессным прогоном точно — матрица
+    аддитивна. Лосс может разойтись в последних знаках: он взвешен по
+    картинкам батча, а границы батчей у шардов другие.
     """
     was_training = model.training
     model.eval()
@@ -883,7 +1027,10 @@ def segmentation_evaluate(
     if was_training:
         model.train()
 
-    return loss_meter.avg, iou.compute()
+    sync_meters({"loss": loss_meter}, device)
+    iou.synchronize()
+
+    return loss_meter.avg, iou
 
 
 class SegmentationTrainer:
@@ -909,7 +1056,7 @@ class SegmentationTrainer:
         train_loader: DataLoader,
         eval_loader: DataLoader,
         num_classes: int,
-        device: torch.device,
+        dist: DistInfo,
         output_dir: Path,
         epochs: int,
         amp: bool = False,
@@ -919,9 +1066,16 @@ class SegmentationTrainer:
         save_best: bool = True,
         save_last: bool = True,
         progress_bar: bool = True,
-        metrics_callback: tuple[Callable, Callable, Callable] | None = None,
+        find_unused_parameters: bool = False,
+        broadcast_buffers: bool = True,
+        metrics_callback: tuple[Callable, Callable, Callable, Callable] | None = None,
         scalars: dict[str, float | int | str],
         ignore_index: int = 255,
+        batch_augment: Callable | None = None,
+        plots: dict | None = None,
+        class_names: Sequence[str] | None = None,
+        palette: Sequence[Sequence[int]] | None = None,
+        normalize: tuple[Sequence[float], Sequence[float]] | None = None,
     ) -> None:
         if criterion.requires_teacher and teacher is None:
             raise ValueError(
@@ -938,7 +1092,10 @@ class SegmentationTrainer:
         self.eval_loader = eval_loader
         self.num_classes = num_classes
         self.ignore_index = ignore_index
-        self.device = device
+        self.dist = dist
+        self.device = dist.device
+        self.find_unused_parameters = find_unused_parameters
+        self.broadcast_buffers = broadcast_buffers
         self.output_dir = Path(output_dir)
         self.epochs = epochs
         self.grad_clip_norm = grad_clip_norm
@@ -947,15 +1104,51 @@ class SegmentationTrainer:
         self.save_best = save_best
         self.save_last = save_last
         self.progress_bar = progress_bar
+        # Mixup/CutMix по батчу. Для сегментации рабочий вариант — CutMix:
+        # он переносит вместе с куском изображения и кусок маски, поэтому
+        # таргет остаётся точным (см. src/data/batch_augment.py).
+        self.batch_augment = batch_augment
         self.metrics_callback_scalar = metrics_callback[0] if metrics_callback is not None else None
         self.metrics_callback_single = metrics_callback[1] if metrics_callback is not None else None
         self.metrics_callback_table = metrics_callback[2] if metrics_callback is not None else None
+        self.metrics_callback_plots = metrics_callback[3] if metrics_callback is not None else None
         self.scalars = scalars
+        self.class_names = list(class_names) if class_names is not None else None
+
+        plots = dict(plots) if plots is not None else {}
+        # Графики-картинки (per-class IoU, матрица ошибок, распределения) строятся
+        # из уже накопленных агрегатов, поэтому почти бесплатны. Дорогая часть —
+        # только сравнение с учителем, и её объём задаётся probe_batches/probe_pixels.
+        self.plots_enabled = bool(plots.get("enabled", True)) and self.metrics_callback_plots is not None
+        self.plots_every_n_epochs = int(plots.get("every_n_epochs", 5))
+        self.probe_batches = int(plots.get("probe_batches", 20))
+        self.debug_every_n_epochs = int(plots.get("debug_every_n_epochs", 10))
+        self.debug_width = int(plots.get("debug_width", 512))
+        self.palette = list(palette) if palette is not None else default_palette(self.num_classes)
+        self.normalize = normalize
+        # Картинки для Debug Samples берутся с равным шагом по валидации и
+        # фиксируются на весь прогон: Cityscapes отсортирован по городам, так
+        # что первые N подряд — это N кадров одной улицы, а случайные каждый
+        # раз не с чем сравнивать. Одни и те же кадры на каждой отправке —
+        # единственный способ увидеть, как меняется предсказание.
+        self.debug_indices = self._pick_debug_indices(int(plots.get("debug_samples", 4)))
 
         self.train_iou = IoUAccumulator(self.num_classes, self.device, self.ignore_index)
 
-        self.amp_enabled = amp and device.type == "cuda"
-        self.scaler = GradScaler(device.type, enabled=self.amp_enabled)
+        # Схожесть с учителем — то же, что KL/agreement в классификации, но по
+        # пикселям. Включается теми же ключами в clearml.scalars и, разумеется,
+        # только когда учитель вообще есть.
+        self.similarity: TeacherSimilarity | None = None
+        if teacher is not None and {"KL_divergence", "agreement_rate"} & set(self.scalars):
+            self.similarity = TeacherSimilarity(
+                self.num_classes,
+                self.device,
+                self.ignore_index,
+                pixels_per_batch=int(plots.get("probe_pixels", 8192)),
+            )
+
+        self.amp_enabled = amp and self.device.type == "cuda"
+        self.scaler = GradScaler(self.device.type, enabled=self.amp_enabled)
 
         self.student.to(self.device)
         self.criterion.to(self.device)
@@ -987,18 +1180,36 @@ class SegmentationTrainer:
             if self.teacher is not None:
                 self.teacher_extractor = FeatureExtractor(self.teacher, layers)
 
+        self.student = wrap_ddp(
+            self.student, self.dist, self.find_unused_parameters, self.broadcast_buffers
+        )
+
+        if any(parameter.requires_grad for parameter in self.criterion.parameters()):
+            self.criterion = wrap_ddp(
+                self.criterion, self.dist, self.find_unused_parameters, self.broadcast_buffers
+            )
+        # учителя не оборачиваем в DDP, т.к. синхронизация между процессами не нужна
+
     def fit(self) -> dict:
-        history = MetricsHistory(self.output_dir / "history.csv")
+        history = MetricsHistory(self.output_dir / "history.csv") if self.dist.is_main else None
         best_miou, best_epoch = 0.0, 0
+
+        # Срез до первого шага (iteration 0): у необученной модели предсказание
+        # шумовое, и именно с ним потом сравниваются все последующие эпохи.
+        if self.plots_enabled and self.debug_indices:
+            self.metrics_callback_plots(self._debug_samples(), 0)
 
         try:
             for epoch in range(1, self.epochs + 1):
                 start = time.time()
                 lr = self.optimizer.param_groups[0]["lr"]
 
-                train_loss_components, other_train_metrics = self._train_epoch(epoch)
-                eval_loss, eval_metrics = segmentation_evaluate(
-                    model=self.student,
+                train_loss_components, other_train_metrics, norms = self._train_epoch(epoch)
+                eval_loss, eval_iou = segmentation_evaluate(
+                    # Именно развёрнутая модель: forward через DDP-обёртку —
+                    # коллективная операция, а число батчей у ранков на eval
+                    # разное (ShardSampler), и они бы разошлись.
+                    model=unwrap(self.student),
                     loader=self.eval_loader,
                     device=self.device,
                     num_classes=self.num_classes,
@@ -1006,6 +1217,7 @@ class SegmentationTrainer:
                     limit_batches=self.limit_eval_batches,
                     amp=self.amp_enabled,
                 )
+                eval_metrics = eval_iou.compute()
 
                 if self.scheduler is not None:
                     self.scheduler.step()
@@ -1013,6 +1225,8 @@ class SegmentationTrainer:
                 all_values = {
                     "epoch": epoch,
                     "lr": lr,
+                    "world_size": self.dist.world_size,
+                    "global_batch_size": (self.train_loader.batch_size or 0) * self.dist.world_size,
                     "eval_loss": eval_loss,
                     "eval_miou": eval_metrics["miou"],
                     "eval_pixel_acc": eval_metrics["pixel_acc"],
@@ -1021,9 +1235,12 @@ class SegmentationTrainer:
                     **{f"train_{key}": value for key, value in other_train_metrics.items()},
                 }
 
-                history.append(all_values)
+                if history is not None:
+                    history.append(all_values)
                 if self.metrics_callback_scalar is not None:
                     self.metrics_callback_scalar(all_values)
+                if self.plots_enabled:
+                    self.metrics_callback_plots(self._build_plots(epoch, eval_iou, norms), epoch)
 
                 is_best = eval_metrics["miou"] > best_miou
                 if is_best:
@@ -1060,10 +1277,22 @@ class SegmentationTrainer:
         self.student.train()
         self.criterion.train()
 
-        max_grad_norm = -1.0
-        max_weight_norm = -1.0
+        # Без set_epoch DistributedSampler выдаёт одну и ту же перестановку
+        # каждую эпоху, то есть порядок данных перестаёт меняться.
+        sampler = getattr(self.train_loader, "sampler", None)
+        if isinstance(sampler, DistributedSampler):
+            sampler.set_epoch(epoch)
+
+        norms = NormTracker()
 
         self.train_iou.reset()
+        if self.similarity is not None:
+            self.similarity.reset()
+        # Сравнение с учителем считается не на каждом шаге: за эпоху достаточно
+        # probe_batches замеров, чтобы среднее устоялось, а гистограмма набрала
+        # форму. Шаги берутся с равным интервалом по эпохе — иначе метрика
+        # описывала бы только её начало.
+        probe_every = self._probe_interval()
 
         meters_avg: dict[str, AverageMeter] = defaultdict(AverageMeter)
         meters_avg_loss: dict[str, AverageMeter] = defaultdict(AverageMeter)
@@ -1072,7 +1301,7 @@ class SegmentationTrainer:
         iterator = tqdm(
             self.train_loader,
             desc=f"Эпоха {epoch}/{self.epochs}",
-            disable=not self.progress_bar,
+            disable=not self.progress_bar or not self.dist.is_main,
             leave=False,
         )
 
@@ -1084,6 +1313,10 @@ class SegmentationTrainer:
             images = images.to(self.device, non_blocking=True)
             masks = masks.to(self.device, non_blocking=True)
             batch_size = images.size(0)
+
+            # До прогона учителя: он обязан видеть ту же склейку, что и ученик.
+            mixed = mix_batch(self.batch_augment, images, masks)
+            images, masks = mixed.images, mixed.targets_a
 
             self.optimizer.zero_grad(set_to_none=True)
             if self.student_extractor is not None:
@@ -1098,10 +1331,11 @@ class SegmentationTrainer:
 
             with torch.autocast(self.device.type, enabled=self.amp_enabled):
                 student_logits = self.student(images)
-                losses = self.criterion(
+                losses = compute_losses(
+                    self.criterion,
                     student_logits,
                     teacher_logits,
-                    masks,
+                    mixed,
                     student_features=(
                         self.student_extractor.features if self.student_extractor else None
                     ),
@@ -1120,33 +1354,190 @@ class SegmentationTrainer:
             self.scaler.step(self.optimizer)
             self.scaler.update()
 
-            grad_norm_value = float(grad_norm)
-            meters_avg["avg_grad_norm"].update(grad_norm_value, n=1)
-            max_grad_norm = max(max_grad_norm, grad_norm_value)
+            norms.update(grad_norm, params)
 
-            with torch.no_grad():
-                weight_norm = torch.norm(torch.stack([p.detach().norm() for p in params]))
-            weight_norm_value = float(weight_norm)
-            meters_avg["avg_weight_norm"].update(weight_norm_value, n=1)
-            max_weight_norm = max(max_weight_norm, weight_norm_value)
+            if (
+                self.similarity is not None
+                and teacher_logits is not None
+                and step % probe_every == 0
+            ):
+                self.similarity.update(student_logits, teacher_logits, masks)
 
             for key, value in losses.items():
                 meters_avg_loss[key].update(value.item(), batch_size)
 
             with torch.no_grad():
+                # masks — это targets_a. Для CutMix маска точная (кусок перенесён
+                # вместе с пикселями), поэтому train mIoU остаётся честным;
+                # для Mixup он превращается в оценку снизу.
                 self.train_iou.update(student_logits.detach().argmax(dim=1), masks)
 
             iterator.set_postfix({"loss": f"{losses['total'].item():.3f}"})
 
+        # Сведение по процессам — здесь, после цикла: число шагов у ранков
+        # одинаково (DistributedSampler дополняет выборку), поэтому в саму
+        # эпоху коллективные операции добавлять не нужно.
+        sync_meters(meters_avg_loss, self.device)
+        sync_meters(meters_avg, self.device)
+        self.train_iou.synchronize()
+        norms.synchronize(self.device)
+        if self.similarity is not None:
+            self.similarity.synchronize()
+
         train_loss_components = {key: meter.avg for key, meter in meters_avg_loss.items()}
 
         meters_other.update(self.train_iou.compute())  # miou, pixel_acc
-        meters_other["max_grad_norm"] = max_grad_norm
-        meters_other["max_weight_norm"] = max_weight_norm
+        meters_other.update(norms.results())
+        if self.similarity is not None:
+            meters_other.update(self.similarity.compute())  # KL_divergence, agreement_rate
 
         other_train_metrics = {**{key: meter.avg for key, meter in meters_avg.items()}, **meters_other}
 
-        return train_loss_components, other_train_metrics
+        return train_loss_components, other_train_metrics, norms
+
+    def _pick_debug_indices(self, count: int) -> list[int]:
+        """Равномерно разбросанные по валидации индексы картинок для Debug Samples."""
+        if count <= 0:
+            return []
+        try:
+            total = len(self.eval_loader.dataset)
+        except TypeError:  # IterableDataset — индексов нет
+            return []
+        count = min(count, total)
+        if count == 0:
+            return []
+        if count == 1:
+            return [0]
+        return [round(i * (total - 1) / (count - 1)) for i in range(count)]
+
+    @torch.no_grad()
+    def _debug_samples(self) -> list[Plot]:
+        """[кадр | разметка | предсказание | ошибки] по фиксированным картинкам валидации.
+
+        Картинки прогоняются по одной: их единицы, а полный кадр 1024x2048
+        под U-Net с его skip-связями — не тот тензор, который стоит собирать
+        в батч ради экономии сотых долей секунды.
+
+        Под DDP сюда заходит только главный ранк (у остальных нет колбэка
+        графиков), поэтому модель берётся развёрнутой: forward через
+        DDP-обёртку на одном ранке из нескольких — коллективная операция,
+        которую остальные не сделают.
+        """
+        dataset = self.eval_loader.dataset
+        student = unwrap(self.student)
+        was_training = student.training
+        student.eval()
+
+        plots: list[Plot] = []
+        try:
+            for order, index in enumerate(self.debug_indices):
+                image, mask = dataset[index]
+                image = image.to(self.device, non_blocking=True)
+                mask = mask.to(self.device, non_blocking=True)
+
+                with torch.autocast(self.device.type, enabled=self.amp_enabled):
+                    logits = student(image[None])
+                prediction = logits.float().argmax(dim=1)[0]
+
+                panel = prediction_panel(
+                    image,
+                    mask,
+                    prediction,
+                    palette=self.palette,
+                    mean=self.normalize[0] if self.normalize else None,
+                    std=self.normalize[1] if self.normalize else None,
+                    ignore_index=self.ignore_index,
+                    max_width=self.debug_width,
+                )
+                plot = image_plot("predictions", f"sample_{order}", panel)
+                if plot is not None:
+                    plots.append(plot)
+        finally:
+            if was_training:
+                student.train()
+            # Хуки лосса сработали и на этих кадрах: карты признаков полного
+            # разрешения незачем держать до следующего шага обучения.
+            if self.student_extractor is not None:
+                self.student_extractor.clear()
+
+        return plots
+
+    def _probe_interval(self) -> int:
+        """Через сколько шагов делать замер схожести с учителем."""
+        if self.probe_batches <= 0:
+            return 1
+        try:
+            steps = len(self.train_loader)
+        except TypeError:  # IterableDataset — длина неизвестна заранее
+            return 20
+        if self.limit_train_batches is not None:
+            steps = min(steps, self.limit_train_batches)
+        return max(1, steps // self.probe_batches)
+
+    def _is_due(self, epoch: int, period: int) -> bool:
+        """Пора ли слать периодический график. Последняя эпоха — всегда.
+
+        Иначе итог прогона зависел бы от того, кратно ли число эпох периоду:
+        на 100 эпохах с периодом 7 последний срез оказался бы на 98-й.
+        """
+        return period > 0 and (epoch % period == 0 or epoch == self.epochs)
+
+    def _build_plots(self, epoch: int, eval_iou: IoUAccumulator, norms: NormTracker) -> list[Plot]:
+        """Графики эпохи.
+
+        Всё, кроме Debug Samples, строится из уже накопленных агрегатов — второго
+        прохода по данным нет. Картинки требуют форварда по нескольким кадрам,
+        поэтому идут по своему, более редкому расписанию.
+        """
+        names = self.class_names
+        # Матрица ошибок — 361 число и самая тяжёлая карточка в UI, шлём реже.
+        heavy = self._is_due(epoch, self.plots_every_n_epochs)
+
+        candidates = [
+            bar_plot(
+                "per_class_iou", "train",
+                self.train_iou.per_class_iou().cpu().numpy(), names,
+                xaxis="class", yaxis="IoU",
+            ),
+            bar_plot(
+                "per_class_iou", "eval",
+                eval_iou.per_class_iou().cpu().numpy(), names,
+                xaxis="class", yaxis="IoU",
+            ),
+            distribution_plot(
+                "grad_norm_distribution", "train",
+                norms.grad_values, xaxis="grad norm (before clipping)",
+            ),
+        ]
+
+        if heavy:
+            candidates.append(
+                matrix_plot(
+                    "confusion_matrix", "eval",
+                    eval_iou.normalized_matrix().cpu().numpy(), names,
+                    xaxis="predicted", yaxis="ground truth",
+                )
+            )
+
+        if self.similarity is not None and self.similarity.compute():
+            candidates += [
+                bar_plot(
+                    "teacher_agreement_per_class", "train",
+                    self.similarity.per_class_agreement(), names,
+                    xaxis="class", yaxis="agreement rate",
+                ),
+                distribution_plot(
+                    "teacher_kl_distribution", "train",
+                    self.similarity.kl_sample_values(), xaxis="per-pixel KL(teacher || student)",
+                ),
+            ]
+
+        plots = [plot for plot in candidates if plot is not None]
+
+        if self.debug_indices and self._is_due(epoch, self.debug_every_n_epochs):
+            plots += self._debug_samples()
+
+        return plots
 
     def _save_checkpoint(
         self,
@@ -1154,11 +1545,17 @@ class SegmentationTrainer:
         epoch: int,
         best_miou: float,
     ) -> None:
+        if not self.dist.is_main:
+            return
+
         checkpoint = {
             "epoch": epoch,
             "best_miou": best_miou,
-            "student_state": self.student.state_dict(),
-            "criterion_state": self.criterion.state_dict(),
+            "world_size": self.dist.world_size,
+            # unwrap: под DDP ключи иначе ушли бы с префиксом "module.",
+            # и чекпоинт не встал бы в обычную модель.
+            "student_state": unwrap(self.student).state_dict(),
+            "criterion_state": unwrap(self.criterion).state_dict(),
             "optimizer_state": self.optimizer.state_dict(),
             "scheduler_state": (
                 self.scheduler.state_dict()

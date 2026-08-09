@@ -1,0 +1,44 @@
+# U-Net с ПРЕДОБУЧЕННЫМ энкодером из timm — ученик семантической сегментации.
+#
+# Отличие от student/unet.yaml: там классический U-Net, обучаемый с нуля,
+# здесь энкодер приходит с ImageNet. В сам U-Net веса ImageNet-моделей
+# загрузить нельзя (другие страйды, residual-блоки, другая глубина стадий) —
+# подробности в докстринге src/models/timm_unet.py.
+#
+# Размеры (всего / из них энкодер), замерены тестом:
+#   mobilenetv2                2.33M / 1.81M   <- пара к unet variant=tiny  (1.94M)
+#   efficientnet_b0            4.24M / 3.60M   <- пара к unet variant=small (4.37M)
+#   convnext_femto             6.58M / 4.83M
+#   efficientnetv2_b2          9.04M / 8.39M   <- пара к unet variant=base  (7.76M)
+#   mobilenetv4_medium_in12k   9.39M / 7.20M   <- пара к unet variant=base  (7.76M)
+#   convnext_pico             11.63M / 8.53M
+#   resnet18                  14.39M / 11.18M
+#   convnext_nano_in12k       19.79M / 14.95M  <- пара к unet variant=large (17.46M)
+#   resnet34                  24.50M / 21.28M
+#
+# Суффикс _in12k — веса на ImageNet-12k (подмножество ImageNet-21k на 11821
+# класс). Полного ImageNet-21k для чистых CNN этого размера публично нет.
+_target_: src.models.factory.timm_unet_for_segmentation
+variant: efficientnetv2_b2
+num_classes: ${data.dataset.num_classes}
+in_channels: 3
+
+# ФЛАГ-ПЕРЕКЛЮЧАТЕЛЬ предобучения.
+#   true  — энкодер с ImageNet, декодер случайный (штатный режим);
+#   false — та же архитектура целиком со случайной инициализацией.
+# Пара прогонов true/false при прочих равных и есть измерение того,
+# сколько дало именно предобучение.
+# Игнорируется, если задан checkpoint_path: веса всё равно перезапишутся.
+pretrained: true
+
+# Имя модели timm в обход таблицы вариантов. Тег весов — после точки,
+# например "convnext_nano.in12k" или "resnet50.a1_in1k". null — брать
+# из variant.
+encoder_name: null
+
+# Dropout2d на боттлнеке, как в classic U-Net. 0 — выключен.
+dropout: 0.0
+align_corners: false
+
+# Чекпоинт нашего тренера (ключ student_state).
+checkpoint_path: null

@@ -13,6 +13,7 @@
 import contextlib
 import os
 import tempfile
+from pathlib import Path
 
 import pytest
 import torch
@@ -28,9 +29,16 @@ from src.data import base_loader
 from src.data.samplers import ShardSampler
 from src.losses.base import DistillationLoss
 from src.losses.cross_entropy import CrossEntropy
-from src.training import Trainer, evaluate
+from src.training import SegmentationTrainer, Trainer, evaluate
+from src.training.trainer import NormTracker, segmentation_evaluate
 from src.utils import distributed as D
-from src.utils.metrics import AverageMeter, ConfusionMatrixAccumulator, sync_meters
+from src.utils.metrics import (
+    AverageMeter,
+    ConfusionMatrixAccumulator,
+    IoUAccumulator,
+    TeacherSimilarity,
+    sync_meters,
+)
 from src.utils.distributed import DistInfo
 
 
@@ -98,8 +106,8 @@ def test_batch_size_is_global():
     тот же эксперимент на любом количестве GPU.
     """
     cfg = make_data_cfg()
-    single, _ = base_loader(cfg, seed=42, dist=fake_dist(0, 1))
-    sharded, _ = base_loader(cfg, seed=42, dist=fake_dist(0, 4))
+    single, _ = base_loader(cfg, "classification", seed=42, dist=fake_dist(0, 1))
+    sharded, _ = base_loader(cfg, "classification", seed=42, dist=fake_dist(0, 4))
 
     assert single.batch_size == cfg.loader.batch_size
     assert sharded.batch_size == cfg.loader.batch_size // 4
@@ -110,14 +118,14 @@ def test_batch_size_not_divisible_raises():
     cfg = make_data_cfg()
     cfg.loader.batch_size = 10
     with pytest.raises(ValueError, match="не делится"):
-        base_loader(cfg, seed=42, dist=fake_dist(0, 4))
+        base_loader(cfg, "classification", seed=42, dist=fake_dist(0, 4))
 
 
 def test_train_shards_are_disjoint():
     cfg = make_data_cfg()
     per_rank = []
     for rank in range(2):
-        loader, _ = base_loader(cfg, seed=42, dist=fake_dist(rank, 2))
+        loader, _ = base_loader(cfg, "classification", seed=42, dist=fake_dist(rank, 2))
         loader.sampler.set_epoch(0)
         per_rank.append(set(loader.sampler))
 
@@ -128,7 +136,7 @@ def test_set_epoch_changes_order():
     """Без set_epoch перестановка одинакова во всех эпохах — и это молчаливая
     потеря перемешивания, а не ошибка."""
     cfg = make_data_cfg()
-    loader, _ = base_loader(cfg, seed=42, dist=fake_dist(0, 2))
+    loader, _ = base_loader(cfg, "classification", seed=42, dist=fake_dist(0, 2))
 
     loader.sampler.set_epoch(0)
     first = list(loader.sampler)
@@ -142,7 +150,7 @@ def test_single_process_path_unchanged():
     """При world_size=1 сэмплеры не подставляются: однопроцессные запуски
     обязаны воспроизводить ранее полученные результаты бит-в-бит."""
     cfg = make_data_cfg()
-    train_loader, eval_loader = base_loader(cfg, seed=42, dist=None)
+    train_loader, eval_loader = base_loader(cfg, "classification", seed=42, dist=None)
 
     assert not isinstance(train_loader.sampler, ShardSampler)
     assert not isinstance(eval_loader.sampler, ShardSampler)
@@ -157,10 +165,10 @@ def test_eval_loader_has_no_padding():
     cfg = make_data_cfg()
     total = 0
     for rank in range(4):
-        _, eval_loader = base_loader(cfg, seed=42, dist=fake_dist(rank, 4))
+        _, eval_loader = base_loader(cfg, "classification", seed=42, dist=fake_dist(rank, 4))
         total += len(eval_loader.sampler)
 
-    _, reference = base_loader(cfg, seed=42, dist=None)
+    _, reference = base_loader(cfg, "classification", seed=42, dist=None)
     assert total == len(reference.dataset)
 
 
@@ -865,3 +873,227 @@ def _plain_loss_worker(rank: int, world_size: int, port: int, result_queue) -> N
         })
     finally:
         D.cleanup()
+
+
+# --------------------------------------------------------------------------
+# Сегментация под DDP
+# --------------------------------------------------------------------------
+
+SEG_CLASSES = 4
+SEG_IGNORE = 255
+
+
+def _fixed_seg_dataset(size: int = 17):
+    """Маски с ignore-пикселями: их выбрасывание — часть проверяемой логики."""
+    generator = torch.Generator().manual_seed(5)
+    images = torch.randn(size, 3, 8, 8, generator=generator)
+    masks = torch.randint(0, SEG_CLASSES, (size, 8, 8), generator=generator)
+    masks[:, 0, :] = SEG_IGNORE
+    return TensorDataset(images, masks)
+
+
+def _fixed_seg_model():
+    torch.manual_seed(7)
+    return nn.Conv2d(3, SEG_CLASSES, kernel_size=3, padding=1)
+
+
+def _seg_evaluate_worker(rank: int, world_size: int, port: int, result_queue) -> None:
+    os.environ.update(
+        RANK=str(rank), LOCAL_RANK=str(rank), WORLD_SIZE=str(world_size),
+        MASTER_ADDR="127.0.0.1", MASTER_PORT=str(port),
+    )
+    info = dist_setup_for_test(world_size)
+    try:
+        dataset = _fixed_seg_dataset()
+        loader = DataLoader(
+            dataset, batch_size=4, sampler=ShardSampler(dataset, world_size, rank)
+        )
+        loss, iou = segmentation_evaluate(
+            _fixed_seg_model().to(info.device), loader, info.device,
+            num_classes=SEG_CLASSES, ignore_index=SEG_IGNORE,
+        )
+        result_queue.put({
+            "rank": rank,
+            "loss": loss,
+            "metrics": iou.compute(),
+            "shard": len(loader.sampler),
+        })
+    finally:
+        D.cleanup()
+
+
+@pytest.mark.distributed
+def test_segmentation_evaluate_matches_single_process():
+    """КОНТРОЛЬНАЯ ТОЧКА для сегментации, аналог теста на evaluate().
+
+    mIoU обязан совпасть ТОЧНО: матрица ошибок аддитивна, а шарды не
+    пересекаются и покрывают выборку целиком. Именно это утверждение
+    ломается, если забыть synchronize() — и ломается молча, дав каждому
+    ранку метрику по своему куску валидации.
+    """
+    from src.utils.distributed import find_free_port
+
+    dataset = _fixed_seg_dataset()
+    expected_loss, expected_iou = segmentation_evaluate(
+        _fixed_seg_model(), DataLoader(dataset, batch_size=4), torch.device("cpu"),
+        num_classes=SEG_CLASSES, ignore_index=SEG_IGNORE,
+    )
+    expected = expected_iou.compute()
+
+    ctx = mp.get_context("spawn")
+    queue = ctx.Queue()
+    mp.spawn(_seg_evaluate_worker, args=(2, find_free_port(), queue), nprocs=2, join=True)
+    results = sorted([queue.get() for _ in range(2)], key=lambda row: row["rank"])
+
+    # шарды разной длины — путь без padding задействован
+    assert sorted(row["shard"] for row in results) == [8, 9]
+
+    for row in results:
+        assert row["metrics"]["miou"] == pytest.approx(expected["miou"], abs=1e-6)
+        assert row["metrics"]["pixel_acc"] == pytest.approx(expected["pixel_acc"], abs=1e-6)
+        # Лосс взвешен по картинкам, а границы батчей у шардов другие,
+        # поэтому допуск здесь мягче, чем у mIoU.
+        assert row["loss"] == pytest.approx(expected_loss, abs=1e-3)
+
+
+def _accumulator_worker(rank: int, world_size: int, port: int, result_queue) -> None:
+    os.environ.update(
+        RANK=str(rank), LOCAL_RANK=str(rank), WORLD_SIZE=str(world_size),
+        MASTER_ADDR="127.0.0.1", MASTER_PORT=str(port),
+    )
+    info = dist_setup_for_test(world_size)
+    try:
+        # У каждого ранка свои данные: сведение обязано их сложить, а не
+        # взять данные главного.
+        iou = IoUAccumulator(SEG_CLASSES, info.device, SEG_IGNORE)
+        preds = torch.full((1, 4, 4), rank % SEG_CLASSES, device=info.device)
+        labels = torch.full((1, 4, 4), (rank + 1) % SEG_CLASSES, device=info.device)
+        iou.update(preds, labels)
+        iou.synchronize()
+
+        norms = NormTracker()
+        norms.update(float(rank + 1), [torch.ones(2, device=info.device)])
+        norms.update(float("inf"), [torch.ones(2, device=info.device)])  # пропущенный шаг
+        norms.synchronize(info.device)
+
+        # Ученик в точности повторяет учителя, значит agreement=1 на любом
+        # ранке. Сведение обязано сохранить единицу, а не поделить её на
+        # число процессов — то есть суммы и счётчик растут согласованно.
+        similarity = TeacherSimilarity(SEG_CLASSES, info.device, SEG_IGNORE)
+        logits = torch.randn(1, SEG_CLASSES, 4, 4, device=info.device)
+        similarity.update(logits, logits.clone(), labels)
+        similarity.synchronize()
+
+        result_queue.put({
+            "rank": rank,
+            "matrix_sum": int(iou.matrix.sum().item()),
+            "max_grad": norms.max_grad,
+            "avg_grad": norms.grad.avg,
+            "skipped": norms.skipped_steps,
+            "pixels": float(similarity.pixels.item()),
+            "agreement": similarity.compute()["agreement_rate"],
+        })
+    finally:
+        D.cleanup()
+
+
+@pytest.mark.distributed
+def test_accumulators_synchronize_across_ranks():
+    """IoUAccumulator и NormTracker сводят данные ВСЕХ ранков.
+
+    Каждый ранк кладёт свои числа, поэтому результат отличим и от "взяли
+    главного", и от "не сводили вовсе".
+    """
+    from src.utils.distributed import find_free_port
+
+    world_size = 3
+    ctx = mp.get_context("spawn")
+    queue = ctx.Queue()
+    mp.spawn(_accumulator_worker, args=(world_size, find_free_port(), queue),
+             nprocs=world_size, join=True)
+    results = [queue.get() for _ in range(world_size)]
+
+    for row in results:
+        # 16 валидных пикселей на ранк
+        assert row["matrix_sum"] == 16 * world_size
+        # максимум по ранкам из (1, 2, 3); среднее из тех же значений
+        assert row["max_grad"] == pytest.approx(float(world_size))
+        assert row["avg_grad"] == pytest.approx(sum(range(1, world_size + 1)) / world_size)
+        # по одному пропущенному (inf) шагу на каждом ранке
+        assert row["skipped"] == world_size
+        # 16 пикселей замера на ранк сложились, а доля осталась долей
+        assert row["pixels"] == pytest.approx(16.0 * world_size)
+        assert row["agreement"] == pytest.approx(1.0)
+
+
+def _seg_trainer_worker(rank: int, world_size: int, port: int, result_queue, output_root: str) -> None:
+    os.environ.update(
+        RANK=str(rank), LOCAL_RANK=str(rank), WORLD_SIZE=str(world_size),
+        MASTER_ADDR="127.0.0.1", MASTER_PORT=str(port),
+    )
+    info = dist_setup_for_test(world_size)
+    try:
+        dataset = _fixed_seg_dataset(16)
+        sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=False)
+        train_loader = DataLoader(dataset, batch_size=2, sampler=sampler)
+        eval_loader = DataLoader(
+            dataset, batch_size=2, sampler=ShardSampler(dataset, world_size, rank)
+        )
+        student = _fixed_seg_model().to(info.device)
+
+        output_dir = Path(output_root) / f"rank{rank}"
+        trainer = SegmentationTrainer(
+            student=student, teacher=None,
+            criterion=CrossEntropy(ignore_index=SEG_IGNORE).to(info.device),
+            optimizer=torch.optim.SGD(student.parameters(), lr=0.1), scheduler=None,
+            train_loader=train_loader, eval_loader=eval_loader,
+            num_classes=SEG_CLASSES, dist=info, output_dir=output_dir, epochs=1,
+            save_best=True, save_last=False, progress_bar=False, scalars={},
+            ignore_index=SEG_IGNORE, plots={"enabled": False, "debug_samples": 0},
+        )
+        summary = trainer.fit()
+
+        checkpoint_path = output_dir / "best.pt"
+        result_queue.put({
+            "rank": rank,
+            "student_wrapped": isinstance(trainer.student, DistributedDataParallel),
+            "best_miou": summary["best_miou"],
+            "wrote_history": (output_dir / "history.csv").exists(),
+            "wrote_checkpoint": checkpoint_path.exists(),
+            # Ключи чекпоинта не должны нести префикс "module." от DDP
+            "clean_keys": (
+                not any(
+                    key.startswith("module.")
+                    for key in torch.load(checkpoint_path, map_location="cpu")["student_state"]
+                )
+                if checkpoint_path.exists() else None
+            ),
+        })
+    finally:
+        D.cleanup()
+
+
+@pytest.mark.distributed
+def test_segmentation_trainer_under_ddp():
+    """Полный проход SegmentationTrainer на двух ранках.
+
+    Проверяется то, что при неполном портировании ломается молча: ученик
+    действительно обёрнут, метрика одинакова на всех ранках (значит сведена),
+    а файлы пишет только главный.
+    """
+    from src.utils.distributed import find_free_port
+
+    ctx = mp.get_context("spawn")
+    queue = ctx.Queue()
+    with tempfile.TemporaryDirectory() as tmp:
+        mp.spawn(_seg_trainer_worker, args=(2, find_free_port(), queue, tmp),
+                 nprocs=2, join=True)
+        results = sorted([queue.get() for _ in range(2)], key=lambda row: row["rank"])
+
+    assert all(row["student_wrapped"] for row in results)
+    # Сведённая метрика обязана совпасть у всех ранков до последнего знака
+    assert results[0]["best_miou"] == pytest.approx(results[1]["best_miou"], abs=1e-9)
+
+    assert results[0]["wrote_history"] and results[0]["wrote_checkpoint"]
+    assert results[0]["clean_keys"]
+    assert not results[1]["wrote_history"] and not results[1]["wrote_checkpoint"]

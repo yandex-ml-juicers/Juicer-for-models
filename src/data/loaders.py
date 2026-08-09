@@ -15,14 +15,15 @@ log = logging.getLogger(__name__)
 
 
 def base_loader(
-        cfg: DictConfig, task_type: str, seed: int, dist: DistInfo | None = None
-    ) -> tuple[DataLoader, DataLoader]:
+    cfg: DictConfig, task_type: str, seed: int, dist: DistInfo | None = None
+) -> tuple[DataLoader, DataLoader]:
     """Возвращает (train_loader, eval_loader).
 
     Args:
         cfg: cfg.data
+        task_type: 'classification' | 'detection' | 'segmentation'
         seed: базовый seed запуска
-        dist: параметры процесса в группе
+        dist: параметры процесса в группе; None — однопроцессный запуск
 
     Сэмплеры собираются прямо здесь, а не в вызывающем коде
 
@@ -39,7 +40,7 @@ def base_loader(
     eval_dataset = instantiate(cfg.dataset.build, train=False, transform=eval_transform)
 
     # batch_size в конфиге - глобальный размер батча, т.е. число объектов
-    # на один шаг оптимизации. Каждому процессу достаётся 
+    # на один шаг оптимизации. Каждому процессу достаётся
     # batch_size = global_batch_size // world_size
     global_batch_size = cfg.loader.batch_size
     if global_batch_size % world_size != 0:
@@ -50,6 +51,14 @@ def base_loader(
         )
     batch_size = global_batch_size // world_size
 
+    # eval_batch_size тоже глобальный — иначе два соседних ключа конфига
+    # значили бы разное. Но здесь остатком можно пренебречь и деление идёт
+    # вниз, без ошибки: метрики копятся аккумуляторами по объектам и пикселям,
+    # поэтому от разбиения на батчи не зависят вовсе. Размер валидационного
+    # батча влияет только на память и скорость.
+    global_eval_batch_size = cfg.loader.get("eval_batch_size", None) or global_batch_size
+    eval_batch_size = max(1, global_eval_batch_size // world_size)
+
     num_workers = cfg.loader.num_workers
     common = dict(
         num_workers=num_workers,
@@ -59,13 +68,16 @@ def base_loader(
         worker_init_fn=seed_worker,
     )
 
+    if task_type == "detection":
+        common["collate_fn"] = detection_collate_fn
+
     if world_size > 1:
         # drop_last=False дополняет выборку повтором первых
         # примеров до кратности world_size.
         train_sampler = DistributedSampler(
             train_dataset, num_replicas=world_size, rank=rank, shuffle=True, seed=seed, drop_last=False
         )
-        # Для eval — свой сэмплер без дополнения дубликатами, 
+        # Для eval — свой сэмплер без дополнения дубликатами,
         # иначе метрика окажется смещённой
         eval_sampler = ShardSampler(eval_dataset, num_replicas=world_size, rank=rank)
         train_shuffle = None  # sampler и shuffle взаимоисключающи
@@ -73,8 +85,6 @@ def base_loader(
         train_sampler = None
         eval_sampler = None
         train_shuffle = True
-    if task_type == "detection":
-        common["collate_fn"] = detection_collate_fn
 
     train_loader = DataLoader(
         train_dataset,
@@ -87,11 +97,9 @@ def base_loader(
         **common,
     )
 
-    eval_batch_size = cfg.loader.get("eval_batch_size", None) or cfg.loader.batch_size
-
     eval_loader = DataLoader(
         eval_dataset,
-        batch_size=batch_size,
+        batch_size=eval_batch_size,
         shuffle=False,
         sampler=eval_sampler,
         **common,

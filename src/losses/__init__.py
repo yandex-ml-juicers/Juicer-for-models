@@ -7,13 +7,23 @@ from src.losses.relational import SimilarityPreservationLoss
 from src.losses.aid_teacher_adaptation import AIDTeacherAdaptationLoss
 from src.losses.lwdetr_small_loss import LWDETRLoss
 
+# Дистилляция семантической сегментации
+from src.losses.cwd import ChannelWiseKD
+from src.losses.dist import DISTLoss
+from src.losses.fitnets import FitNetsKD
+from src.losses.pixel_kd import PixelWiseKD
+
 __all__ = [
-    "CrossEntropy", 
-    "DistillationLoss", 
-    "FeatureKD", 
-    "HintonKD", 
-    "MGDLoss", 
-    "SimilarityPreservationLoss", 
+    "CrossEntropy",
+    "DistillationLoss",
+    "FeatureKD",
+    "HintonKD",
+    "MGDLoss",
+    "SimilarityPreservationLoss",
     "AIDTeacherAdaptationLoss",
-    "LWDETRLoss"
+    "LWDETRLoss",
+    "ChannelWiseKD",
+    "DISTLoss",
+    "FitNetsKD",
+    "PixelWiseKD",
 ]

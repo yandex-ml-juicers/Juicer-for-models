@@ -1,13 +1,15 @@
 """Фабрики моделей. Каждая функция — точка входа для _target_ в конфигах
 configs/model/teacher/*.yaml и configs/model/student/*.yaml.
 
+Здесь только сборка: сами архитектуры лежат в отдельных модулях
+(src/models/segformer.py, src/models/unet.py), а работа с весами —
+в src/utils/checkpoints.py, потому что она общая для всех задач.
+
 Заморозка учителя здесь НЕ делается: это политика обучения, а не свойство
 модели, и ею владеет Trainer.
 """
 
 import timm
-from pathlib import Path
-
 import torch
 from torch import nn
 from torchvision import models as tv_models
@@ -16,7 +18,11 @@ from torchvision.models import get_model
 
 from transformers import LwDetrConfig, LwDetrForObjectDetection
 
-from hydra.utils import to_absolute_path
+from src.models.segformer import SegFormer
+from src.models.stochastic_depth import apply_stochastic_depth
+from src.models.timm_unet import TIMM_UNET_VARIANTS, TimmUNet
+from src.models.unet import UNET_VARIANTS, UNet
+from src.utils.checkpoints import load_checkpoint_into, resolve_weights_dir
 
 
 def from_torch_hub(repo: str, name: str, pretrained: bool = False) -> nn.Module:
@@ -51,14 +57,25 @@ def cifar_resnet18(num_classes: int = 10) -> nn.Module:
     return model
 
 def torchvision_model_for_classification(
-    model_name: str, 
+    model_name: str,
     num_classes: int = 1000,
-    weights: str | WeightsEnum | None = None, 
-    checkpoint_path: str | None = None
+    weights: str | WeightsEnum | None = None,
+    checkpoint_path: str | None = None,
+    drop_path_rate: float = 0.0,
+    drop_path_mode: str = "linear",
 ) -> nn.Module:
     """
     Function for load models from torchvision
     Editing the last layer for current num of classes
+
+    drop_path_rate > 0 включает stochastic depth в residual-блоках
+    (только ResNet-семейство; подробности и ограничения — в
+    src/models/stochastic_depth.py). У ShuffleNet residual-сложения нет,
+    и включение drop_path_rate для него осознанно падает с ошибкой,
+    а не молча ничего не делает.
+
+    Ключи state_dict от этого не меняются, поэтому чекпоинт модели,
+    обученной с drop_path_rate > 0, грузится и в модель без него.
     """
 
     if isinstance(weights, str):
@@ -70,48 +87,32 @@ def torchvision_model_for_classification(
         num_classes=num_classes
     )
 
+    if drop_path_rate > 0:
+        apply_stochastic_depth(model, drop_path_rate, mode=drop_path_mode)
+
     if checkpoint_path is None:
         return model
-    
-    weights_path = Path(to_absolute_path(checkpoint_path))
-    if not weights_path.is_file():
-        raise FileNotFoundError(f"Weights file was not found: {weights_path}")
 
-    checkpoint = torch.load(weights_path, map_location="cpu", weights_only=True)
-    if not isinstance(checkpoint, dict):
-        raise TypeError(f"A checkpoint with a dict-style weight was expected, but it was received {type(checkpoint)}")
+    return load_checkpoint_into(model, checkpoint_path, model_name)
 
-    if "model_state_dict" in checkpoint:
-        state_dict = checkpoint["model_state_dict"]
-    elif "student_state" in checkpoint:
-        state_dict = checkpoint["student_state"]
-    elif "state_dict" in checkpoint:
-        state_dict = checkpoint["state_dict"]
-    elif "model" in checkpoint and isinstance(checkpoint["model"], dict):
-        state_dict = checkpoint["model"]
-    else:
-        state_dict = checkpoint
-
-    cleaned_state_dict = {}
-
-    state_dict = {
-        key.removeprefix("module."): value
-        for key, value in state_dict.items()
-    }
-
-    model.load_state_dict(state_dict, strict=True)
-
-    print(f"Weights for {model_name} has been loaded: {weights_path}")
-
-    return model
 
 def timm_model_for_classification(
-    model_name: str, 
+    model_name: str,
     pretrained: bool = False,
-    checkpoint_path: str | None = None, 
+    checkpoint_path: str | None = None,
     num_classes: int = 100,
+    drop_path_rate: float | None = None,
     **kwargs: any,
 ) -> nn.Module:
+    """drop_path_rate — stochastic depth средствами самого timm.
+
+    None означает "не передавать аргумент вовсе": у timm для каждой
+    архитектуры свой дефолт, и затирать его нулём без причины не нужно.
+    Модели без поддержки drop_path timm отвергает сам, с внятной ошибкой.
+    """
+
+    if drop_path_rate is not None:
+        kwargs["drop_path_rate"] = drop_path_rate
 
     model = timm.create_model(
         model_name,
@@ -123,152 +124,150 @@ def timm_model_for_classification(
     if checkpoint_path is None:
         return model
 
-    weights_path = Path(to_absolute_path(checkpoint_path))
-    if not weights_path.is_file():
-        raise FileNotFoundError(f"Checkpoint file was not found: {weights_path}")
-
-    checkpoint = torch.load(weights_path, map_location="cpu", weights_only=True)
-
-    if isinstance(checkpoint, dict) and "student_state" in checkpoint:
-        state_dict = checkpoint["student_state"]
-    elif isinstance(checkpoint, dict) and "state_dict" in checkpoint:
-        state_dict = checkpoint["state_dict"]
-    elif isinstance(checkpoint, dict) and "model" in checkpoint:
-        state_dict = checkpoint["model"]
-    else:
-        state_dict = checkpoint
-
-    state_dict = {
-        key.removeprefix("module."): value
-        for key, value in state_dict.items()
-    }
-
-    model.load_state_dict(state_dict, strict=True)
-
-    print(f"Weights for {model_name} has been loaded: {weights_path}")
-
-    return model
-    
-
-class UNetDoubleConv(nn.Sequential):
-    """Conv-BN-ReLU x2 — базовый блок U-Net.
-    """
-
-    def __init__(self, in_channels: int, out_channels: int) -> None:
-        super().__init__(
-            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True),
-        )
-
-
-class UNet(nn.Module):
-    """Классический U-Net: симметричный энкодер-декодер со skip-connections.
-
-    Свёртки с padding=1 сохраняют размер, поэтому выход совпадает по разрешению
-    со входом и логиты [B, num_classes, H, W] можно скармливать cross_entropy
-    напрямую, без интерполяции. Требование: H и W кратны 2**depth
-    (512x1024 и 1024x2048 при depth=4 подходят).
-    """
-
-    def __init__(
-        self,
-        num_classes: int = 19,
-        in_channels: int = 3,
-        base_channels: int = 64,
-        depth: int = 4,
-    ) -> None:
-        super().__init__()
-
-        channels = [base_channels * 2 ** level for level in range(depth + 1)]
-
-        self.encoders = nn.ModuleList()
-        previous_channels = in_channels
-        for level_channels in channels[:-1]:
-            self.encoders.append(UNetDoubleConv(previous_channels, level_channels))
-            previous_channels = level_channels
-
-        self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
-        self.bottleneck = UNetDoubleConv(channels[-2], channels[-1])
-
-        self.upsamples = nn.ModuleList()
-        self.decoders = nn.ModuleList()
-        for level_channels in reversed(channels[:-1]):
-            self.upsamples.append(
-                nn.ConvTranspose2d(level_channels * 2, level_channels, kernel_size=2, stride=2)
-            )
-            # На вход декодера идёт конкатенация апсемпла и skip-связи.
-            self.decoders.append(UNetDoubleConv(level_channels * 2, level_channels))
-
-        self.head = nn.Conv2d(base_channels, num_classes, kernel_size=1)
-
-    def forward(self, images: torch.Tensor) -> torch.Tensor:
-        skips = []
-
-        features = images
-        for encoder in self.encoders:
-            features = encoder(features)
-            skips.append(features)
-            features = self.pool(features)
-
-        features = self.bottleneck(features)
-
-        for upsample, decoder, skip in zip(self.upsamples, self.decoders, reversed(skips)):
-            features = upsample(features)
-            features = torch.cat([skip, features], dim=1)
-            features = decoder(features)
-
-        return self.head(features)
+    return load_checkpoint_into(model, checkpoint_path, model_name)
 
 
 def unet_for_segmentation(
     num_classes: int = 19,
     in_channels: int = 3,
-    base_channels: int = 64,
-    depth: int = 4,
+    variant: str = "full",
+    base_channels: int | None = None,
+    depth: int | None = None,
     checkpoint_path: str | None = None,
+    dropout: float = 0.0,
 ) -> nn.Module:
     """U-Net для семантической сегментации.
 
-    checkpoint_path нужен на втором этапе: обученный учитель подгружается
-    из чекпоинта тренера (ключ student_state) и идёт в дистилляцию.
+    Args:
+        variant: именованный размер из UNET_VARIANTS
+            (tiny ~1.9M | small ~4.4M | base ~7.8M | large ~17.4M | full ~31.0M).
+        base_channels, depth: точечное переопределение варианта. None —
+            взять из спецификации. Оба рычага дорогие: число параметров
+            примерно квадратично по base_channels, а +1 к depth добавляет
+            самый широкий уровень и умножает размер примерно вчетверо
+            (base_channels=32: depth=4 -> 7.8M, depth=5 -> 31.1M). Для
+            подбора размера крутите base_channels; depth поднимайте только
+            если нужен тап на страйде 32 — и тогда вход обязан быть кратен 32.
+        checkpoint_path: чекпоинт нашего тренера (ключ student_state) — так
+            обученный на первом этапе U-Net становится учителем.
+        dropout: Dropout2d на боттлнеке (регуляризация вместо stochastic
+            depth, которую в U-Net применять не к чему — residual-блоков там
+            нет). Параметров не добавляет, поэтому старые чекпоинты грузятся
+            без изменений.
     """
+    if variant not in UNET_VARIANTS:
+        raise ValueError(
+            f"Неизвестный вариант U-Net: {variant!r}. Доступны: {sorted(UNET_VARIANTS)}"
+        )
+
+    spec = UNET_VARIANTS[variant]
     model = UNet(
         num_classes=num_classes,
         in_channels=in_channels,
-        base_channels=base_channels,
-        depth=depth,
+        base_channels=spec["base_channels"] if base_channels is None else base_channels,
+        depth=spec["depth"] if depth is None else depth,
+        dropout=dropout,
     )
 
     if checkpoint_path is None:
         return model
 
-    weights_path = Path(to_absolute_path(checkpoint_path))
-    if not weights_path.is_file():
-        raise FileNotFoundError(f"Checkpoint file was not found: {weights_path}")
+    return load_checkpoint_into(model, checkpoint_path, f"U-Net-{variant}")
 
-    checkpoint = torch.load(weights_path, map_location="cpu", weights_only=True)
 
-    if isinstance(checkpoint, dict) and "student_state" in checkpoint:
-        state_dict = checkpoint["student_state"]
-    elif isinstance(checkpoint, dict) and "state_dict" in checkpoint:
-        state_dict = checkpoint["state_dict"]
-    else:
-        state_dict = checkpoint
+def timm_unet_for_segmentation(
+    variant: str = "resnet18",
+    num_classes: int = 19,
+    in_channels: int = 3,
+    pretrained: bool = True,
+    encoder_name: str | None = None,
+    dropout: float = 0.0,
+    align_corners: bool = False,
+    checkpoint_path: str | None = None,
+) -> nn.Module:
+    """U-Net с предобученным энкодером из timm.
 
-    state_dict = {
-        key.removeprefix("module."): value
-        for key, value in state_dict.items()
-    }
+    Args:
+        variant: именованный энкодер из TIMM_UNET_VARIANTS (размеры — в
+            комментарии к таблице, от 2.3M до 24.5M).
+        pretrained: ГЛАВНЫЙ ПЕРЕКЛЮЧАТЕЛЬ. True — веса энкодера с ImageNet,
+            False — та же архитектура со случайной инициализацией. Пара
+            прогонов true/false и есть честный ответ на вопрос, сколько
+            дало именно предобучение.
+        encoder_name: имя модели timm в обход таблицы (тег весов — после
+            точки, например "convnext_nano.in12k").
+        checkpoint_path: чекпоинт нашего тренера. Если задан, pretrained
+            игнорируется: веса всё равно будут перезаписаны, качать их незачем.
+    """
+    if encoder_name is None:
+        if variant not in TIMM_UNET_VARIANTS:
+            raise ValueError(
+                f"Неизвестный вариант timm-U-Net: {variant!r}. "
+                f"Доступны: {sorted(TIMM_UNET_VARIANTS)}. "
+                f"Либо задайте encoder_name напрямую."
+            )
+        encoder_name = TIMM_UNET_VARIANTS[variant]["encoder_name"]
 
-    model.load_state_dict(state_dict, strict=True)
+    model = TimmUNet(
+        encoder_name=encoder_name,
+        num_classes=num_classes,
+        in_channels=in_channels,
+        pretrained=pretrained and checkpoint_path is None,
+        dropout=dropout,
+        align_corners=align_corners,
+    )
 
-    print(f"Weights for U-Net has been loaded: {weights_path}")
+    if checkpoint_path is None:
+        return model
 
-    return model
+    return load_checkpoint_into(model, checkpoint_path, f"TimmUNet-{variant}")
+
+
+def segformer_for_segmentation(
+    variant: str = "b2",
+    num_classes: int = 19,
+    pretrained: str | None = "imagenet",
+    checkpoint_path: str | None = None,
+    weights_dir: str | None = None,
+    align_corners: bool = False,
+    drop_path_rate: float | None = None,
+    classifier_dropout_prob: float | None = None,
+) -> nn.Module:
+    """SegFormer-B{0..5} для семантической сегментации.
+
+    Args:
+        pretrained: None | "imagenet" (энкодер MiT с ImageNet) |
+            "cityscapes" (готовая дообученная модель nvidia/segformer-*).
+            Игнорируется, если задан checkpoint_path.
+        checkpoint_path: чекпоинт нашего тренера — так модель, обученная
+            на этапе scratch, подставляется учителем в дистилляцию.
+        weights_dir: куда качать веса; по умолчанию data/weights.
+        drop_path_rate: stochastic depth в блоках трансформера. None —
+            дефолт transformers (0.1). Для B4/B5 и длинных расписаний
+            имеет смысл поднимать до 0.2-0.3.
+        classifier_dropout_prob: dropout перед головой декодера. None —
+            дефолт transformers (0.1).
+
+    Веса Hugging Face кладутся в <weights_dir>/huggingface: hub сам
+    проверяет, что уже скачано, поэтому повторный запуск ничего не тянет.
+    """
+    cache_dir = str(resolve_weights_dir(weights_dir) / "huggingface")
+
+    # Если веса всё равно будут перезаписаны чекпоинтом, качать их незачем.
+    model = SegFormer(
+        variant=variant,
+        num_classes=num_classes,
+        pretrained=None if checkpoint_path is not None else pretrained,
+        cache_dir=cache_dir,
+        align_corners=align_corners,
+        drop_path_rate=drop_path_rate,
+        classifier_dropout_prob=classifier_dropout_prob,
+    )
+
+    if checkpoint_path is None:
+        return model
+
+    return load_checkpoint_into(model, checkpoint_path, f"SegFormer-{variant.upper()}")
 
 
 def lwdetr_small_for_detection(
@@ -303,7 +302,5 @@ def lwdetr_small_for_detection(
         label2id=label2id,
         disable_custom_kernels=disable_custom_kernels,
     )
-
-    return LwDetrForObjectDetection(config)
 
     return LwDetrForObjectDetection(config)

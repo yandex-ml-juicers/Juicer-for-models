@@ -1,0 +1,14 @@
+# Ванильная KD Хинтона (arXiv:1503.02531), применённая попиксельно.
+# total = (1-alpha)*CE + alpha*T^2*mean_pixels KL(teacher || student)
+#
+# Не путать с loss=hinton_kd: тот считает kl_div с reduction="batchmean",
+# что на картах [B, C, H, W] оставляет в лоссе множитель H*W, и не умеет
+# ignore_index.
+_target_: src.losses.PixelWiseKD
+temperature: 4.0
+alpha: 0.5
+
+# Void-пиксели Cityscapes выбрасываются только из CE; KD-член считается по
+# всем пикселям — на них у учителя тоже есть осмысленное распределение.
+ignore_index: ${data.dataset.ignore_index}
+label_smoothing: 0.0

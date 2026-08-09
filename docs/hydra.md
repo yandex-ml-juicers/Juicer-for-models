@@ -311,12 +311,17 @@ hydra:
     # изначально создаётся outputs/${now:%Y-%m-%d_%H-%M-%S}
     # синтаксис ${oc.env:КЛЮЧ, ДЕФОЛТ}
     # {oc.env - настройки среды, то же что и os.environ в py (одна среда при инициализации процесса)}
-    # Т.е. тепреь вместо дефолта название папки генерируется в следующем порядке:
-    # 1) если запускаем руками torchrun --nproc_per_node=2 scripts/train.py experiment=baseline
-    # вместо времени создастся папка outputs/oc.env:TORCHELASTIC_RUN_ID (чтобы не создалось 2 папки из-за разницы старта процессов в мс)
-    # 2) при запуске через exp_queue создаётся среда в которой генерируется 
-    # название папки: oc.env:JUICER_RUN_DIR
-    dir: ${oc.env:JUICER_RUN_DIR,outputs/${name}/${oc.env:TORCHELASTIC_RUN_ID,${now:%Y-%m-%d_%H-%M-%S}}}
+    # Т.е. теперь вместо дефолта имя папки берётся в следующем порядке:
+    # 1) JUICER_RUN_ID — его ставит exp_queue.py, один на задачу очереди;
+    # 2) TORCHELASTIC_RUN_ID — его ставит сам torchrun, если запускаем руками:
+    #    torchrun --nproc_per_node=2 scripts/train.py experiment=baseline
+    # 3) время — обычный однопроцессный запуск.
+    #
+    # Пункты 1-2 существуют ровно ради того, чтобы все ранки СОШЛИСЬ в одной
+    # папке. Без них каждый процесс подставил бы своё ${now}, и ранки, стартовав
+    # с разницей в миллисекунды, разъехались бы по разным директориям. Что они
+    # сошлись, проверяет resolve_output_dir() в scripts/train.py.
+    dir: outputs/${name}/${oc.env:JUICER_RUN_ID,${oc.env:TORCHELASTIC_RUN_ID,${now:%Y-%m-%d_%H-%M-%S}}}
   
   # мультизапуск с флагом -m  
   sweep:

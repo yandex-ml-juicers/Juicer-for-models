@@ -1,3 +1,10 @@
 _target_: src.models.factory.torchvision_model_for_classification
 model_name: resnet18
 num_classes: ${data.dataset.num_classes}
+
+# Stochastic depth в residual-блоках (0 — выключено). Работает только для
+# ResNet-семейства: у ShuffleNet residual-сложения нет, и ненулевое значение
+# там осознанно падает с ошибкой, а не молча ничего не делает.
+# Рабочий диапазон — 0.05..0.2; drop_path_mode: linear | uniform.
+drop_path_rate: 0.0
+drop_path_mode: linear
