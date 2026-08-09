@@ -15,7 +15,9 @@ from pathlib import Path
 import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
+from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
 from torch.amp.grad_scaler import GradScaler
 from torchmetrics.detection.mean_ap import MeanAveragePrecision
 from torchvision.ops import box_convert
@@ -24,8 +26,17 @@ from tqdm import tqdm
 
 from src.losses.base import DistillationLoss
 from src.models.feature_extractor import FeatureExtractor
+from src.utils.distributed import DistInfo, unwrap, all_reduce_sum_, all_reduce_max_
 from src.utils.logger import MetricsHistory, get_logger
-from src.utils.metrics import AverageMeter, accuracy, ConfusionMatrixAccumulator, IoUAccumulator, count_parameters, build_param_table
+from src.utils.metrics import (
+    AverageMeter,
+    ConfusionMatrixAccumulator,
+    IoUAccumulator,
+    accuracy,
+    build_param_table,
+    count_parameters,
+    sync_meters,
+)
 
 log = get_logger(__name__)
 
@@ -35,28 +46,34 @@ def evaluate(
     model: nn.Module,
     loader: DataLoader,
     device: torch.device,
-    limit_batches: int | None = None,
+    limit_batches: int | None = None, # кол-во батчей для eval на ранк
 ) -> tuple[float, float]:
     """Возвращает (средний CE-лосс, точность) на выборке. Всегда в fp32."""
     was_training = model.training
     model.eval()
 
-    loss_meter, acc_meter = AverageMeter(), AverageMeter()
+    # [сумма лосса, верных ответов, объектов]
+    totals = torch.zeros(3, device=device)
+
     for step, (images, labels) in enumerate(loader):
         if limit_batches is not None and step >= limit_batches:
             break
         images = images.to(device, non_blocking=True)
         labels = labels.to(device, non_blocking=True)
         logits = model(images)
-        loss = F.cross_entropy(logits, labels)
 
-        batch_size = labels.size(0)
-        loss_meter.update(loss.item(), batch_size)
-        acc_meter.update(accuracy(logits, labels), batch_size)
+        totals[0] += F.cross_entropy(logits, labels, reduction="sum")
+        totals[1] += (logits.argmax(dim=1) == labels).sum()
+        totals[2] += labels.size(0)
 
     if was_training:
         model.train()
-    return loss_meter.avg, acc_meter.avg
+
+    all_reduce_sum_(totals)
+    loss_sum, correct, count = totals.tolist()
+    if count == 0:
+        return 0.0, 0.0
+    return loss_sum / count, correct / count
 
 
 class Trainer:
@@ -83,7 +100,7 @@ class Trainer:
         train_loader: DataLoader,
         eval_loader: DataLoader,
         num_classes: int,
-        device: torch.device,
+        dist: DistInfo,
         output_dir: Path,
         epochs: int,
         amp: bool = False,
@@ -93,6 +110,8 @@ class Trainer:
         save_best: bool = True,
         save_last: bool = True,
         progress_bar: bool = True,
+        find_unused_parameters: bool = False,
+        broadcast_buffers: bool = True,
         metrics_callback: tuple[Callable, Callable, Callable] | None = None,
         scalars: dict[str, float | int | str],
     ) -> None:
@@ -110,7 +129,10 @@ class Trainer:
         self.train_loader = train_loader
         self.eval_loader = eval_loader
         self.num_classes = num_classes
-        self.device = device
+        self.dist = dist
+        self.device = dist.device
+        self.find_unused_parameters = find_unused_parameters
+        self.broadcast_buffers = broadcast_buffers
         self.output_dir = Path(output_dir)
         self.epochs = epochs
         self.grad_clip_norm = grad_clip_norm
@@ -132,10 +154,8 @@ class Trainer:
             self.train_confmat = ConfusionMatrixAccumulator(self.num_classes, self.device)
         
 
-
-        # AMP имеет смысл только на CUDA; на CPU молча работаем в fp32.
-        self.amp_enabled = amp and device.type == "cuda"
-        self.scaler = GradScaler(device.type, enabled=self.amp_enabled)
+        self.amp_enabled = amp and self.device.type == "cuda"
+        self.scaler = GradScaler(self.device.type, enabled=self.amp_enabled)
 
         if self.teacher is not None:
             self.teacher.eval()
@@ -162,8 +182,25 @@ class Trainer:
             if self.teacher is not None:
                 self.teacher_extractor = FeatureExtractor(self.teacher, layers)
 
+        self.student = self._wrap_ddp(self.student)
+
+        if any(parameter.requires_grad for parameter in self.criterion.parameters()):
+            self.criterion = self._wrap_ddp(self.criterion)
+        # учителя не оборачиваем в DDP, т.к. синхронизация между процессами не нужна
+
+    def _wrap_ddp(self, module: nn.Module) -> nn.Module:
+        """Оборачивает модуль в DDP"""
+        if not self.dist.is_distributed:
+            return module
+        return DistributedDataParallel(
+            module,
+            device_ids=[self.dist.local_rank] if self.device.type == "cuda" else None,
+            find_unused_parameters=self.find_unused_parameters,
+            broadcast_buffers=self.broadcast_buffers,
+        )
+
     def fit(self) -> dict:
-        history = MetricsHistory(self.output_dir / "history.csv")
+        history = MetricsHistory(self.output_dir / "history.csv") if self.dist.is_main else None
         best_acc, best_epoch = 0.0, 0
 
         try:
@@ -174,7 +211,7 @@ class Trainer:
 
                 train_loss_components, other_train_metrics = self._train_epoch(epoch)
                 eval_loss, eval_acc = evaluate(
-                    self.student, self.eval_loader, self.device, self.limit_eval_batches
+                    unwrap(self.student), self.eval_loader, self.device, self.limit_eval_batches
                 )
                 if self.scheduler is not None:
                     self.scheduler.step()
@@ -182,6 +219,8 @@ class Trainer:
                 all_values = {
                     "epoch": epoch,
                     "lr": lr,
+                    "world_size": self.dist.world_size,
+                    "global_batch_size": (self.train_loader.batch_size or 0) * self.dist.world_size,
                     "eval_loss": eval_loss,
                     "eval_acc": eval_acc,
                     "time_epoch": round(time.time() - start, 1),
@@ -189,7 +228,8 @@ class Trainer:
                     **{f"train_{key}": value for key, value in other_train_metrics.items()},
                 }
 
-                history.append(all_values)
+                if history is not None:
+                    history.append(all_values)
                 if self.metrics_callback_scalar is not None:
                     self.metrics_callback_scalar(all_values)
 
@@ -231,6 +271,10 @@ class Trainer:
         self.student.train()
         self.criterion.train()
 
+        sampler = getattr(self.train_loader, "sampler", None)
+        if isinstance(sampler, DistributedSampler):
+            sampler.set_epoch(epoch)
+
         max_grad_norm = -1
         max_weight_norm = -1
 
@@ -243,7 +287,7 @@ class Trainer:
         iterator = tqdm(
             self.train_loader,
             desc=f"Эпоха {epoch}/{self.epochs}",
-            disable=not self.progress_bar,
+            disable=not self.progress_bar or not self.dist.is_main,
             leave=False,
         )
 
@@ -334,25 +378,34 @@ class Trainer:
 
             iterator.set_postfix({"loss": f"{losses['total'].item():.3f}"})
 
+        sync_meters(meters_avg_loss, self.device)
+        sync_meters(meters_avg, self.device)
+
         if self.train_confmat is not None:
+            self.train_confmat.synchronize()
             meters_other.update(self.train_confmat.compute()) # pr, rec, F1
 
         train_loss_components = {key: meter.avg for key, meter in meters_avg_loss.items()} # train_loss_components
 
-        meters_other["max_grad_norm"] = max_grad_norm
-        meters_other["max_weight_norm"] = max_weight_norm
+        max_norms = torch.tensor([max_grad_norm, max_weight_norm], device=self.device)
+        all_reduce_max_(max_norms)
+        meters_other["max_grad_norm"], meters_other["max_weight_norm"] = max_norms.tolist()
 
         other_train_metrics = {**{key: meter.avg for key, meter in meters_avg.items()}, **meters_other}
 
         return train_loss_components, other_train_metrics
 
     def _save_checkpoint(self, filename: str, epoch: int, best_acc: float) -> None:
+        if not self.dist.is_main:
+            return
+
         checkpoint = {
             "epoch": epoch,
             "best_acc": best_acc,
-            "student_state": self.student.state_dict(),
+            "world_size": self.dist.world_size,
+            "student_state": unwrap(self.student).state_dict(),
             # Состояние лосса = адаптеры каналов (у CrossEntropy/HintonKD пусто).
-            "criterion_state": self.criterion.state_dict(),
+            "criterion_state": unwrap(self.criterion).state_dict(),
             "optimizer_state": self.optimizer.state_dict(),
             "scheduler_state": self.scheduler.state_dict() if self.scheduler else None,
             "scaler_state": self.scaler.state_dict(),

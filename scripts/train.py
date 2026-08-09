@@ -11,16 +11,68 @@ import hydra
 from hydra.core.hydra_config import HydraConfig
 from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
+from torch import nn
 
 from src.data import base_loader
 from src.training import Trainer, DetectionTrainer, SegmentationTrainer
-from src.utils import resolve_device, seed_everything, prediction_postprocessor
+from src.utils import distributed, seed_everything, prediction_postprocessor
+from src.utils.distributed import DistInfo
 
 log = logging.getLogger(__name__)
 
+BEST_METRIC_KEY = {
+    "classification": "best_acc",
+    "detection": "best_map",
+    "segmentation": "best_miou",
+}
 
-def init_clearml(cfg: DictConfig):
-    if not cfg.clearml.enabled:
+
+def configure_rank_logging(dist: DistInfo) -> None:
+    """
+    Разводит логи ранков, чтобы они не мешали друг другу.
+    """
+    if dist.is_main:
+        return
+
+    root = logging.getLogger()
+    for handler in list(root.handlers):
+        # ищем обработчик, который пишет в файл
+        if isinstance(handler, logging.FileHandler):
+            path = Path(handler.baseFilename)
+            root.removeHandler(handler)
+            handler.close() # честно закрываем логгер
+            # создаём личный файл для логгера, чтобы избежать гонки
+            rank_handler = logging.FileHandler(
+                path.with_name(f"{path.stem}.rank{dist.rank}{path.suffix}")
+            )
+            rank_handler.setFormatter(handler.formatter)
+            rank_handler.setLevel(handler.level)
+            root.addHandler(rank_handler)
+        elif isinstance(handler, logging.StreamHandler):
+            # в консоль от ранков будем выводить только WARNINGs
+            handler.setLevel(logging.WARNING)
+
+
+def resolve_output_dir(dist: DistInfo) -> Path:
+    """Выбор output_dir, а также проверка
+       на то, что ранки не расходятся
+    """
+    output_dir = Path(HydraConfig.get().runtime.output_dir)
+
+    main_dir = distributed.broadcast_object(str(output_dir), device=dist.device, src=0)
+    if main_dir != str(output_dir):
+        raise RuntimeError(
+            f"Ранки разошлись в директории запуска: rank {dist.rank} получил "
+            f"{output_dir}, а rank 0 — {main_dir}. Значит hydra.run.dir был "
+            f"вычислен в каждом процессе отдельно. Проверь, что задана "
+            f"переменная JUICER_RUN_DIR или TORCHELASTIC_RUN_ID."
+        )
+    return output_dir
+
+
+def init_clearml(cfg: DictConfig, dist: DistInfo):
+    # таска создаётся только на главном ранке
+    if not dist.is_main or not cfg.clearml.enabled:
         return None
     from clearml import Task
 
@@ -48,7 +100,7 @@ def clearml_reporter(task):
     logger = task.get_logger()
 
     def report_scalar(row: dict, iteration: str = 'epoch') -> None:
-    
+
         iterate = row[iteration]
         logger.report_scalar(title="loss", series="train", value=row["train_loss_total"], iteration=iterate)
         logger.report_scalar(title="loss", series="eval", value=row["eval_loss"], iteration=iterate)
@@ -56,6 +108,8 @@ def clearml_reporter(task):
             logger.report_scalar(title="accuracy", series="train", value=row["train_acc"], iteration=iterate)
             logger.report_scalar(title="accuracy", series="eval", value=row["eval_acc"], iteration=iterate)
         logger.report_scalar(title="lr", series="lr", value=row["lr"], iteration=iterate)
+        logger.report_scalar(title="time_epoch", series="seconds",
+                             value=row["time_epoch"], iteration=iterate)
         if "train_precision" in row.keys():
             logger.report_scalar(title="precision", series="train", value=row["train_precision"], iteration=iterate)
             logger.report_scalar(title="recall", series="train", value=row["train_recall"], iteration=iterate)
@@ -115,13 +169,6 @@ def clearml_reporter(task):
                     iteration=iterate,
                 )
 
-        # Компоненты лосса (train_ce, train_kd, train_feature_*) — одним графиком.
-        for key, value in row.items():
-            if key.startswith("train_loss"):
-                logger.report_scalar(
-                    "loss_components", key.removeprefix("train_"), value, iteration=iterate
-                )
-
     def report_single(single_values: dict):
         for key, val in single_values.items():
             task.get_logger().report_single_value(key, val)
@@ -139,96 +186,123 @@ def clearml_reporter(task):
 
 @hydra.main(config_path="../configs", config_name="config", version_base="1.3")
 def main(cfg: DictConfig) -> float:
-    task = init_clearml(cfg)
-
-    output_dir = Path(HydraConfig.get().runtime.output_dir)
-    log.info("Конфиг запуска:\n%s", OmegaConf.to_yaml(cfg))
-    log.info("Артефакты запуска: %s", output_dir)
-
     seed_everything(cfg.seed, deterministic=cfg.deterministic, warn_only=cfg.deterministic_warn_only)
-    device = resolve_device(cfg.device)
+    dist = distributed.setup(
+        device_cfg=cfg.device,
+        backend=cfg.distributed.backend,
+        timeout_minutes=cfg.distributed.timeout_minutes,
+    )
+    try:
+        configure_rank_logging(dist)
 
-    train_loader, eval_loader = base_loader(cfg.data, cfg.task_type, seed=cfg.seed)
+        if cfg.task_type not in BEST_METRIC_KEY:
+            raise ValueError(
+                f"task_type={cfg.task_type!r} неизвестен. "
+                f"Доступны: {sorted(BEST_METRIC_KEY)}."
+            )
 
-    student = instantiate(cfg.model.student).to(device)
-    teacher = None
-    if cfg.model.get("teacher") is not None:
-        teacher = instantiate(cfg.model.teacher).to(device)
-    criterion = instantiate(cfg.loss).to(device)
+        output_dir = resolve_output_dir(dist)
+        device = dist.device
 
-    # Обучаемые параметры лосса (адаптеры feature-KD) оптимизируются вместе с учеником.
-    params = list(student.parameters()) + list(criterion.parameters())
-    optimizer = instantiate(cfg.optimizer)(params)  
-    scheduler = instantiate(cfg.scheduler)(optimizer) if cfg.get("scheduler") is not None else None
+        task = init_clearml(cfg, dist)
 
-    if cfg.task_type == "classification":
-        trainer = Trainer(
-            student=student,
-            teacher=teacher,
-            criterion=criterion,
-            optimizer=optimizer,
-            scheduler=scheduler,
-            train_loader=train_loader,
-            eval_loader=eval_loader,
-            device=device,
-            output_dir=output_dir,
-            metrics_callback=clearml_reporter(task) if task is not None else None,
-            num_classes=cfg.data.dataset.num_classes,
-            scalars=cfg.clearml.scalars,
-            **cfg.trainer,
-        )
-    elif cfg.task_type == "detection":
-        trainer = DetectionTrainer(
-            student=student,
-            teacher=teacher,
-            criterion=criterion,
-            optimizer=optimizer,
-            scheduler=scheduler,
-            train_loader=train_loader,
-            eval_loader=eval_loader,
-            device=device,
-            output_dir=output_dir,
-            metrics_callback=clearml_reporter(task) if task is not None else None,
-            num_classes=cfg.data.dataset.num_classes,
-            scalars=cfg.clearml.scalars,
-            prediction_postprocessor=prediction_postprocessor,
-            label_offset=cfg.data.dataset.build.label_offset,
-            targers_mode=cfg.data.dataset.targets_format_mode,
-            **cfg.trainer,
-        )
-    elif cfg.task_type == "segmentation":
-        trainer = SegmentationTrainer(
-            student=student,
-            teacher=teacher,
-            criterion=criterion,
-            optimizer=optimizer,
-            scheduler=scheduler,
-            train_loader=train_loader,
-            eval_loader=eval_loader,
-            device=device,
-            output_dir=output_dir,
-            metrics_callback=clearml_reporter(task) if task is not None else None,
-            num_classes=cfg.data.dataset.num_classes,
-            scalars=cfg.clearml.scalars,
-            ignore_index=cfg.data.dataset.ignore_index,
-            **cfg.trainer,
-        )
-    result = trainer.fit()
+        log.info("Конфиг запуска:\n%s", OmegaConf.to_yaml(cfg))
+        log.info("Артефакты запуска: %s", output_dir)
 
-    if cfg.task_type == "classification":
-        result = result["best_acc"]
-    elif cfg.task_type == "detection":
-        result = result["best_map"]
-    elif cfg.task_type == "segmentation":
-        result = result["best_miou"]
+        with distributed.main_process_first(dist):
+            train_loader, eval_loader = base_loader(cfg.data, cfg.task_type, seed=cfg.seed, dist=dist)
 
-    if task is not None:
-        task.get_logger().report_single_value("best_eval_acc", result)
-        task.close()
+            student = instantiate(cfg.model.student).to(device)
+            teacher = None
+            if cfg.model.get("teacher") is not None:
+                teacher = instantiate(cfg.model.teacher).to(device)
+            criterion = instantiate(cfg.loss).to(device)
+
+        # заменяем слои BatchNorm до сборки optimizer
+        if cfg.distributed.sync_bn and dist.is_distributed:
+            student = nn.SyncBatchNorm.convert_sync_batchnorm(student)
+            log.info("BatchNorm заменён на SyncBatchNorm")
+
+        # Обучаемые параметры лосса (адаптеры feature-KD) оптимизируются вместе с учеником.
+        params = list(student.parameters()) + list(criterion.parameters())
+        optimizer = instantiate(cfg.optimizer)(params)
+        scheduler = instantiate(cfg.scheduler)(optimizer) if cfg.get("scheduler") is not None else None
+
+        if cfg.task_type == "classification":
+            trainer = Trainer(
+                student=student,
+                teacher=teacher,
+                criterion=criterion,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                train_loader=train_loader,
+                eval_loader=eval_loader,
+                dist=dist,
+                find_unused_parameters=cfg.distributed.find_unused_parameters,
+                broadcast_buffers=cfg.distributed.broadcast_buffers,
+                output_dir=output_dir,
+                metrics_callback=clearml_reporter(task) if task is not None else None,
+                num_classes=cfg.data.dataset.num_classes,
+                scalars=cfg.clearml.scalars,
+                **cfg.trainer,
+            )
+        elif cfg.task_type == "detection":
+            trainer = DetectionTrainer(
+                student=student,
+                teacher=teacher,
+                criterion=criterion,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                train_loader=train_loader,
+                eval_loader=eval_loader,
+                device=device,
+                output_dir=output_dir,
+                metrics_callback=clearml_reporter(task) if task is not None else None,
+                num_classes=cfg.data.dataset.num_classes,
+                scalars=cfg.clearml.scalars,
+                prediction_postprocessor=prediction_postprocessor,
+                label_offset=cfg.data.dataset.build.label_offset,
+                targers_mode=cfg.data.dataset.targets_format_mode,
+                **cfg.trainer,
+            )
+        elif cfg.task_type == "segmentation":
+            trainer = SegmentationTrainer(
+                student=student,
+                teacher=teacher,
+                criterion=criterion,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                train_loader=train_loader,
+                eval_loader=eval_loader,
+                device=device,
+                output_dir=output_dir,
+                metrics_callback=clearml_reporter(task) if task is not None else None,
+                num_classes=cfg.data.dataset.num_classes,
+                scalars=cfg.clearml.scalars,
+                ignore_index=cfg.data.dataset.ignore_index,
+                **cfg.trainer,
+            )
+        else:
+            raise AssertionError(cfg.task_type)
+
+        result = trainer.fit()
+        best_metric = result[BEST_METRIC_KEY[cfg.task_type]]
+
+        if task is not None:
+            task.get_logger().report_single_value(
+                BEST_METRIC_KEY[cfg.task_type], best_metric
+            )
+            task.get_logger().report_single_value("world_size", dist.world_size)
+            task.close()
+
+    finally:
+        # при падении одного ранка остальные должны корректно
+        # закрыть группу, а не висеть в коллективной операции до таймаута.
+        distributed.cleanup()
 
     # Возврат метрики делает скрипт совместимым с hydra-свиперами
     # (optuna и т.п. максимизируют возвращаемое значение).
-    return result
+    return best_metric
 
 
 if __name__ == "__main__":

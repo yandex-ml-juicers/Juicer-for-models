@@ -296,3 +296,38 @@ python scripts/train.py \
 Официальный туториал короткий и хороший: https://hydra.cc/docs/intro/ —
 для работы с этим репо достаточно разделов Basic Tutorial → Config groups,
 Defaults, Instantiating objects.
+
+
+## Тонкости Hydra:
+
+Рассмотрим config.yaml
+Блок hydra является настройками самой Hydra.
+
+```bash yaml
+# Настройка самой Hydra (подробнее смотри в документации)
+hydra:
+  # запуск одного эксперимента
+  run:
+    # изначально создаётся outputs/${now:%Y-%m-%d_%H-%M-%S}
+    # синтаксис ${oc.env:КЛЮЧ, ДЕФОЛТ}
+    # {oc.env - настройки среды, то же что и os.environ в py (одна среда при инициализации процесса)}
+    # Т.е. тепреь вместо дефолта название папки генерируется в следующем порядке:
+    # 1) если запускаем руками torchrun --nproc_per_node=2 scripts/train.py experiment=baseline
+    # вместо времени создастся папка outputs/oc.env:TORCHELASTIC_RUN_ID (чтобы не создалось 2 папки из-за разницы старта процессов в мс)
+    # 2) при запуске через exp_queue создаётся среда в которой генерируется 
+    # название папки: oc.env:JUICER_RUN_DIR
+    dir: ${oc.env:JUICER_RUN_DIR,outputs/${name}/${oc.env:TORCHELASTIC_RUN_ID,${now:%Y-%m-%d_%H-%M-%S}}}
+  
+  # мультизапуск с флагом -m  
+  sweep:
+    # создаётся главная папка
+    dir: multirun/${name}/${now:%Y-%m-%d_%H-%M-%S}
+    # подпапки
+    subdir: ${hydra.job.num}
+  job:
+      # физически меняет текущую рабочую директорию (CWD), т.е. syscall os.chdir(run.dir)
+      # теперь при True любой код будет сохранять новые файлы в уникальную папку эксперимента
+      chdir: True # входные пути всегда от корня репо, выходные по явно запрошенному output_dir
+```
+
+

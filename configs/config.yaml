@@ -10,13 +10,14 @@ defaults:
   - optimizer: adam
   - scheduler: cosine
   - trainer: default
+  - distributed: default
   - experiment: null
 
 name: default # имя таски
 
 # Воспроизводимость
 seed: 42
-deterministic: true
+deterministic: true # сохраняется ассоциативность
 # если нет детерменированной реализации при false ловим ошибку, при true запускаемся
 deterministic_warn_only: false # лучше держать false
 
@@ -40,12 +41,19 @@ clearml:
   auto_connect_frameworks: {"pytorch": False,} # авто-перехват фреймворков
   auto_connect_arg_parser: False # авто-перехват аргументов из argparse
 
-# Логи Hydra
+# Настройка самой Hydra (подробнее описано в документации)
 hydra:
+  # запуск одного эксперимента
   run:
-    dir: outputs/${name}/${now:%Y-%m-%d_%H-%M-%S}
+    dir: outputs/${name}/${oc.env:JUICER_RUN_ID,${oc.env:TORCHELASTIC_RUN_ID,${now:%Y-%m-%d_%H-%M-%S}}}
+  
+  # мультизапуск с флагом -m  
   sweep:
+    # создаётся главная папка
     dir: multirun/${name}/${now:%Y-%m-%d_%H-%M-%S}
+    # подпапки
     subdir: ${hydra.job.num}
+  
   job:
-    chdir: True # входные пути всегда от корня репо, выходные по явно запрошенному output_dir
+    # физически меняет текущую рабочую директорию (подробнее смотри в документации)
+    chdir: True
