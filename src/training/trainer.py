@@ -13,10 +13,9 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 
 import torch
-from torch import nn
-from torch.nn.parallel import DistributedDataParallel
 import torch.nn.functional as F
 from torch import Tensor, nn
+from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from torch.amp.grad_scaler import GradScaler
@@ -29,8 +28,15 @@ from src.losses.base import DistillationLoss
 from src.models.feature_extractor import FeatureExtractor
 from src.utils.distributed import DistInfo, unwrap, all_reduce_sum_, all_reduce_max_
 from src.utils.logger import MetricsHistory, get_logger
-from src.utils.metrics import AverageMeter, accuracy, ConfusionMatrixAccumulator, count_parameters, build_param_table, sync_meters
-from src.utils.metrics import AverageMeter, accuracy, ConfusionMatrixAccumulator, IoUAccumulator, count_parameters, build_param_table
+from src.utils.metrics import (
+    AverageMeter,
+    ConfusionMatrixAccumulator,
+    IoUAccumulator,
+    accuracy,
+    build_param_table,
+    count_parameters,
+    sync_meters,
+)
 
 log = get_logger(__name__)
 

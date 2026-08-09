@@ -14,13 +14,17 @@ from omegaconf import DictConfig, OmegaConf
 from torch import nn
 
 from src.data import base_loader
-from src.training import Trainer
-from src.utils import distributed, seed_everything
-from src.utils.distributed import DistInfo
 from src.training import Trainer, DetectionTrainer, SegmentationTrainer
-from src.utils import resolve_device, seed_everything, prediction_postprocessor
+from src.utils import distributed, seed_everything, prediction_postprocessor
+from src.utils.distributed import DistInfo
 
 log = logging.getLogger(__name__)
+
+BEST_METRIC_KEY = {
+    "classification": "best_acc",
+    "detection": "best_map",
+    "segmentation": "best_miou",
+}
 
 
 def configure_rank_logging(dist: DistInfo) -> None:
@@ -165,13 +169,6 @@ def clearml_reporter(task):
                     iteration=iterate,
                 )
 
-        # Компоненты лосса (train_ce, train_kd, train_feature_*) — одним графиком.
-        for key, value in row.items():
-            if key.startswith("train_loss"):
-                logger.report_scalar(
-                    "loss_components", key.removeprefix("train_"), value, iteration=iterate
-                )
-
     def report_single(single_values: dict):
         for key, val in single_values.items():
             task.get_logger().report_single_value(key, val)
@@ -197,6 +194,13 @@ def main(cfg: DictConfig) -> float:
     )
     try:
         configure_rank_logging(dist)
+
+        if cfg.task_type not in BEST_METRIC_KEY:
+            raise ValueError(
+                f"task_type={cfg.task_type!r} неизвестен. "
+                f"Доступны: {sorted(BEST_METRIC_KEY)}."
+            )
+
         output_dir = resolve_output_dir(dist)
         device = dist.device
 
@@ -278,30 +282,27 @@ def main(cfg: DictConfig) -> float:
                 ignore_index=cfg.data.dataset.ignore_index,
                 **cfg.trainer,
             )
-
+        else:
+            raise AssertionError(cfg.task_type)
 
         result = trainer.fit()
-        if cfg.task_type == "classification":
-            result = result["best_acc"]
-        elif cfg.task_type == "detection":
-            result = result["best_map"]
-        elif cfg.task_type == "segmentation":
-            result = result["best_miou"]
-
+        best_metric = result[BEST_METRIC_KEY[cfg.task_type]]
 
         if task is not None:
-            task.get_logger().report_single_value("best_eval_acc", result["best_acc"])
+            task.get_logger().report_single_value(
+                BEST_METRIC_KEY[cfg.task_type], best_metric
+            )
             task.get_logger().report_single_value("world_size", dist.world_size)
             task.close()
-            
+
     finally:
         # при падении одного ранка остальные должны корректно
         # закрыть группу, а не висеть в коллективной операции до таймаута.
         distributed.cleanup()
-        
+
     # Возврат метрики делает скрипт совместимым с hydra-свиперами
     # (optuna и т.п. максимизируют возвращаемое значение).
-    return result # type: ignore
+    return best_metric
 
 
 if __name__ == "__main__":
