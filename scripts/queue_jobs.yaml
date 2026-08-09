@@ -1,8 +1,5 @@
-# Конфиг для scripts/exp_queue.py — не проходит через Hydra-композицию,
-# это плоские данные для очереди запусков, а не ось эксперимента.
-
 # Какие GPU можно занимать (значения для CUDA_VISIBLE_DEVICES).
-available_gpus: [0, 1, 3]
+available_gpus: [0, 1, 2, 3]
 
 default_gpus_per_job: 1
 
@@ -11,11 +8,11 @@ experiments:
   - "experiment=baseline/b1_resnet56_to_resnet20_kd clearml.enabled=false trainer.epochs=3 trainer.limit_train_batches=4 trainer.limit_eval_batches=3"
 
   # Запуск на gpus количестве
-  # Необходимо помнить, что batch_size в конфиге ГЛОБАЛЬНЫЙ
   - args: "experiment=baseline/b1_resnet56_to_resnet20_kd clearml.enabled=false trainer.epochs=5 trainer.limit_train_batches=8 trainer.limit_eval_batches=3"
     gpus: 2
 
-  - "experiment=baseline/b1_resnet56_to_resnet20_kd clearml.enabled=false trainer.epochs=3 trainer.limit_train_batches=4 trainer.limit_eval_batches=3"
-  - "experiment=baseline/b1_resnet56_to_resnet20_kd clearml.enabled=false trainer.epochs=3 trainer.limit_train_batches=4 trainer.limit_eval_batches=3"
-  - "experiment=baseline/b1_resnet56_to_resnet20_kd clearml.enabled=false trainer.epochs=3 trainer.limit_train_batches=4 trainer.limit_eval_batches=3"
+  # Запуск на конкретных GPU перечисленных в devices: []
+  - args: "experiment=baseline/b1_resnet56_to_resnet20_kd clearml.enabled=false trainer.epochs=5 trainer.limit_train_batches=8 trainer.limit_eval_batches=3"
+    devices: [0, 1]
 
+# при распределённом запуске batch_size - ГЛОБАЛЬНЫЙ
