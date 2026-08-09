@@ -25,3 +25,7 @@ testpaths = ["tests"]
 # Только test_*.py: ручные скрипты-проверки вида *_test.py (logger_test.py)
 # не должны исполняться при сборке тестов.
 python_files = ["test_*.py"]
+
+markers = [
+    "distributed: поднимает несколько процессов (gloo, CPU)",
+]
