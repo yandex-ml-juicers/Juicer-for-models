@@ -1,0 +1,76 @@
+# @package _global_
+# Абляция лосса: CE + Dice вместо чистой CE.
+# Бейзлайн — scratch/cityscapes_scratch_timm_unet_base_aug; отличие ровно
+# одно, блок loss. Всё остальное (эпохи, lr, батч, аугментации, ученик)
+# скопировано без изменений, иначе разницу в mIoU нельзя будет отнести
+# к лоссу.
+#
+# Что должен показать прогон: Dice нормируется на площадь класса, поэтому
+# вклад traffic light перестаёт зависеть от того, сколько его на кадре.
+# Смотреть надо не на общий mIoU, а на per-class IoU редких классов
+# (traffic light, pole, rider, motorcycle) — общий mIoU может почти
+# не сдвинуться, а редкие подрасти.
+defaults:
+  - override /data/dataset: cityscapes_seg
+  - override /data/transform/train: cityscapes_seg_strong_transform
+  - override /data/transform/eval: cityscapes_seg_transform
+  - override /model/teacher: null
+  - override /model/student: timm_unet
+  - override /loss: dice
+  - override /optimizer: adamw
+  - override /scheduler: warmup_cosine
+  - override /augment: cutmix_segmentation
+  - override /distributed: sync_bn
+
+name: cityscapes_scratch_timm_unet_base_aug_dice
+device: cuda
+deterministic: false
+
+task_type: "segmentation"
+
+clearml:
+  enabled: True
+  tags: [cityscapes, student, scratch, timm_unet, segmentation, aug, dice]
+  scalars: []
+  plots:
+    enabled: true
+    every_n_epochs: 20
+  reuse_last_task_id: True
+  continue_last_task: False
+  output_uri: false
+
+trainer:
+  epochs: 150
+  amp: true
+  grad_clip_norm: 1.0
+
+# CE — ровно та же, что в бейзлайне (включая label_smoothing), плюс Dice
+# с паритетным весом.
+loss:
+  ce_weight: 1.0
+  dice_weight: 1.0
+  smooth: 1.0
+  label_smoothing: 0.05
+  ignore_index: ${data.dataset.ignore_index}
+
+optimizer:
+  lr: 3.25e-4
+  weight_decay: 3.0e-2
+
+scheduler:
+  warmup_epochs: 10
+  eta_min: 1.0e-6
+
+data:
+  loader:
+    batch_size: 16
+    eval_batch_size: 10
+    num_workers: 16
+    pin_memory: true
+    persistent_workers: true
+
+model:
+  student:
+    variant: efficientnetv2_b2
+    pretrained: true
+    dropout: 0.1
