@@ -6,8 +6,9 @@ defaults:
   - override /model/teacher: null
   - override /model/student: lwdetr
   - override /loss: lwdetr_small_loss
-  - override /optimizer: adamw
+  - override /optimizer: lwdetr_adamw
   - override /scheduler: warmup_cosine
+  - override /prediction_postprocessors: lwdetr
 
 name: cityscapes_finetune_LWDETR_small
 device: cuda
@@ -21,19 +22,20 @@ clearml:
   output_uri: false
 
 trainer:
-  epochs: 30
+  epochs: 80
   amp: true
 
 optimizer:
-  lr: 1.0e-4
-  weight_decay: 1.0e-4
+  lr: 1.0e-3
+  lr_encoder: 1.5e-3
+  weight_decay: 0.05
   fused: true
 
 scheduler:
   warmup_epochs: 5
   start_factor: 0.01
   end_factor: 1.0
-  eta_min: 1.0e-5
+  eta_min: 1.0e-4
 
 data:
   dataset:
@@ -46,3 +48,10 @@ data:
     num_workers: 8
     persistent_workers: true
     pin_memory: true
+
+model:
+  student:
+    dropout: 0.3
+    attention_dropout: 0.4
+    activation_dropout: 0.3
+    backbone_dropout: 0.1
