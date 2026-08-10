@@ -1,0 +1,12 @@
+_target_: src.utils.prediction_postprocessor.yolov8_prediction_postprocessor
+_partial_: true
+
+score_threshold: 0.001
+iou_threshold: 0.7
+
+label_offset: 0
+
+strides: [8, 16, 32]
+reg_max: 16
+
+max_detections: 300

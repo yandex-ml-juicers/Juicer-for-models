@@ -1,0 +1,5 @@
+_target_: src.utils.lwdetr_prediction_postprocessor
+_partial_: true
+
+score_threshold: 0.05
+label_offset: 0

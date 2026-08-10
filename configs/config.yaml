@@ -10,6 +10,7 @@ defaults:
   - optimizer: adam
   - scheduler: cosine
   - trainer: default
+  - prediction_postprocessors: null
   - experiment: null
 
 name: default # имя таски
