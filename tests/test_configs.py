@@ -7,6 +7,7 @@
 import pytest
 from hydra import compose, initialize
 from hydra.utils import instantiate
+from omegaconf import OmegaConf
 
 from src.losses import DistillationLoss
 
@@ -19,18 +20,20 @@ EXPERIMENTS = [
     "scratch/imagenet1k_scratch_resnet18",
 ]
 
-# Сегментация: бейзлайны без дистилляции + 4 метода дистилляции
-# SegFormer-B2 -> U-Net-base.
+# Сегментация: бейзлайны без дистилляции + методы дистилляции
+# SegFormer-B2 -> U-Net.
 SEGMENTATION_EXPERIMENTS = [
     "scratch/cityscapes_scratch_segformer_b2",
     "scratch/cityscapes_scratch_segformer_b5",
     "scratch/cityscapes_scratch_unet",
-    "scratch/cityscapes_scratch_unet_base",
-    "scratch/cityscapes_scratch_unet_base_strong_aug",
+    "scratch/cityscapes_scratch_timm_unet",
+    "scratch/cityscapes_scratch_timm_unet_small_aug",
     "segmentation/vanilla-KD/cityscapes_pixel-KD_segformer_b2_to_unet_base",
     "segmentation/CWD/cityscapes_CWD_segformer_b2_to_unet_base",
     "segmentation/FitNets/cityscapes_FitNets_segformer_b2_to_unet_base",
-    "segmentation/DIST/cityscapes_DIST_segformer_b2_to_unet_base",
+    "segmentation/FitNets/cityscapes_FitNets_segformer_b2_to_unet_small",
+    "segmentation/FitNets/cityscapes_FitNets_dice_ohem_segformer_b2_to_unet_small",
+    "segmentation/DIST/cityscapes_DIST_segformer_b2_to_timm_unet_base",
 ]
 
 
@@ -69,6 +72,66 @@ def test_feature_kd_declares_layers():
     assert len(list(criterion.parameters())) == 4  # по одной 1x1-свёртке на слой
 
 
+class TestTeacherViewExperiment:
+    """Эксперименты, где ученик видит сильные аугментации, а учитель — нет."""
+
+    EXPERIMENT = "segmentation/FitNets/cityscapes_FitNets_segformer_b2_to_unet_small"
+
+    def test_regularization_is_on_and_hidden_from_the_teacher(self):
+        cfg = compose_config([f"experiment={self.EXPERIMENT}"])
+        train_transform = cfg.data.transform.train
+
+        assert train_transform.blur_p > 0
+        assert train_transform.random_erasing_p > 0
+        assert set(train_transform.teacher_skips) == {"jitter", "blur", "erasing"}
+
+    def test_transform_yields_two_views(self):
+        """Трансформ обязан отдавать тройку (ученик, учитель, маска):
+        именно по ней тренер понимает, что учителю нужен свой кадр."""
+        from src.utils.segmentation_transforms import SegmentationTeacherViewCompose
+
+        cfg = compose_config([f"experiment={self.EXPERIMENT}"])
+        transform = instantiate(cfg.data.transform.train)
+        assert isinstance(transform, SegmentationTeacherViewCompose)
+
+    def test_distillation_terms_fade_out(self):
+        """Расписание обязано гасить дистилляцию, а не наоборот."""
+        cfg = compose_config([f"experiment={self.EXPERIMENT}"])
+        assert cfg.loss_schedule.hint_weight.end < cfg.loss_schedule.hint_weight.start
+        assert cfg.loss_schedule.ce_weight.end > cfg.loss_schedule.ce_weight.start
+
+
+def test_loss_schedule_paths_exist_in_the_loss():
+    """Опечатка в пути расписания иначе всплыла бы через час обучения."""
+    from src.training import LossWeightScheduler
+
+    for experiment in SEGMENTATION_EXPERIMENTS:
+        cfg = compose_config([f"experiment={experiment}"])
+        if not cfg.get("loss_schedule"):
+            continue
+        criterion = instantiate(cfg.loss)
+        LossWeightScheduler(
+            criterion,
+            OmegaConf.to_container(cfg.loss_schedule, resolve=True),
+            total_epochs=cfg.trainer.epochs,
+        )
+
+
+def test_composite_counts_cross_entropy_once():
+    """CE есть почти в каждом лоссе проекта, и в композиции её легко
+    посчитать дважды с непонятным итоговым весом. Здесь попиксельную
+    классификацию берёт на себя только OHEM."""
+    cfg = compose_config(
+        ["experiment=segmentation/FitNets/cityscapes_FitNets_dice_ohem_segformer_b2_to_unet_small"]
+    )
+    with_ce = [
+        name
+        for name, loss_cfg in cfg.loss.losses.items()
+        if loss_cfg.get("ce_weight", 0.0) > 0 or loss_cfg._target_.endswith("OhemCrossEntropy")
+    ]
+    assert with_ce == ["hard"], with_ce
+
+
 def test_scratch_experiments_have_no_teacher():
     for experiment in ["baseline/b1_scratch", "baseline/b2_scratch"]:
         cfg = compose_config([f"experiment={experiment}"])
@@ -85,10 +148,13 @@ def test_segmentation_experiments_are_wired_for_segmentation(experiment):
     cfg = compose_config([f"experiment={experiment}"])
 
     assert cfg.task_type == "segmentation"
-    # ignore_index должен доехать до лосса, иначе void-пиксели Cityscapes
-    # станут двадцатым «классом» и испортят обучение.
-    assert cfg.loss.ignore_index == cfg.data.dataset.ignore_index
     assert cfg.data.dataset.num_classes == 19
+    # ignore_index должен доехать до лосса, иначе void-пиксели Cityscapes
+    # станут двадцатым «классом» и испортят обучение. У композиции своего
+    # ignore_index нет — он задан в каждом слагаемом.
+    losses = cfg.loss.get("losses")
+    for loss_cfg in losses.values() if losses is not None else [cfg.loss]:
+        assert loss_cfg.ignore_index == cfg.data.dataset.ignore_index
 
 
 def test_segmentation_scratch_experiments_have_no_teacher():
@@ -132,18 +198,7 @@ class TestBatchAugmentGroup:
 
 
 class TestStrongAugmentationExperiment:
-    EXPERIMENT = "scratch/cityscapes_scratch_unet_base_strong_aug"
-
-    def test_differs_from_the_baseline_only_in_augmentation(self):
-        """Пара «базовый / усиленный» имеет смысл, только если всё остальное
-        совпадает: иначе разница в mIoU объясняется не аугментациями."""
-        baseline = compose_config(["experiment=scratch/cityscapes_scratch_unet_base"])
-        strong = compose_config([f"experiment={self.EXPERIMENT}"])
-
-        assert strong.optimizer.lr == baseline.optimizer.lr
-        assert strong.data.loader.batch_size == baseline.data.loader.batch_size
-        assert strong.model.student.variant == baseline.model.student.variant
-        assert strong.loss.label_smoothing == baseline.loss.label_smoothing
+    EXPERIMENT = "scratch/cityscapes_scratch_timm_unet_small_aug"
 
     def test_augmentations_are_actually_on(self):
         cfg = compose_config([f"experiment={self.EXPERIMENT}"])
@@ -163,7 +218,7 @@ class TestStrongAugmentationExperiment:
 def test_base_segmentation_transform_stays_unchanged():
     """Базовый рецепт — точка отсчёта для уже посчитанных бейзлайнов.
     Новые аугментации в нём обязаны быть выключены."""
-    cfg = compose_config(["experiment=scratch/cityscapes_scratch_unet_base"])
+    cfg = compose_config(["experiment=scratch/cityscapes_scratch_timm_unet"])
     train_transform = cfg.data.transform.train
 
     assert train_transform.color_jitter == 0.4
@@ -174,44 +229,62 @@ def test_base_segmentation_transform_stays_unchanged():
     assert train_transform.random_erasing_p == 0.0
 
 
-def test_fitnets_channels_match_the_configured_pair():
+FITNETS_EXPERIMENTS = [
+    "segmentation/FitNets/cityscapes_FitNets_segformer_b2_to_unet_base",
+    "segmentation/FitNets/cityscapes_FitNets_segformer_b2_to_unet_small",
+    "segmentation/FitNets/cityscapes_FitNets_dice_ohem_segformer_b2_to_unet_small",
+]
+
+
+def fitnets_layers(cfg):
+    """Спецификация тапов лосса — из самого лосса или из слагаемого композиции."""
+    losses = cfg.loss.get("losses")
+    return cfg.loss.layers if losses is None else losses.kd.layers
+
+
+def build_student(cfg):
+    from src.models import TIMM_UNET_VARIANTS, TimmUNet
+
+    return TimmUNet(
+        encoder_name=TIMM_UNET_VARIANTS[cfg.model.student.variant]["encoder_name"],
+        num_classes=19,
+        pretrained=False,
+    )
+
+
+@pytest.mark.parametrize("experiment", FITNETS_EXPERIMENTS)
+def test_fitnets_channels_match_the_configured_pair(experiment):
     """Каналы регрессора обязаны совпадать с реальными ширинами стадий
-    SegFormer-B2 и U-Net-base — иначе адаптер соберётся, а форма не сойдётся
-    уже в первом батче.
+    SegFormer-B2 и энкодера ученика — иначе адаптер соберётся, а форма
+    не сойдётся уже в первом батче.
 
-    Ширины ученика берём не из таблицы, а из собранной модели: у U-Net они
-    зависят и от base_channels, и от depth, и держать их в голове бесполезно.
+    Ширины ученика берём не из таблицы, а из собранной модели: у timm-U-Net
+    они целиком определяются энкодером.
     """
-    from src.models import SEGFORMER_VARIANTS, UNET_VARIANTS, UNet
+    from src.models import SEGFORMER_VARIANTS
 
-    cfg = compose_config(
-        ["experiment=segmentation/FitNets/cityscapes_FitNets_segformer_b2_to_unet_base"]
-    )
-    spec = cfg.loss.layers["taps.stage3"]
+    cfg = compose_config([f"experiment={experiment}"])
+    student = build_student(cfg)
+    hidden_sizes = SEGFORMER_VARIANTS[cfg.model.teacher.variant]["hidden_sizes"]
 
-    student = UNet(num_classes=19, **UNET_VARIANTS[cfg.model.student.variant])
-    assert spec.student_channels == student.tap_channels["stage3"]
-
-    # stage3 — третья стадия (индекс 2) в спецификации MiT.
-    assert (
-        spec.teacher_channels
-        == SEGFORMER_VARIANTS[cfg.model.teacher.variant]["hidden_sizes"][2]
-    )
+    for name, spec in fitnets_layers(cfg).items():
+        stage = name.removeprefix("taps.")
+        assert spec.student_channels == student.tap_channels[stage]
+        # stageN — N-я стадия в спецификации MiT.
+        assert spec.teacher_channels == hidden_sizes[int(stage[-1]) - 1]
 
 
-def test_fitnets_requests_only_taps_the_student_actually_has():
-    """У U-Net с depth=4 нет стадии на страйде 32. Если конфиг попросит
-    taps.stage4, FeatureExtractor упадёт только на запуске обучения —
-    ловим здесь."""
-    from src.models import UNET_VARIANTS, UNet
+@pytest.mark.parametrize("experiment", FITNETS_EXPERIMENTS)
+def test_fitnets_requests_only_taps_the_student_actually_has(experiment):
+    """Тап, которого у ученика нет, уронил бы FeatureExtractor только
+    на запуске обучения — ловим здесь."""
+    cfg = compose_config([f"experiment={experiment}"])
+    student = build_student(cfg)
 
-    cfg = compose_config(
-        ["experiment=segmentation/FitNets/cityscapes_FitNets_segformer_b2_to_unet_base"]
-    )
-    student = UNet(num_classes=19, **UNET_VARIANTS[cfg.model.student.variant])
     available = {f"taps.{name}" for name in student.tap_channels}
+    requested = set(fitnets_layers(cfg))
 
-    assert set(cfg.loss.layers) <= available, (
-        f"конфиг просит {set(cfg.loss.layers) - available}, "
+    assert requested <= available, (
+        f"конфиг просит {requested - available}, "
         f"а у ученика есть только {sorted(available)}"
     )

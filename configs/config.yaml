@@ -28,7 +28,21 @@ deterministic_warn_only: false # лучше держать false
 device: auto  # auto | cuda | cuda:N | cpu
 
 ckpt_path: null
-task_type: 'classification' # Доступны опции ['classification', 'detection', 'segmentation'] 
+task_type: 'classification' # Доступны опции ['classification', 'detection', 'segmentation']
+
+model:
+  # Мультимасштабный прогон УЧИТЕЛЯ (только сегментация): таргеты считаются
+  # усреднением предсказаний по нескольким масштабам и отражению. null —
+  # обычный одиночный forward. Стоит по лишнему прогону учителя на масштаб.
+  #   teacher_inference: {scales: [0.75, 1.0, 1.25], flip: true}
+  teacher_inference: null
+
+# Расписание весов слагаемых лосса по эпохам; null — веса постоянны.
+# Ключ — путь к весу внутри лосса, значение — правило (см.
+# src/training/loss_schedule.py):
+#   loss_schedule:
+#     hint_weight: {schedule: linear, start: 0.7, end: 0.0, start_epoch: 120}
+loss_schedule: null
 
 # Трекинг в ClearML
 # Выключен по умолчанию, чтобы тесты работали оффлайн

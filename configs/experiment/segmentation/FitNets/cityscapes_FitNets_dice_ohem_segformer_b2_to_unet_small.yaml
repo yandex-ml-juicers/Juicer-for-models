@@ -1,0 +1,107 @@
+# @package _global_
+# Тот же FitNets SegFormer-B2 -> timm-U-Net(efficientnet_b0), что и в
+# cityscapes_FitNets_segformer_b2_to_unet_small, но со всеми рычагами,
+# которые бьют по слабым местам этой пары:
+#
+#   1. лосс-композиция: hint + KD по логитам + (CE, Dice, OHEM) вместо
+#      одной CE. Dice и OHEM тянут редкие классы и трудные пиксели —
+#      именно там, где ученик проседает по per-class IoU;
+#   2. учитель не видит blur/erasing (teacher_skips в train-трансформе),
+#      поэтому регуляризацию можно держать включённой, не портя таргеты;
+#   3. таргеты учителя считаются мультимасштабно;
+#   4. дистилляционные слагаемые гаснут к концу обучения.
+#
+# Сравнивать имеет смысл с cityscapes_FitNets_segformer_b2_to_unet_small:
+# всё остальное (оптимизатор, расписание, батч, число эпох) совпадает.
+defaults:
+  - override /data/dataset: cityscapes_seg
+  - override /data/transform/train: cityscapes_seg_strong_transform_for_segmentation
+  - override /data/transform/eval: cityscapes_seg_transform
+  - override /model/teacher: segformer
+  - override /model/student: timm_unet
+  - override /loss: composite_fitnets_dice
+  - override /optimizer: adamw
+  - override /scheduler: warmup_cosine
+  - override /augment: cutmix_segmentation
+
+name: cityscapes_FitNets_dice_ohem_segformer_b2_to_unet_small
+device: cuda
+deterministic: false
+
+task_type: "segmentation"
+
+clearml:
+  enabled: True
+  tags: [cityscapes, KD, FitNets, Dice, OHEM, segformer-b2, unet-small, segmentation]
+  scalars: ['KL_divergence', 'agreement_rate']
+  plots:
+    enabled: true
+    every_n_epochs: 30
+  reuse_last_task_id: False
+  continue_last_task: False
+  output_uri: false
+
+trainer:
+  epochs: 200
+  amp: true
+  grad_clip_norm: 2.0
+
+# Композиция. Попиксельную классификацию берёт на себя ровно одно
+# слагаемое — OHEM (это и есть CE, только по трудным пикселям), поэтому
+# у kd и seg ce_weight обнулён. Dice остаётся чистым региональным членом.
+# Веса weights.* — то, что гасит планировщик ниже.
+loss:
+  losses:
+    kd:
+      ce_weight: 0.0
+      hint_weight: 1.0
+      logits_weight: 0.6
+      temperature: 1.0
+    seg:
+      ce_weight: 0.0
+      dice_weight: 1.0
+    hard:
+      _target_: src.losses.OhemCrossEntropy
+      thresh: 0.7
+      keep_ratio: 0.1
+      ignore_index: ${data.dataset.ignore_index}
+  weights:
+    kd: 0.7
+    seg: 0.3
+    hard: 0.3
+
+# Дистилляция гаснет к концу, а сегментационные слагаемые набирают вес.
+loss_schedule:
+  weights.kd: {schedule: cosine, start: 0.7, end: 0.0, start_epoch: 120}
+  weights.seg: {schedule: cosine, start: 0.3, end: 0.7, start_epoch: 120}
+  weights.hard: {schedule: cosine, start: 0.3, end: 0.7, start_epoch: 120}
+
+optimizer:
+  lr: 1.0e-3
+  weight_decay: 3.0e-2
+
+scheduler:
+  warmup_epochs: 30
+  eta_min: 0.3e-3
+
+data:
+  loader:
+    batch_size: 16
+    eval_batch_size: 8
+    num_workers: 16
+    pin_memory: true
+    persistent_workers: true
+
+model:
+  student:
+    variant: efficientnet_b0
+    pretrained: true
+    dropout: 0.1
+  teacher:
+    variant: b2
+    pretrained: cityscapes
+    checkpoint_path: null
+  # Шесть прогонов учителя вместо одного — эпоха дольше, таргеты чище.
+  teacher_inference:
+    scales: [0.75, 1.0, 1.25]
+    flip: true

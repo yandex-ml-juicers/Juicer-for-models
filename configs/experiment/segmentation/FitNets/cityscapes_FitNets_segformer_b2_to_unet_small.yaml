@@ -1,0 +1,91 @@
+# @package _global_
+# FitNets hint loss (arXiv:1412.6550): SegFormer-B2 -> U-Net-base.
+# Единственный из четырёх методов, который дистиллирует не выход, а
+# промежуточные признаки — и единственный, у которого есть обучаемые
+# параметры (регрессор 1x1 внутри лосса; train.py кладёт их в optimizer).
+#
+# Бейзлайн для этого прогона — scratch/cityscapes_scratch_unet_base.
+defaults:
+  - override /data/dataset: cityscapes_seg
+  - override /data/transform/train: cityscapes_seg_strong_transform_for_segmentation
+  - override /data/transform/eval: cityscapes_seg_transform
+  - override /model/teacher: segformer
+  - override /model/student: timm_unet
+  - override /loss: fitnets
+  - override /optimizer: adamw
+  - override /scheduler: warmup_cosine
+  - override /augment: cutmix_segmentation
+
+name: cityscapes_FitNets_segformer_b2_to_unet_small
+device: cuda
+deterministic: false
+
+task_type: "segmentation"
+
+clearml:
+  enabled: True
+  tags: [cityscapes, KD, FitNets, segformer-b2, unet-small, segmentation]
+  # Схожесть ученика с учителем по пикселям: KL и доля совпавших argmax'ов.
+  # Считаются по подвыборке пикселей на probe-батчах, цена — доли процента эпохи.
+  scalars: ['KL_divergence', 'agreement_rate']
+  plots:
+    enabled: true
+    every_n_epochs: 30
+  reuse_last_task_id: False
+  continue_last_task: False
+  output_uri: false
+
+trainer:
+  epochs: 200
+  amp: true
+  grad_clip_norm: 2.0
+
+loss:
+  ce_weight: 0.3
+  hint_weight: 0.7
+  logits_weight: 0.6
+  temperature: 1.0
+  # У предобученного энкодера есть стадия на страйде 32, поэтому доступен
+  # и stage4 — в отличие от classic U-Net с depth=4.
+  layers:
+    taps.stage3: { student_channels: 112, teacher_channels: 320, weight: 1.0 }
+    taps.stage4: { student_channels: 320, teacher_channels: 512, weight: 0.6 }
+
+optimizer:
+  lr: 1.0e-3
+  weight_decay: 3.0e-2
+
+scheduler:
+  warmup_epochs: 30
+  eta_min: 0.3e-3
+
+data:
+  loader:
+    batch_size: 16
+    eval_batch_size: 8
+    num_workers: 16
+    pin_memory: true
+    persistent_workers: true
+
+model:
+  student:
+    variant: efficientnet_b0
+    pretrained: true
+    dropout: 0.1
+  teacher:
+    variant: b2
+    pretrained: cityscapes
+    checkpoint_path: null
+  # Мультимасштабные таргеты учителя. Стоят по одному лишнему forward'у
+  # учителя на каждый (масштаб x отражение), то есть здесь шесть вместо
+  # одного — эпоха заметно длиннее. Включать, когда время на это есть:
+  # teacher_inference: {scales: [0.75, 1.0, 1.25], flip: true}
+  teacher_inference: null
+
+# Дистилляция полезна, пока ученик слабее учителя, и мешает, когда он уже
+# у своего потолка: последние эпохи он подгоняется под ОШИБКИ учителя.
+# Поэтому hint гасится к концу, а CE ровно настолько же набирает вес.
+loss_schedule:
+  hint_weight: {schedule: cosine, start: 0.7, end: 0.0, start_epoch: 120}
+  logits_weight: {schedule: cosine, start: 0.6, end: 0.0, start_epoch: 120}
+  ce_weight: {schedule: cosine, start: 0.3, end: 1.0, start_epoch: 120}
