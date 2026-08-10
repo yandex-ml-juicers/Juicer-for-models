@@ -15,6 +15,7 @@ from PIL import Image
 
 import torch
 import torchvision
+from torch import Tensor
 from torch.utils.data import Dataset
 from torchvision.datasets import CocoDetection
 from torchvision.transforms.functional import pil_to_tensor
@@ -58,6 +59,45 @@ class HFImageNet(Dataset):
             image = self.transform(image)
 
         return image, label
+
+def get_raw_item(
+    dataset,
+    index: int
+) -> tuple[Image.Image, dict[str, Tensor]]:
+    image, annotations = CocoDetection.__getitem__(dataset, index)
+
+    image_id = dataset.ids[index]
+    image_width, image_height = image.size
+
+    boxes = []
+    labels = []
+    areas = []
+    crowds = []
+
+    for annotation in annotations:
+        x, y, width, height = annotation["bbox"]
+
+        boxes.append([x, y, x + width, y + height])
+        labels.append(dataset.category_id_to_label[annotation["category_id"]])
+        areas.append(annotation.get("area", width * height))
+        crowds.append(annotation.get("iscrowd", 0))
+
+    boxes = (
+        torch.tensor(boxes, dtype=torch.float32)
+        if boxes
+        else torch.empty((0, 4), dtype=torch.float32)
+    )
+
+    target = {
+        "boxes": boxes,
+        "labels": torch.tensor(labels, dtype=torch.long),
+        "area": torch.tensor(areas, dtype=torch.float32),
+        "iscrowd": torch.tensor(crowds, dtype=torch.long),
+        "image_id": torch.tensor(image_id, dtype=torch.long),
+        "size": torch.tensor([image_height, image_width], dtype=torch.int64),
+    }
+
+    return image, target
 
 class CityscapesDetection(CocoDetection):
     def __init__(

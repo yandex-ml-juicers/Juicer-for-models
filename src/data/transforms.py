@@ -2,7 +2,9 @@
 
 from collections.abc import Sequence
 from torchvision import transforms
+
 from src.utils import detection_transforms, segmentation_transforms
+from src.data.datasets import get_raw_item
 
 
 def base_transform(
@@ -116,14 +118,14 @@ def build_base_transform_for_cityscapes(
     std: Sequence[float],
     train: bool = True,
     image_size: tuple[int, int] | None = None,
-) -> transforms.Compose:
+) -> detection_transforms.DetectionCompose:
     ops: list = []
     if train:
         ops.append(
                 detection_transforms.DetectionRandomResizedCrop(
                     size=image_size,
                     scale=(0.6, 1.0),
-                    ratio=(0.8, 1.25),
+                    ratio=(1.7, 2.3),
                 )
             )
         ops.append(detection_transforms.DetectionColorJitter(
@@ -145,6 +147,64 @@ def build_base_transform_for_cityscapes(
 
     ops.append(detection_transforms.DetectionToTensor())
     ops.append(detection_transforms.DetectionNormalize(mean, std))
+    return detection_transforms.DetectionCompose(ops)
+
+def build_transforms_for_yolo(
+    mean: Sequence[float],
+    std: Sequence[float],
+    train: bool = True,
+    image_size: tuple[int, int] | None = None,
+    dataset_size: int | None = None,
+) -> detection_transforms.DetectionCompose:
+    ops: list = []
+
+    if train:
+        # if dataset_size is not None:
+        #     ops.append(
+        #         detection_transforms.DetectionRandomMosaic(
+        #             sample_getter=get_raw_item,
+        #             dataset_size=dataset_size,
+        #             p=1.0,
+        #         )
+        #     )
+
+        ops.append(detection_transforms.DetectionRandomTranslation(translate=0.1, p=1.0))
+        ops.append(detection_transforms.DetectionRandomScale(scale=0.5, p=1.0))
+        ops.append(detection_transforms.DetectionRandomHorizontalFlip(p=0.5))
+        ops.append(detection_transforms.DetectionRandomHSV(hgain=0.015, sgain=0.7, vgain=0.4, p=1.0))
+
+        ops.append(
+            detection_transforms.DetectionRandomResizedCrop(
+                size=image_size,
+                scale=(0.6, 1.0),
+                ratio=(0.8, 1.25),
+            )
+        )
+
+        ops.append(
+            detection_transforms.DetectionColorJitter(
+                brightness=0.2,
+                contrast=0.2,
+                saturation=0.2,
+                hue=0.05,
+            )
+        )
+
+        ops.append(
+            detection_transforms.DetectionGaussianBlur(
+                kernel_size=5,
+                sigma=(0.1, 2.0),
+                p=0.2,
+            )
+        )
+
+    else:
+        if image_size is not None:
+            ops.append(detection_transforms.DetectionResize(image_size))
+
+    ops.append(detection_transforms.DetectionToTensor())
+    ops.append(detection_transforms.DetectionNormalize(mean, std))
+
     return detection_transforms.DetectionCompose(ops)
 
 def build_segmentation_transform_train(
