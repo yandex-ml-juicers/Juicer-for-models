@@ -1,0 +1,6 @@
+_target_: src.data.transforms.build_transforms_for_yolo
+mean: ${data.dataset.normalize.mean}
+std: ${data.dataset.normalize.std}
+train: False
+image_size: ${data.dataset.image_size}
+dataset_size: 2975
