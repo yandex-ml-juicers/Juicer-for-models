@@ -64,6 +64,99 @@ class SegmentationCompose:
         return image, mask
 
 
+class StudentOnly:
+    """Маркер: трансформ применяется только к виду УЧЕНИКА.
+
+    Сам по себе ничего не меняет — просто прозрачно вызывает обёрнутый
+    трансформ, поэтому один и тот же список операций годится и для обычного
+    SegmentationCompose (там маркер незаметен), и для
+    SegmentationTeacherViewCompose, который по нему и разводит два вида.
+    """
+
+    def __init__(self, transform: Callable) -> None:
+        self.transform = transform
+
+    def __call__(
+        self,
+        image: Image.Image | Tensor,
+        mask: Tensor,
+    ) -> tuple[Image.Image | Tensor, Tensor]:
+        return self.transform(image, mask)
+
+
+class SegmentationTeacherViewCompose:
+    """Композиция, отдающая ДВА вида одного кадра: (ученик, учитель, маска).
+
+    Зачем. Учитель дистилляции предобучен на чистых кадрах Cityscapes, и на
+    агрессивных фотометрических аугментациях (размытие, стирание) его
+    предсказание разваливается — то есть ученику дистиллируется шум. При этом
+    сами аугментации ученику полезны. Разрешение противоречия стандартное для
+    полу-supervised сегментации (FixMatch и его наследники): ученик учится на
+    СИЛЬНО аугментированном кадре, а таргет берётся с кадра, аугментированного
+    СЛАБО.
+
+    Геометрия (масштаб, кроп, отражение) применяется к обоим видам ДО
+    ветвления, поэтому пиксель (y, x) означает одно и то же на обоих видах и
+    в маске: и логиты учителя, и его карты признаков остаются выровненными
+    с ученическими. Расходятся виды только в том, что помечено StudentOnly.
+
+    Инвариант, который проверяется в конструкторе: после первой StudentOnly
+    операции все ОБЩИЕ операции обязаны быть детерминированными. Иначе
+    случайную операцию пришлось бы применять к двум видам двумя независимыми
+    бросками, и виды разъехались бы там, где обязаны совпадать.
+    """
+
+    # Общие операции, допустимые после ветвления: у них нет случайности,
+    # поэтому оба вида проходят их одинаково.
+    DETERMINISTIC: tuple[type, ...] = ()  # заполняется ниже, после определения классов
+
+    def __init__(
+        self,
+        transforms: Sequence[Callable],
+    ) -> None:
+        self.transforms = list(transforms)
+
+        branched = False
+        for transform in self.transforms:
+            if isinstance(transform, StudentOnly):
+                branched = True
+            elif branched and not isinstance(transform, self.DETERMINISTIC):
+                raise ValueError(
+                    f"{type(transform).__name__} стоит после аугментации, которую видит "
+                    f"только ученик, но применяется к обоим видам. Случайную операцию "
+                    f"здесь применить одинаково к двум видам нельзя — перенесите её "
+                    f"выше по пайплайну или пометьте StudentOnly."
+                )
+
+        if not branched:
+            raise ValueError(
+                "Ни одна операция не помечена StudentOnly: вид учителя совпал бы "
+                "с видом ученика. Используйте обычный SegmentationCompose."
+            )
+
+    def __call__(
+        self,
+        image: Image.Image | Tensor,
+        mask: Tensor,
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        # Вид учителя отделяется в момент первой StudentOnly операции. Копия
+        # не нужна: все трансформы возвращают новый объект, а не меняют вход.
+        teacher_image: Image.Image | Tensor | None = None
+
+        for transform in self.transforms:
+            if isinstance(transform, StudentOnly):
+                if teacher_image is None:
+                    teacher_image = image
+                image, mask = transform(image, mask)
+                continue
+
+            image, mask = transform(image, mask)
+            if teacher_image is not None:
+                teacher_image, _ = transform(teacher_image, mask)
+
+        return image, teacher_image, mask
+
+
 class SegmentationRandomScale:
     """Случайный масштаб из scale_range — базовая аугментация Cityscapes.
 
@@ -466,3 +559,13 @@ class SegmentationNormalize:
         mask: Tensor,
     ) -> tuple[Tensor, Tensor]:
         return F.normalize(image, mean=self.mean, std=self.std), mask
+
+
+# Заполняется здесь, а не в теле класса: перечисленные трансформы объявлены
+# ниже него. Это ровно те операции без случайности, которые обоим видам кадра
+# (ученика и учителя) можно применить по отдельности с одним и тем же итогом.
+SegmentationTeacherViewCompose.DETERMINISTIC = (
+    SegmentationResize,
+    SegmentationToTensor,
+    SegmentationNormalize,
+)
