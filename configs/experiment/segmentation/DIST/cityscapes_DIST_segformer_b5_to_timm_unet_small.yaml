@@ -7,17 +7,16 @@
 # Бейзлайн для этого прогона — scratch/cityscapes_scratch_unet_base.
 defaults:
   - override /data/dataset: cityscapes_seg
-  - override /data/transform/train: cityscapes_seg_strong_transform
+  - override /data/transform/train: cityscapes_seg_strong_transform_for_segmentation
   - override /data/transform/eval: cityscapes_seg_transform
   - override /model/teacher: segformer
   - override /model/student: timm_unet
-  - override /loss: dist
+  - override /loss: composite_dist_dice
   - override /optimizer: adamw
   - override /scheduler: warmup_cosine
   - override /augment: cutmix_segmentation
-  - override /distributed: sync_bn
 
-name: cityscapes_DIST_segformer_b5_to_timm_unet_base
+name: cityscapes_DIST_segformer_b5_to_timm_unet_small
 device: cuda
 deterministic: false
 
@@ -31,30 +30,48 @@ clearml:
   scalars: ['KL_divergence', 'agreement_rate']
   plots:
     enabled: true
-    every_n_epochs: 20
+    every_n_epochs: 10
   reuse_last_task_id: True
   continue_last_task: False
   output_uri: false
 
 trainer:
-  epochs: 150
+  epochs: 200
   amp: true
-  grad_clip_norm: 1.0
+  grad_clip_norm: 2.5
 
 loss:
-  temperature: 4.0
-  ce_weight: 1.0
-  beta: 1.0
-  gamma: 1.0
-  spatial_stride: 2
+  losses:
+    dist:
+      temperature: 1.0
+      ce_weight: 0.0
+      beta: 1.5    # вес межклассового члена
+      gamma: 1.0   # вес внутриклассового члена
+    seg:
+      ce_weight: 0.0
+      dice_weight: 1.0
+    hard:
+      _target_: src.losses.OhemCrossEntropy
+      thresh: 0.7
+      keep_ratio: 0.1
+      ignore_index: ${data.dataset.ignore_index}
+  weights:
+    dist: 1.0
+    seg: 0.3
+    hard: 0.2
+
+loss_schedule:
+  weights.dist: {schedule: cosine, start: 1.0, end: 0.0, start_epoch: 120}
+  weights.seg: {schedule: cosine, start: 0.3, end: 0.7, start_epoch: 120}
+  weights.hard: {schedule: cosine, start: 0.2, end: 0.5, start_epoch: 120}
 
 optimizer:
-  lr: 3.25e-4
+  lr: 5.0e-4
   weight_decay: 3.0e-2
 
 scheduler:
-  warmup_epochs: 10
-  eta_min: 1.0e-6
+  warmup_epochs: 30
+  eta_min: 1.0e-4
 
 data:
   loader:
@@ -66,10 +83,13 @@ data:
 
 model:
   student:
-    variant: efficientnetv2_b2
+    variant: efficientnet_b0
     pretrained: true
     dropout: 0.1
   teacher:
     variant: b5
     pretrained: cityscapes
     checkpoint_path: null
+#  teacher_inference:
+#    scales: [1.0, 1.25]
+#    flip: true
