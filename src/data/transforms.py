@@ -130,3 +130,24 @@ def build_base_transform_for_cityscapes(
 #     std: Sequence[float],
 #     image_size: tuple[int, int] | None = None,
 # ) -> transforms.Compose:
+
+def build_train_transform_for_cityscapes(
+    mean: Sequence[float],
+    std: Sequence[float],
+    image_size: tuple[int, int] | None = None,
+    flip_prob: float = 0.5,
+) -> detection_transforms.DetectionCompose:
+    ops: list = []
+    
+    # Сначала ресайз (чтобы все картинки были одного размера)
+    if image_size is not None:
+        ops.append(detection_transforms.DetectionResize(image_size))
+        
+    # Затем случайное отражение
+    ops.append(detection_transforms.DetectionHorizontalFlip(p=flip_prob))
+    
+    # В конце перевод в тензор и нормализация
+    ops.append(detection_transforms.DetectionToTensor())
+    ops.append(detection_transforms.DetectionNormalize(mean, std))
+    
+    return detection_transforms.DetectionCompose(ops)
