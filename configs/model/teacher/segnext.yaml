@@ -1,0 +1,28 @@
+# SegNeXt в роли замороженного учителя (этап дистилляции).
+#
+# ВЕСА НА CITYSCAPES НУЖНО СКАЧАТЬ РУКАМИ. Автоматической ссылки нет:
+# OpenMMLab выложил SegNeXt только на ADE20K, а cityscapes-чекпоинты авторов
+# лежат на TsingHua Cloud (таблица Cityscapes в README
+# github.com/Visual-Attention-Network/SegNeXt; mIoU 79.8 / 81.3 / 82.6 / 83.2
+# для T / S / B / L при одном масштабе). Скачанный .pth кладётся, например,
+# в data/weights/segnext/ и указывается в checkpoint_path — переименовывать
+# ключи не нужно, конвертер понимает и mmsegmentation, и оригинальный репозиторий.
+#
+# Второй способ, не требующий чужих файлов: обучить SegNeXt самим
+# (тот же конфиг в слоте student, pretrained: imagenet) и подставить сюда
+# best.pt нашего тренера.
+_target_: src.models.factory.segnext_for_segmentation
+variant: t   # t (4M) | s (14M) | b (28M) | l (49M)
+
+num_classes: ${data.dataset.num_classes}
+# Для учителя веса приходят из checkpoint_path; imagenet — только энкодер.
+pretrained: null
+align_corners: false
+
+# Учитель заморожен и всегда в eval, поэтому регуляризация на нём не
+# срабатывает. Ключи оставлены для симметрии со слотом student.
+drop_path_rate: null
+dropout: 0.0
+
+checkpoint_path: null
+weights_dir: data/weights
