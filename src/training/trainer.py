@@ -8,10 +8,16 @@
 """
 
 import time
+import random
 from types import SimpleNamespace
 from collections import defaultdict
 from collections.abc import Callable, Sequence
 from pathlib import Path
+
+from scipy.optimize import linear_sum_assignment
+
+import matplotlib.pyplot as plt
+from matplotlib.patches import Rectangle
 
 import torch
 import torch.nn.functional as F
@@ -19,7 +25,7 @@ from torch import Tensor, nn
 from torch.utils.data import DataLoader
 from torch.amp.grad_scaler import GradScaler
 from torchmetrics.detection.mean_ap import MeanAveragePrecision
-from torchvision.ops import box_convert
+from torchvision.ops import box_convert, generalized_box_iou
 
 from tqdm import tqdm
 
@@ -28,6 +34,7 @@ from src.models.feature_extractor import FeatureExtractor
 from src.utils.logger import MetricsHistory, get_logger
 from src.utils.metrics import AverageMeter, accuracy, ConfusionMatrixAccumulator, IoUAccumulator, count_parameters, build_param_table
 from src.utils.prepare_targets import prepare_targets
+from src.utils.detection_visualization import visualize_detection
 
 log = get_logger(__name__)
 
@@ -392,7 +399,10 @@ def detection_evaluate(
 
         targets_device = prepare_targets(targets, device, targers_mode)
 
-        outputs = model(pixel_values=images, labels=targets_device)
+        if targers_mode == "lw-detr-small":
+            outputs = model(pixel_values=images, labels=targets_device)
+        else:
+            outputs = model(images)
         losses = criterion(outputs, teacher_outputs=None, labels=targets_device)
 
         batch_size = len(images)
@@ -429,10 +439,7 @@ def detection_evaluate(
 
             targets_for_metric.append(metric_target)
 
-        metric.update(
-            predictions_for_metric,
-            targets_for_metric,
-        )
+        metric.update(predictions_for_metric, targets_for_metric)
 
     computed_metrics = metric.compute()
 
@@ -473,11 +480,11 @@ class DetectionTrainer:
         save_best: bool = True,
         save_last: bool = True,
         progress_bar: bool = True,
-        metrics_callback: tuple[Callable, Callable, Callable] | None = None,
+        metrics_callback: tuple[Callable, ...] | None = None,
         scalars: dict[str, float | int | str],
         prediction_postprocessor: Callable | None = None,
         label_offset: int = 1,
-        targers_mode: str | None = None
+        targers_mode: str | None = None,
     ) -> None:
 
         if criterion.requires_teacher and teacher is None:
@@ -513,6 +520,8 @@ class DetectionTrainer:
         self.metrics_callback_scalar = metrics_callback[0] if metrics_callback is not None else None
         self.metrics_callback_single = metrics_callback[1] if metrics_callback is not None else None
         self.metrics_callback_table = metrics_callback[2] if metrics_callback is not None else None
+        self.metrics_callback_debug = metrics_callback[3] if metrics_callback is not None and len(metrics_callback) > 3 else None
+
         self.scalars = scalars
 
         self.amp_enabled = amp and device.type == "cuda"
@@ -568,6 +577,8 @@ class DetectionTrainer:
                     limit_batches=self.limit_eval_batches,
                     targers_mode=self.targers_mode
                 )
+
+                self._report_detection_samples(epoch)
 
                 if self.scheduler is not None:
                     self.scheduler.step()
@@ -636,6 +647,9 @@ class DetectionTrainer:
         max_grad_norm = -1.0
         max_weight_norm = -1.0
 
+        agreement_correct = 0
+        agreement_total = 0
+
         meters_avg: dict[str, AverageMeter] = defaultdict(AverageMeter)
         meters_avg_loss: dict[str, AverageMeter] = defaultdict(AverageMeter)
         meters_other: dict[str, float | int | str] = {}
@@ -665,19 +679,22 @@ class DetectionTrainer:
             if self.teacher_extractor is not None:
                 self.teacher_extractor.clear()
 
+            if isinstance(images, (list, tuple)):
+                images = torch.stack(images, dim=0)
+
             teacher_outputs = None
             if self.teacher is not None:
                 with torch.no_grad(), torch.autocast(self.device.type, enabled=self.amp_enabled):
                     teacher_outputs = self.teacher(images)
 
             with torch.autocast(self.device.type, enabled=self.amp_enabled):
-                if isinstance(images, (list, tuple)):
-                    images = torch.stack(images, dim=0)
-
                 if self.teacher is not None:
                     student_outputs = self.student(images)
                 else:
-                    student_outputs = self.student(pixel_values=images, labels=targets)
+                    if self.targers_mode == "lw-detr-small":
+                        student_outputs = self.student(pixel_values=images, labels=targets)
+                    else:
+                        student_outputs = self.student(images)
 
                 losses = self.criterion(
                     student_outputs,
@@ -691,13 +708,6 @@ class DetectionTrainer:
                     ),
                 )
 
-            self._update_detection_meters_map(
-                metric=meters_map,
-                student_outputs=student_outputs,
-                images=images,
-                targets=targets_for_meters_map,
-            )
-
             self.scaler.scale(losses["total"]).backward()
             self.scaler.unscale_(self.optimizer)
 
@@ -708,15 +718,29 @@ class DetectionTrainer:
             self.scaler.step(self.optimizer)
             self.scaler.update()
 
+            if step % 5 == 0:
+                self._update_detection_meters_map(
+                    metric=meters_map,
+                    student_outputs=student_outputs,
+                    images=images,
+                    targets=targets_for_meters_map,
+                )
+
             grad_norm_value = float(grad_norm)
             meters_avg["avg_grad_norm"].update(grad_norm_value, n=1)
             max_grad_norm = max(max_grad_norm, grad_norm_value)
 
-            with torch.no_grad():
-                weight_norm = torch.norm(torch.stack([p.detach().norm() for p in params]))
-            weight_norm_value = float(weight_norm)
-            meters_avg["avg_weight_norm"].update(weight_norm_value, n=1)
-            max_weight_norm = max(max_weight_norm, weight_norm_value)
+            if self.teacher is not None:
+                correct, total = self._detection_agreement_rate(student_outputs, teacher_outputs, num_classes=8, teacher_topk=100, student_topk=1000)
+                agreement_correct += correct
+                agreement_total += total
+
+            if step % 50 == 0:
+                with torch.no_grad():
+                    weight_norm = torch.norm(torch.stack([p.detach().norm() for p in params]))
+                weight_norm_value = float(weight_norm)
+                meters_avg["avg_weight_norm"].update(weight_norm_value, n=1)
+                max_weight_norm = max(max_weight_norm, weight_norm_value)
 
             for key, value in losses.items():
                 meters_avg_loss[key].update(value.item(), batch_size)
@@ -728,6 +752,9 @@ class DetectionTrainer:
         train_loss_components = {key: meter.avg for key, meter in meters_avg_loss.items()}
         meters_other["max_grad_norm"] = max_grad_norm
         meters_other["max_weight_norm"] = max_weight_norm
+
+        if self.teacher is not None:
+            agreement_rate = agreement_correct / max(agreement_total, 1)
 
         other_train_metrics = {
             **{
@@ -743,6 +770,9 @@ class DetectionTrainer:
             "mar_100": computed_meters_map["mar_100"].item(),
         }
 
+        if self.teacher is not None:
+            other_train_metrics["agreement_rate"] = agreement_rate
+
         return train_loss_components, other_train_metrics
 
     def _update_detection_meters_map(
@@ -753,7 +783,6 @@ class DetectionTrainer:
         targets,
     ) -> None:
         with torch.no_grad():
-            outputs_for_metric = student_outputs
 
             # LW-DETR использует несколько query-групп во время train.
             # Для метрики берем только первую группу, как при inference.
@@ -767,9 +796,20 @@ class DetectionTrainer:
             ):
                 num_queries = config.num_queries
 
-                outputs_for_metric = SimpleNamespace(
-                    logits=student_outputs.logits[:, :num_queries].detach(),
-                    pred_boxes=student_outputs.pred_boxes[:, :num_queries].detach(),
+                logits = student_outputs.logits[:, :num_queries]
+                pred_boxes = student_outputs.pred_boxes[:, :num_queries]
+
+                query_scores = logits.sigmoid().amax(dim=-1)
+
+                top_k = min(100, logits.shape[1])
+                topk_indices = torch.topk(query_scores, k=top_k, dim=1).indices
+                logits = torch.gather(logits, dim=1, index=topk_indices.unsqueeze(-1).expand(-1, -1, logits.shape[-1]))
+
+                pred_boxes = torch.gather(pred_boxes, dim=1, index=topk_indices.unsqueeze(-1).expand(-1, -1, 4))
+
+                student_outputs = SimpleNamespace(
+                    logits=logits.detach(),
+                    pred_boxes=pred_boxes.detach(),
                 )
 
             if self.prediction_postprocessor is not None:
@@ -812,6 +852,113 @@ class DetectionTrainer:
                 targets_metric.append(metric_target)
 
             metric.update(predictions_metric, targets_metric)
+
+    @torch.no_grad()
+    def _detection_agreement_rate(self, student_outputs, teacher_outputs, num_classes: int, teacher_topk: int=100, student_topk: int=1000) -> tuple[int, int]:
+        student_logits = student_outputs["kd_logits"]
+        student_boxes = student_outputs["kd_boxes"]
+        teacher_logits = teacher_outputs.logits
+        teacher_boxes = teacher_outputs.pred_boxes
+
+        if student_logits.shape[-1] != num_classes and student_logits.shape[1] == num_classes:
+            student_logits = student_logits.transpose(1, 2)
+
+        if student_boxes.shape[-1] != 4 and student_boxes.shape[1] == 4:
+            student_boxes = student_boxes.transpose(1, 2)
+
+        student_probs = torch.sigmoid(student_logits[..., :num_classes])
+        teacher_probs = F.softmax(teacher_logits, dim=-1)[..., :num_classes]
+
+        correct = 0
+        total = 0
+
+        for batch_idx in range(student_logits.shape[0]):
+            student_scores = student_probs[batch_idx].max(dim=-1).values
+            teacher_scores = teacher_probs[batch_idx].max(dim=-1).values
+
+            student_idx = torch.topk(student_scores, k=min(student_topk, student_scores.numel()), sorted=False).indices
+            teacher_idx = torch.topk(teacher_scores, k=min(teacher_topk, teacher_scores.numel()), sorted=False).indices
+
+            if student_idx.numel() == 0 or teacher_idx.numel() == 0:
+                continue
+
+            sp = student_probs[batch_idx, student_idx]
+            tp = teacher_probs[batch_idx, teacher_idx]
+            sb = student_boxes[batch_idx, student_idx]
+            tb = teacher_boxes[batch_idx, teacher_idx]
+
+            teacher_soft = tp[:, None, :]
+            student_soft = sp[None, :, :].clamp(1e-6, 1.0 - 1e-6)
+
+            cls_cost = -(teacher_soft * torch.log(student_soft) + (1.0 - teacher_soft) * torch.log(1.0 - student_soft)).mean(dim=-1)
+            l1_cost = torch.cdist(tb, sb, p=1)
+            giou_cost = -generalized_box_iou(self._cxcywh_to_xyxy(tb), self._cxcywh_to_xyxy(sb))
+
+            cost = cls_cost + 5.0 * l1_cost + 2.0 * giou_cost
+
+            teacher_match, student_match = linear_sum_assignment(cost.cpu().numpy())
+
+            teacher_match = torch.as_tensor(teacher_match, device=teacher_logits.device)
+            student_match = torch.as_tensor(student_match, device=student_logits.device)
+
+            matched_teacher_classes = tp[teacher_match].argmax(dim=-1)
+            matched_student_classes = sp[student_match].argmax(dim=-1)
+
+            correct += (matched_teacher_classes == matched_student_classes).sum().item()
+            total += matched_teacher_classes.numel()
+
+        return correct, total
+
+
+    def _cxcywh_to_xyxy(self, boxes: torch.Tensor) -> torch.Tensor:
+        cx, cy, w, h = boxes.unbind(-1)
+        return torch.stack((cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2), dim=-1)
+
+    @torch.no_grad()
+    def _report_detection_samples(self, epoch: int) -> None:
+
+        if self.metrics_callback_debug is None:
+            return
+        if epoch % 5 != 0:
+            return
+
+        dataset = self.eval_loader.dataset
+        indices = random.sample(range(len(dataset)), k=min(4, len(dataset)))
+
+        samples = [dataset[i] for i in indices]
+
+        images_cpu = [image for image, _ in samples]
+        targets = [target for _, target in samples]
+
+        images = torch.stack([image.to(self.device) for image in images_cpu])
+
+        was_training = self.student.training
+        self.student.eval()
+        
+        outputs = self.student(images)
+
+        if self.prediction_postprocessor is not None:
+            predictions = self.prediction_postprocessor(outputs, images)
+        else:
+            predictions = outputs
+
+        for number, (image, target, prediction) in enumerate(zip(images_cpu, targets, predictions)):
+            debug_image = visualize_detection(
+                image=image,
+                target=target,
+                prediction=prediction,
+                label_to_name=dataset.label_to_name,
+                score_threshold=0.3,
+            )
+
+            self.metrics_callback_debug(
+                image=debug_image,
+                series=f"sample_{number}",
+                iteration=epoch,
+            )
+
+        if was_training:
+            self.student.train()
 
     def _save_checkpoint(
         self,

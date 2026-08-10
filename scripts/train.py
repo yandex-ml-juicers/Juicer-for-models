@@ -14,7 +14,7 @@ from omegaconf import DictConfig, OmegaConf
 
 from src.data import base_loader
 from src.training import Trainer, DetectionTrainer, SegmentationTrainer
-from src.utils import resolve_device, seed_everything, prediction_postprocessor
+from src.utils import resolve_device, seed_everything
 
 log = logging.getLogger(__name__)
 
@@ -62,6 +62,7 @@ def clearml_reporter(task):
             logger.report_scalar(title="F1", series="train", value=row["train_F1"], iteration=iterate)
         if "train_KL_divergence" in row.keys():
             logger.report_scalar(title="KL", series="train_KL", value=row["train_KL_divergence"], iteration=iterate)
+        if "train_agreement_rate" in row.keys():
             logger.report_scalar(title="agreement_rate", series="train_agreement_rate", value=row["train_agreement_rate"], iteration=iterate)
         logger.report_scalar(title="grad_norm", series="train_avg_grad_norm", value=row["train_avg_grad_norm"], iteration=iterate)
         logger.report_scalar(title="grad_norm", series="train_max_grad_norm", value=row["train_max_grad_norm"], iteration=iterate)
@@ -141,7 +142,27 @@ def clearml_reporter(task):
             table_plot=df,
         )
 
-    return report_scalar, report_single, report_table
+    def report_debug_sample(
+        image,
+        series: str,
+        iteration: int,
+    ) -> None:
+        image = image.detach().cpu()
+
+        mean = torch.tensor([0.485, 0.456, 0.406], dtype=image.dtype).view(3, 1, 1)
+        std = torch.tensor([0.229, 0.224, 0.225], dtype=image.dtype).view(3, 1, 1)
+
+        image = image * std + mean
+        image = image.clamp(0.0, 1.0)
+
+        logger.report_image(
+            title="Validation Detection",
+            series=series,
+            iteration=iteration,
+            image=image.permute(1, 2, 0).numpy(),
+    )
+
+    return report_scalar, report_single, report_table, report_debug_sample
 
 
 @hydra.main(config_path="../configs", config_name="config", version_base="1.3")
@@ -164,9 +185,22 @@ def main(cfg: DictConfig) -> float:
     criterion = instantiate(cfg.loss).to(device)
 
     # Обучаемые параметры лосса (адаптеры feature-KD) оптимизируются вместе с учеником.
-    params = list(student.parameters()) + list(criterion.parameters())
+    if cfg.task_type == "detection" and cfg.data.dataset.targets_format_mode == "lw-detr-small":
+        params = (
+            list(student.named_parameters())
+            + [(f"criterion.{name}", param) for name, param in criterion.named_parameters()]
+        )
+    else:
+        params = list(student.parameters()) + list(criterion.parameters())
+
     optimizer = instantiate(cfg.optimizer)(params)  
     scheduler = instantiate(cfg.scheduler)(optimizer) if cfg.get("scheduler") is not None else None
+
+    prediction_postprocessor = (
+        instantiate(cfg.prediction_postprocessors)
+        if cfg.prediction_postprocessors is not None
+        else None
+    )
 
     if cfg.task_type == "classification":
         trainer = Trainer(
