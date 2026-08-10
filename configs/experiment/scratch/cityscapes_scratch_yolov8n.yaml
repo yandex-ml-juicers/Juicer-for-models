@@ -1,15 +1,16 @@
 # @package _global_
 defaults:
   - override /data/dataset: cityscapes
-  - override /data/transform/train: base_cityscapes_transform
-  - override /data/transform/eval: base_cityscapes_transform
+  - override /data/transform/train: cityscapes_transform_for_yolo
+  - override /data/transform/eval: cityscapes_transform_for_yolo
   - override /model/teacher: null
-  - override /model/student: lwdetr
-  - override /loss: lwdetr_small_loss
-  - override /optimizer: adam
+  - override /model/student: yolov8n
+  - override /loss: yolov8n
+  - override /optimizer: SGD
   - override /scheduler: warmup_cosine
+  - override /prediction_postprocessors: yolov8n
 
-name: cityscapes_scartch_LWDETR_small
+name: cityscapes_scartch_yolov8n
 device: cuda
 deterministic: false
 
@@ -17,33 +18,38 @@ task_type: "detection"
 
 clearml:
   enabled: True
-  tags: [cityscapes, teacher, scratch, LW-DETR-small]
+  tags: [cityscapes, teacher, scratch, yolov8n]
   output_uri: false
 
 trainer:
-  epochs: 1
+  epochs: 150
   amp: true
 
 optimizer:
-  lr: 2.5e-4
-  weight_decay: 0.1
-  fused: true
+  lr: 0.01
+  momentum: 0.937
+  weight_decay: 0.0005
 
 scheduler:
-  warmup_epochs: 0
+  warmup_epochs: 5
   start_factor: 0.01
   end_factor: 1.0
   eta_min: 1.0e-5
 
-# loss:
-#   label_smoothing: 0.1
 
 data:
   dataset:
-    # targets_format_mode: "lw-detr-small"
+    targets_format_mode: "yolov8n"
     build:
       label_offset: 0
   loader:
     batch_size: 16
     num_workers: 16
     persistent_workers: true
+
+model:
+  student:
+    backbone_dropout: 0.02
+    neck_dropout: 0.0
+    bbox_dropout: 0.0
+    cls_dropout: 0.08
