@@ -154,6 +154,7 @@ def clearml_reporter(task):
 
         image = image * std + mean
         image = image.clamp(0.0, 1.0)
+        image = image.permute(1, 2, 0).mul(255).to(torch.uint8).numpy()
 
         logger.report_image(
             title="Validation Detection",
