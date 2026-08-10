@@ -22,20 +22,19 @@ clearml:
   output_uri: false
 
 trainer:
-  epochs: 150
+  epochs: 100
   amp: true
 
 optimizer:
   lr: 0.01
-  momentum: 0.937
+  # momentum: 0.937
   weight_decay: 0.0005
 
 scheduler:
-  warmup_epochs: 5
+  warmup_epochs: 15
   start_factor: 0.01
   end_factor: 1.0
   eta_min: 1.0e-5
-
 
 data:
   dataset:
