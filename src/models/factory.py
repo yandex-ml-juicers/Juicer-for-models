@@ -334,16 +334,34 @@ def lwdetr_small_for_detection(
 
 def yolov8n(
     num_classes: int = 8,
+    weights: str | Path | None = "yolov8n.pt",
     backbone_dropout: float = 0.05,
     neck_dropout: float = 0.10,
     bbox_dropout: float = 0.05,
     cls_dropout: float = 0.15,
 ):
+    cityscapes_names = {
+        0: "person",
+        1: "rider",
+        2: "car",
+        3: "truck",
+        4: "bus",
+        5: "train",
+        6: "motorcycle",
+        7: "bicycle",
+    }
+
     model = DetectionModel(cfg="yolov8n.yaml", ch=3, nc=num_classes, verbose=False)
+    if num_classes == 8:
+        model.names = cityscapes_names
+
+    if weights is not None:
+        pretrained_model = YOLO(str(weights)).model
+        model.load(pretrained_model, verbose=True)
 
     for layer in model.model:
         if isinstance(layer, C2f):
-            dropout = backbone_dropout if layer.i < 10 else neck_dropout
+            dropout = (backbone_dropout if layer.i < 10 else neck_dropout)
             layer.cv2 = nn.Sequential(layer.cv2, nn.Dropout2d(p=dropout))
 
         elif isinstance(layer, SPPF):
