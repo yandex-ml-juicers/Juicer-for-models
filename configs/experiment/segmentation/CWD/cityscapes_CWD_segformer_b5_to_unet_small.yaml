@@ -1,0 +1,94 @@
+# @package _global_
+# DIST (arXiv:2205.10536): SegFormer-B2 -> U-Net-base.
+# Вместо точного совпадения вероятностей требуется совпадение ПОРЯДКА —
+# метод рассчитан ровно на случай большого разрыва между учителем и учеником,
+# а разрыв "предобученный трансформер против U-Net с нуля" здесь максимальный
+# из всей сетки.
+# Бейзлайн для этого прогона — scratch/cityscapes_scratch_unet_base.
+defaults:
+  - override /data/dataset: cityscapes_seg
+  - override /data/transform/train: cityscapes_seg_strong_transform_for_segmentation
+  - override /data/transform/eval: cityscapes_seg_transform
+  - override /model/teacher: segformer
+  - override /model/student: timm_unet
+  - override /loss: composite_cwd_dice
+  - override /optimizer: adamw
+  - override /scheduler: warmup_cosine
+  - override /augment: cutmix_segmentation
+
+name: cityscapes_CWD_segformer_b5_to_unet_small.yaml
+device: cuda
+deterministic: false
+
+task_type: "segmentation"
+
+clearml:
+  enabled: True
+  tags: [cityscapes, KD, CWD, segformer-b5, unet-smal, segmentation]
+  # Схожесть ученика с учителем по пикселям: KL и доля совпавших argmax'ов.
+  # Считаются по подвыборке пикселей на probe-батчах, цена — доли процента эпохи.
+  scalars: ['KL_divergence', 'agreement_rate']
+  plots:
+    enabled: true
+    every_n_epochs: 10
+  reuse_last_task_id: True
+  continue_last_task: False
+  output_uri: false
+
+trainer:
+  epochs: 200
+  amp: true
+  grad_clip_norm: 2.5
+
+loss:
+  losses:
+    cwd:
+      temperature: 1.0
+      ce_weight: 0.0
+      cwd_weight: 1.0
+    seg:
+      ce_weight: 0.0
+      dice_weight: 1.0
+    hard:
+      _target_: src.losses.OhemCrossEntropy
+      thresh: 0.7
+      keep_ratio: 0.1
+      ignore_index: ${data.dataset.ignore_index}
+  weights:
+    cwd: 0.8
+    seg: 0.4
+    hard: 0.2
+
+loss_schedule:
+  weights.cwd: {schedule: cosine, start: 0.8, end: 0.0, start_epoch: 120}
+  weights.seg: {schedule: cosine, start: 0.4, end: 0.8, start_epoch: 120}
+  weights.hard: {schedule: cosine, start: 0.2, end: 0.5, start_epoch: 120}
+
+optimizer:
+  lr: 5.0e-4
+  weight_decay: 3.0e-2
+
+scheduler:
+  warmup_epochs: 30
+  eta_min: 1.0e-4
+
+data:
+  loader:
+    batch_size: 16
+    eval_batch_size: 10
+    num_workers: 16
+    pin_memory: true
+    persistent_workers: true
+
+model:
+  student:
+    variant: efficientnet_b0
+    pretrained: true
+    dropout: 0.1
+  teacher:
+    variant: b5
+    pretrained: cityscapes
+    checkpoint_path: null
+#  teacher_inference:
+#    scales: [1.0, 1.25]
+#    flip: true
