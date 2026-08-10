@@ -1,0 +1,31 @@
+_target_: src.losses.DCKDLoss
+
+num_classes: 8
+
+student_feature_key: neck
+teacher_feature_key: projected_feature
+
+student_channels: 256
+teacher_channels: 256
+
+lambda_det: 1.0
+lambda_hekld: 1.0
+lambda_hokfd: 1.0
+
+temperature: 2.0
+
+teacher_has_no_object: false
+
+teacher_topk: 100
+student_topk: 1000
+teacher_score_threshold: 0.0
+
+match_cls_weight: 1.0
+match_l1_weight: 5.0
+match_giou_weight: 2.0
+
+local_iou_threshold: 0.5
+quality_gamma: 0.5
+attention_temperature: 0.1
+
+eps: 1.0e-6
