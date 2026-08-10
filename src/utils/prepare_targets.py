@@ -1,5 +1,7 @@
-import torch
 from collections.abc import Sequence
+
+import torch
+from torchvision.ops import box_convert
 
 def prepare_targets(
     targets: Sequence[dict],

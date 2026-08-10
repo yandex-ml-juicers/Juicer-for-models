@@ -2,7 +2,7 @@ from src.utils.device import resolve_device
 from src.utils.logger import MetricsHistory, get_logger
 from src.utils.metrics import AverageMeter, accuracy
 from src.utils.seed import make_generator, seed_everything, seed_worker
-from src.utils.prediction_postprocessor import prediction_postprocessor
+from src.utils.prediction_postprocessor import lwdetr_prediction_postprocessor, yolov8_prediction_postprocessor
 
 __all__ = [
     "AverageMeter",
@@ -13,6 +13,7 @@ __all__ = [
     "resolve_device",
     "seed_everything",
     "seed_worker",
-    "prediction_postprocessor"
+    "lwdetr_prediction_postprocessor",
+    "yolov8_prediction_postprocessor"
     "prepare_targets"
 ]
