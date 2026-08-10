@@ -1,0 +1,30 @@
+# @package _global_
+defaults:
+  - override /data/dataset: cityscapes
+  - override /data/transform/train: cityscapes_augmented # <--- НОВАЯ АУГМЕНТАЦИЯ
+  - override /data/transform/eval: base_cityscapes_transform
+  - override /model/teacher: null
+  - override /model/student: lwdetr
+  - override /loss: lwdetr_small_loss
+  - override /optimizer: adam
+  - override /scheduler: warmup_cosine
+
+name: cityscapes_teacher_LWDETR_small_final
+
+trainer:
+  epochs: 100
+  amp: true
+  accumulation_steps: 4  # Виртуальный батч 16 при физическом 4
+  grad_clip_norm: 0.1    # Защита от взрыва градиентов (совет со скрина №6)
+
+optimizer:
+  lr: 0.0001             # С учетом раздельного LR (1e-5 для ViT, 1e-4 для головы)
+  weight_decay: 0.1
+
+data:
+  dataset:
+    image_size: [512, 1024] # РЕЖЕМ разрешение для скорости и стабильности
+    targets_format_mode: "lw-detr-small"
+  loader:
+    batch_size: 16           # На V100 32GB при 512x1024 влезет и 8, но 4 - безопаснее
+    num_workers: 8
