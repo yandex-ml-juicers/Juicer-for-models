@@ -1,0 +1,18 @@
+_target_: src.optimizers.lwdetr_adamw
+_partial_: true
+_convert_: all
+
+lr: 1.0e-4
+lr_encoder: 1.5e-4
+
+lr_vit_layer_decay: 0.8
+lr_component_decay: 0.7
+
+weight_decay: 1.0e-4
+
+betas: [0.9, 0.999]
+eps: 1.0e-8
+
+fused: true
+
+num_vit_layers: 10

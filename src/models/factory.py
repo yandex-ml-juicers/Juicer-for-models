@@ -17,6 +17,8 @@ from torchvision.models import get_model
 from transformers import LwDetrConfig, LwDetrForObjectDetection
 
 from ultralytics.nn.tasks import DetectionModel
+from ultralytics.nn.modules.block import C2f, SPPF
+from ultralytics.nn.modules.head import Detect
 
 from hydra.utils import to_absolute_path
 
@@ -274,47 +276,84 @@ def unet_for_segmentation(
 
 
 def lwdetr_small_for_detection(
-    num_classes: int = 8,
-    disable_custom_kernels: bool = True,
+    num_classes: int = 8, 
+    disable_custom_kernels: bool = True, 
+    dropout: float = 0.1, 
+    attention_dropout: float = 0.1, 
+    activation_dropout: float = 0.1, 
+    backbone_dropout: float = 0.0, 
+    checkpoint_path: str | Path | None = None
 ) -> nn.Module:
     lwdetr_small_checkpoint = "AnnaZhang/lwdetr_small_60e_coco"
-    cityscapes_classes = [
-        "person",
-        "rider",
-        "car",
-        "truck",
-        "bus",
-        "train",
-        "motorcycle",
-        "bicycle",
-    ]
+    cityscapes_classes = ["person", "rider", "car", "truck", "bus", "train", "motorcycle", "bicycle"]
 
-    id2label = {
-        index: class_name
-        for index, class_name in enumerate(cityscapes_classes)
+    id2label = {index: class_name for index, class_name in enumerate(cityscapes_classes)}
+    label2id = {class_name: index for index, class_name in id2label.items()}
+
+    config = LwDetrConfig.from_pretrained(lwdetr_small_checkpoint)
+
+    config.num_labels = num_classes
+    config.id2label = id2label
+    config.label2id = label2id
+    config.disable_custom_kernels = disable_custom_kernels
+
+    config.dropout = dropout
+    config.attention_dropout = attention_dropout
+    config.activation_dropout = activation_dropout
+    config.backbone_config.dropout_prob = backbone_dropout
+
+    model = LwDetrForObjectDetection.from_pretrained(lwdetr_small_checkpoint, config=config, ignore_mismatched_sizes=True)
+
+    if checkpoint_path is None:
+        return model
+
+    weights_path = Path(to_absolute_path(checkpoint_path))
+    if not weights_path.is_file():
+        raise FileNotFoundError(f"Checkpoint file was not found: {weights_path}")
+
+    checkpoint = torch.load(weights_path, map_location="cpu", weights_only=True)
+
+    if isinstance(checkpoint, dict) and "student_state" in checkpoint:
+        state_dict = checkpoint["student_state"]
+    elif isinstance(checkpoint, dict) and "state_dict" in checkpoint:
+        state_dict = checkpoint["state_dict"]
+    elif isinstance(checkpoint, dict) and "model" in checkpoint:
+        state_dict = checkpoint["model"]
+    else:
+        state_dict = checkpoint
+
+    state_dict = {
+        key.removeprefix("module."): value
+        for key, value in state_dict.items()
     }
 
-    label2id = {
-        class_name: index
-        for index, class_name in id2label.items()
-    }
-
-    model = LwDetrForObjectDetection.from_pretrained(
-        lwdetr_small_checkpoint,
-        num_labels=num_classes,
-        id2label=id2label,
-        label2id=label2id,
-        disable_custom_kernels=disable_custom_kernels,
-        ignore_mismatched_sizes=True,
-    )
+    model.load_state_dict(state_dict, strict=True)
 
     return model
 
-def yolov8n(num_classes: int = 8):
-    model = DetectionModel(
-        cfg="yolov8n.yaml",
-        ch=3,
-        nc=num_classes,
-        verbose=False,
-    )
+
+def yolov8n(
+    num_classes: int = 8,
+    backbone_dropout: float = 0.05,
+    neck_dropout: float = 0.10,
+    bbox_dropout: float = 0.05,
+    cls_dropout: float = 0.15,
+):
+    model = DetectionModel(cfg="yolov8n.yaml", ch=3, nc=num_classes, verbose=False)
+
+    for layer in model.model:
+        if isinstance(layer, C2f):
+            dropout = backbone_dropout if layer.i < 10 else neck_dropout
+            layer.cv2 = nn.Sequential(layer.cv2, nn.Dropout2d(p=dropout))
+
+        elif isinstance(layer, SPPF):
+            layer.cv2 = nn.Sequential(layer.cv2, nn.Dropout2d(p=backbone_dropout))
+
+        elif isinstance(layer, Detect):
+            for branch in layer.cv2:
+                branch.insert(len(branch) - 1, nn.Dropout2d(p=bbox_dropout))
+
+            for branch in layer.cv3:
+                branch.insert(len(branch) - 1, nn.Dropout2d(p=cls_dropout))
+
     return model
