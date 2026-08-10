@@ -15,7 +15,13 @@ from omegaconf import DictConfig, ListConfig, OmegaConf
 from torch import nn
 
 from src.data import base_loader
-from src.training import Trainer, DetectionTrainer, SegmentationTrainer
+from src.models import MultiScaleInference
+from src.training import (
+    DetectionTrainer,
+    LossWeightScheduler,
+    SegmentationTrainer,
+    Trainer,
+)
 from src.utils import distributed, seed_everything, prediction_postprocessor
 from src.utils.distributed import DistInfo
 
@@ -187,6 +193,11 @@ def clearml_reporter(task):
             if key.startswith("train_loss_") and key != "train_loss_total":
                 series_name = key.removeprefix("train_loss_")
                 _safe_report("loss_components", series_name, value)
+            # Веса слагаемых, если они меняются по расписанию: без этого
+            # графика падение дистилляционного члена не отличить от того,
+            # что ученик догнал учителя.
+            elif key.startswith("loss_weight_"):
+                _safe_report("loss_weights", key.removeprefix("loss_weight_"), value)
 
         # 8. Метрики детекции
         detection_metrics = {
@@ -324,6 +335,12 @@ def main(cfg: DictConfig) -> float:
             teacher = None
             if cfg.model.get("teacher") is not None:
                 teacher = instantiate(cfg.model.teacher).to(device)
+                # Мультимасштабный прогон учителя: несколько forward'ов вместо
+                # одного, зато таргет заметно чище (см. src/models/multi_scale.py).
+                teacher_inference = _plain(cfg.model.get("teacher_inference"))
+                if teacher_inference:
+                    teacher = MultiScaleInference(teacher, **teacher_inference)
+                    log.info("Учитель считает таргеты мультимасштабно: %s", teacher_inference)
             criterion = instantiate(cfg.loss).to(device)
 
         # заменяем слои BatchNorm до сборки optimizer
@@ -340,6 +357,16 @@ def main(cfg: DictConfig) -> float:
         params = list(student.parameters()) + list(criterion.parameters())
         optimizer = instantiate(cfg.optimizer)(params)
         scheduler = instantiate(cfg.scheduler)(optimizer) if cfg.get("scheduler") is not None else None
+
+        # Расписание весов слагаемых лосса. Строится до тренера: там criterion
+        # уже может уехать под DDP-обёртку, а планировщику нужен сам модуль.
+        loss_schedule = None
+        if cfg.get("loss_schedule"):
+            if cfg.task_type == "detection":
+                raise ValueError("loss_schedule пока поддержан только для классификации и сегментации")
+            loss_schedule = LossWeightScheduler(
+                criterion, _plain(cfg.loss_schedule), total_epochs=cfg.trainer.epochs
+            )
 
         if cfg.task_type == "classification":
             trainer = Trainer(
@@ -358,6 +385,7 @@ def main(cfg: DictConfig) -> float:
                 num_classes=cfg.data.dataset.num_classes,
                 scalars=cfg.clearml.scalars,
                 batch_augment=batch_augment,
+                loss_schedule=loss_schedule,
                 **cfg.trainer,
             )
         elif cfg.task_type == "detection":
@@ -397,6 +425,7 @@ def main(cfg: DictConfig) -> float:
                 scalars=cfg.clearml.scalars,
                 ignore_index=cfg.data.dataset.ignore_index,
                 batch_augment=batch_augment,
+                loss_schedule=loss_schedule,
                 plots=_plain(cfg.clearml.get("plots")),
                 # Имена классов подписывают столбики per-class графиков и оси
                 # матрицы ошибок; без них останутся индексы 0..18.
@@ -407,7 +436,7 @@ def main(cfg: DictConfig) -> float:
                 normalize=_normalize_stats(cfg.data.dataset),
                 **cfg.trainer,
             )
-        else:
+        else:   
             # Недостижимо, пока task_type проверяется в начале main(). Нужно
             # на случай, когда новую задачу добавят в BEST_METRIC_KEY, а ветку
             # с тренером здесь завести забудут: без этого trainer остался бы

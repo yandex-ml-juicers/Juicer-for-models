@@ -28,6 +28,7 @@ from tqdm import tqdm
 from src.data.batch_augment import MixedBatch, interpolate_losses
 from src.losses.base import DistillationLoss
 from src.models.feature_extractor import FeatureExtractor
+from src.training.loss_schedule import LossWeightScheduler
 from src.utils.distributed import DistInfo, unwrap, all_reduce_sum_, all_reduce_max_
 from src.utils.logger import MetricsHistory, get_logger
 
@@ -117,12 +118,33 @@ class NormTracker:
         }
 
 
-def mix_batch(batch_augment: Callable | None, images: Tensor, targets: Tensor) -> MixedBatch:
+def mix_batch(
+    batch_augment: Callable | None,
+    images: Tensor,
+    targets: Tensor,
+    teacher_images: Tensor | None = None,
+) -> MixedBatch:
     """Применяет Mixup/CutMix, если он задан; иначе отдаёт батч как есть."""
     if batch_augment is None:
-        return MixedBatch(images, targets, targets, 1.0)
+        return MixedBatch(images, targets, targets, 1.0, teacher_images)
 
-    return batch_augment(images, targets)
+    return batch_augment(images, targets, teacher_images)
+
+
+def split_segmentation_batch(batch: Sequence[Tensor]) -> tuple[Tensor, Tensor | None, Tensor]:
+    """Разбирает батч сегментации в (кадры ученика, кадры учителя, маски).
+
+    Датасет отдаёт тройку, только если train-трансформ собран с видом для
+    учителя (teacher_skips в build_segmentation_transform_train); во всех
+    остальных случаях — привычную пару, и учитель смотрит на тот же кадр,
+    что и ученик.
+    """
+    if len(batch) == 3:
+        images, teacher_images, masks = batch
+        return images, teacher_images, masks
+
+    images, masks = batch
+    return images, None, masks
 
 
 def compute_losses(
@@ -259,6 +281,7 @@ class Trainer:
         metrics_callback: tuple[Callable, Callable, Callable, Callable] | None = None,
         scalars: dict[str, float | int | str],
         batch_augment: Callable | None = None,
+        loss_schedule: LossWeightScheduler | None = None,
     ) -> None:
         if criterion.requires_teacher and teacher is None:
             raise ValueError(
@@ -290,6 +313,8 @@ class Trainer:
         # только на обучении. На eval смешивания нет никогда — иначе метрика
         # измеряла бы качество на несуществующих картинках.
         self.batch_augment = batch_augment
+        # Расписание весов слагаемых лосса; None — веса постоянны.
+        self.loss_schedule = loss_schedule
         # Точка стыковки внешнего трекера (ClearML и т.п.): вызывается после
         # каждой эпохи со строкой метрик — той же, что уходит в history.csv.
         # Trainer ничего не знает о трекере, колбэк собирает scripts/train.py.
@@ -350,6 +375,9 @@ class Trainer:
 
                 start = time.time()
                 lr=self.optimizer.param_groups[0]["lr"]
+                # Веса лосса выставляются ДО эпохи, чтобы её значения лосса
+                # относились ровно к тем весам, которые уехали в лог.
+                loss_weights = self.loss_schedule.step(epoch) if self.loss_schedule else {}
 
                 train_loss_components, other_train_metrics = self._train_epoch(epoch)
                 eval_loss, eval_acc = evaluate(
@@ -366,6 +394,7 @@ class Trainer:
                     "eval_loss": eval_loss,
                     "eval_acc": eval_acc,
                     "time_epoch": round(time.time() - start, 1),
+                    **loss_weights,
                     **{f"train_loss_{key}": value for key, value in train_loss_components.items()},
                     **{f"train_{key}": value for key, value in other_train_metrics.items()},
                 }
@@ -1072,6 +1101,7 @@ class SegmentationTrainer:
         scalars: dict[str, float | int | str],
         ignore_index: int = 255,
         batch_augment: Callable | None = None,
+        loss_schedule: LossWeightScheduler | None = None,
         plots: dict | None = None,
         class_names: Sequence[str] | None = None,
         palette: Sequence[Sequence[int]] | None = None,
@@ -1108,6 +1138,8 @@ class SegmentationTrainer:
         # он переносит вместе с куском изображения и кусок маски, поэтому
         # таргет остаётся точным (см. src/data/batch_augment.py).
         self.batch_augment = batch_augment
+        # Расписание весов слагаемых лосса; None — веса постоянны.
+        self.loss_schedule = loss_schedule
         self.metrics_callback_scalar = metrics_callback[0] if metrics_callback is not None else None
         self.metrics_callback_single = metrics_callback[1] if metrics_callback is not None else None
         self.metrics_callback_table = metrics_callback[2] if metrics_callback is not None else None
@@ -1203,6 +1235,9 @@ class SegmentationTrainer:
             for epoch in range(1, self.epochs + 1):
                 start = time.time()
                 lr = self.optimizer.param_groups[0]["lr"]
+                # Веса лосса выставляются ДО эпохи, чтобы её значения лосса
+                # относились ровно к тем весам, которые уехали в лог.
+                loss_weights = self.loss_schedule.step(epoch) if self.loss_schedule else {}
 
                 train_loss_components, other_train_metrics, norms = self._train_epoch(epoch)
                 eval_loss, eval_iou = segmentation_evaluate(
@@ -1231,6 +1266,7 @@ class SegmentationTrainer:
                     "eval_miou": eval_metrics["miou"],
                     "eval_pixel_acc": eval_metrics["pixel_acc"],
                     "time_epoch": round(time.time() - start, 1),
+                    **loss_weights,
                     **{f"train_loss_{key}": value for key, value in train_loss_components.items()},
                     **{f"train_{key}": value for key, value in other_train_metrics.items()},
                 }
@@ -1305,18 +1341,25 @@ class SegmentationTrainer:
             leave=False,
         )
 
-        for step, (images, masks) in enumerate(iterator):
+        for step, batch in enumerate(iterator):
             if self.limit_train_batches is not None and step >= self.limit_train_batches:
                 iterator.close()
                 break
 
+            images, teacher_images, masks = split_segmentation_batch(batch)
             images = images.to(self.device, non_blocking=True)
             masks = masks.to(self.device, non_blocking=True)
+            if teacher_images is not None:
+                teacher_images = teacher_images.to(self.device, non_blocking=True)
             batch_size = images.size(0)
 
             # До прогона учителя: он обязан видеть ту же склейку, что и ученик.
-            mixed = mix_batch(self.batch_augment, images, masks)
+            mixed = mix_batch(self.batch_augment, images, masks, teacher_images)
             images, masks = mixed.images, mixed.targets_a
+            # Кадр учителя отличается от ученического только слабыми
+            # аугментациями; геометрия у них общая, поэтому логиты и карты
+            # признаков остаются выровненными с ученическими попиксельно.
+            teacher_input = mixed.teacher_images if mixed.teacher_images is not None else images
 
             self.optimizer.zero_grad(set_to_none=True)
             if self.student_extractor is not None:
@@ -1327,7 +1370,7 @@ class SegmentationTrainer:
             teacher_logits = None
             if self.teacher is not None:
                 with torch.no_grad(), torch.autocast(self.device.type, enabled=self.amp_enabled):
-                    teacher_logits = self.teacher(images)
+                    teacher_logits = self.teacher(teacher_input)
 
             with torch.autocast(self.device.type, enabled=self.amp_enabled):
                 student_logits = self.student(images)

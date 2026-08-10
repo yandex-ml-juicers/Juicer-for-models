@@ -37,12 +37,18 @@ class MixedBatch(NamedTuple):
     lam == 1.0 означает "второй набор таргетов не нужен": либо смешивания не
     было вовсе, либо это CutMix по маскам, где таргет получился точным.
     Тренер по этому признаку пропускает второй вызов лосса.
+
+    teacher_images — тот же батч, но со слабыми аугментациями (вид учителя,
+    см. SegmentationTeacherViewCompose). Смешивается ровно теми же
+    перестановкой и прямоугольником, что и вид ученика: иначе после CutMix
+    два вида показывали бы разные сцены. None — вида учителя нет.
     """
 
     images: Tensor
     targets_a: Tensor
     targets_b: Tensor
     lam: float
+    teacher_images: Tensor | None = None
 
 
 def sample_lambda(alpha: float) -> float:
@@ -132,7 +138,12 @@ class MixupCutmix:
         self.prob = float(prob)
         self.switch_prob = float(switch_prob)
 
-    def __call__(self, images: Tensor, targets: Tensor) -> MixedBatch:
+    def __call__(
+        self,
+        images: Tensor,
+        targets: Tensor,
+        teacher_images: Tensor | None = None,
+    ) -> MixedBatch:
         if targets.ndim not in (1, 3):
             raise ValueError(
                 "MixupCutmix ожидает таргет [B] (классификация) или [B, H, W] "
@@ -140,7 +151,7 @@ class MixupCutmix:
             )
         # Батч из одного примера смешивать не с чем: перестановка тождественна.
         if images.size(0) < 2 or random.random() >= self.prob:
-            return MixedBatch(images, targets, targets, 1.0)
+            return MixedBatch(images, targets, targets, 1.0, teacher_images)
 
         # Перестановка строится на CPU и переносится на устройство: так порядок
         # пар не зависит от того, на каком девайсе идёт обучение, и запуск
@@ -148,8 +159,8 @@ class MixupCutmix:
         permutation = torch.randperm(images.size(0)).to(images.device)
 
         if self._use_cutmix():
-            return self._cutmix(images, targets, permutation)
-        return self._mixup(images, targets, permutation)
+            return self._cutmix(images, targets, permutation, teacher_images)
+        return self._mixup(images, targets, permutation, teacher_images)
 
     def _use_cutmix(self) -> bool:
         if self.mixup_alpha == 0.0:
@@ -158,17 +169,38 @@ class MixupCutmix:
             return False
         return random.random() < self.switch_prob
 
-    def _mixup(self, images: Tensor, targets: Tensor, permutation: Tensor) -> MixedBatch:
+    def _mixup(
+        self,
+        images: Tensor,
+        targets: Tensor,
+        permutation: Tensor,
+        teacher_images: Tensor | None,
+    ) -> MixedBatch:
         lam = sample_lambda(self.mixup_alpha)
         mixed = lam * images + (1.0 - lam) * images[permutation]
-        return MixedBatch(mixed, targets, targets[permutation], lam)
+        if teacher_images is not None:
+            teacher_images = lam * teacher_images + (1.0 - lam) * teacher_images[permutation]
+        return MixedBatch(mixed, targets, targets[permutation], lam, teacher_images)
 
-    def _cutmix(self, images: Tensor, targets: Tensor, permutation: Tensor) -> MixedBatch:
+    def _cutmix(
+        self,
+        images: Tensor,
+        targets: Tensor,
+        permutation: Tensor,
+        teacher_images: Tensor | None,
+    ) -> MixedBatch:
         height, width = images.shape[-2:]
         top, left, bottom, right = random_bbox(height, width, sample_lambda(self.cutmix_alpha))
 
         mixed = images.clone()
         mixed[..., top:bottom, left:right] = images[permutation][..., top:bottom, left:right]
+
+        if teacher_images is not None:
+            teacher_mixed = teacher_images.clone()
+            teacher_mixed[..., top:bottom, left:right] = (
+                teacher_images[permutation][..., top:bottom, left:right]
+            )
+            teacher_images = teacher_mixed
 
         # Маски сегментации переносятся вместе с пикселями — таргет точный.
         if targets.ndim == 3:
@@ -182,13 +214,13 @@ class MixupCutmix:
             mixed_targets[:, top:bottom, left:right] = (
                 targets[permutation][:, top:bottom, left:right]
             )
-            return MixedBatch(mixed, mixed_targets, mixed_targets, 1.0)
+            return MixedBatch(mixed, mixed_targets, mixed_targets, 1.0, teacher_images)
 
         # Классификация: доля пикселей, оставшихся от исходной картинки.
         # Считается по фактической площади прямоугольника, а не по исходному
         # lam, потому что прямоугольник мог быть обрезан границей кадра.
         lam = 1.0 - (bottom - top) * (right - left) / (height * width)
-        return MixedBatch(mixed, targets, targets[permutation], lam)
+        return MixedBatch(mixed, targets, targets[permutation], lam, teacher_images)
 
 
 def interpolate_losses(

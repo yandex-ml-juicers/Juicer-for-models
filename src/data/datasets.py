@@ -4,6 +4,7 @@
 import zipfile
 import random
 from collections import defaultdict
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Callable
 
@@ -211,51 +212,86 @@ class CityscapesSegmentation(Dataset):
     Ожидаемая структура:
 
         root/leftImg8bit/<split>/<city>/<name>_leftImg8bit.png
-        root/gtFine/<split>/<city>/<name>_gtFine_labelIds.png
+        root/<annotations>/<split>/<city>/<name>_<annotations>_labelIds.png
 
     Возвращает (image, mask); mask — uint8 [H, W] с trainIds 0..18
     и ignore_index там, где класс не входит в оценочные. В int64 маску
     переводит SegmentationToTensor в конце трансформа.
+
+    Если трансформ отдаёт ещё и вид для учителя (см.
+    SegmentationTeacherViewCompose), то возвращается тройка
+    (кадр ученика, кадр учителя, маска).
+
+    splits — список, а не строка, ради train_extra: 20k дополнительных кадров
+    с грубой разметкой (gtCoarse) подмешиваются к train одним конфигом,
+    без второго класса датасета.
     """
 
     IMAGE_SUFFIX = "_leftImg8bit.png"
-    MASK_SUFFIX = "_gtFine_labelIds.png"
+    ANNOTATIONS = ("gtFine", "gtCoarse")
+    # Кадр из train_extra, лежащий в архиве полностью чёрным (об этом сказано
+    # прямо на странице загрузки Cityscapes). Учить на нём нечему.
+    BROKEN_IMAGES = frozenset({"troisdorf_000000_000073_leftImg8bit.png"})
 
     def __init__(
         self,
         root: str | Path,
-        split: str,
+        splits: str | Sequence[str],
         transform: Callable | None = None,
         ignore_index: int = 255,
+        annotations: str = "gtFine",
     ) -> None:
-        if split not in {"train", "val"}:
-            # test-разметка в Cityscapes — заглушка
-            raise ValueError(f"split должен быть 'train' или 'val', получено {split!r}")
+        if isinstance(splits, str):
+            splits = [splits]
+        # test-разметка в Cityscapes — заглушка, поэтому сплита test здесь нет.
+        allowed_splits = {"train", "val", "train_extra"}
+        unknown = set(splits) - allowed_splits
+        if unknown:
+            raise ValueError(f"splits принимает только {sorted(allowed_splits)}, получено {sorted(unknown)}")
+        if annotations not in self.ANNOTATIONS:
+            raise ValueError(
+                f"annotations должно быть одним из {list(self.ANNOTATIONS)}, получено {annotations!r}"
+            )
+        if "train_extra" in splits and annotations != "gtCoarse":
+            raise ValueError(
+                "У сплита train_extra есть только грубая разметка: "
+                "задайте annotations='gtCoarse' (нужен архив gtCoarse.zip)"
+            )
 
         root = Path(root)
-        image_dir = root / "leftImg8bit" / split
-        mask_dir = root / "gtFine" / split
+        mask_suffix = f"_{annotations}_labelIds.png"
 
-        if not image_dir.is_dir():
-            raise FileNotFoundError(f"Cannot find image directory: {image_dir}")
-        if not mask_dir.is_dir():
-            raise FileNotFoundError(f"Cannot find mask directory: {mask_dir}")
+        self.image_paths: list[Path] = []
+        self.mask_paths: list[Path] = []
 
-        self.image_paths = sorted(image_dir.glob(f"*/*{self.IMAGE_SUFFIX}"))
-        if not self.image_paths:
-            raise FileNotFoundError(f"No images were found in {image_dir}")
+        for split in splits:
+            image_dir = root / "leftImg8bit" / split
+            mask_dir = root / annotations / split
 
-        self.mask_paths = []
-        for image_path in self.image_paths:
-            base_name = image_path.name.removesuffix(self.IMAGE_SUFFIX)
-            mask_path = mask_dir / image_path.parent.name / f"{base_name}{self.MASK_SUFFIX}"
+            if not image_dir.is_dir():
+                raise FileNotFoundError(f"Cannot find image directory: {image_dir}")
+            if not mask_dir.is_dir():
+                raise FileNotFoundError(f"Cannot find mask directory: {mask_dir}")
 
-            if not mask_path.is_file():
-                raise FileNotFoundError(
-                    f"Mask for image {image_path} was not found: {mask_path}"
-                )
+            image_paths = [
+                path
+                for path in sorted(image_dir.glob(f"*/*{self.IMAGE_SUFFIX}"))
+                if path.name not in self.BROKEN_IMAGES
+            ]
+            if not image_paths:
+                raise FileNotFoundError(f"No images were found in {image_dir}")
 
-            self.mask_paths.append(mask_path)
+            for image_path in image_paths:
+                base_name = image_path.name.removesuffix(self.IMAGE_SUFFIX)
+                mask_path = mask_dir / image_path.parent.name / f"{base_name}{mask_suffix}"
+
+                if not mask_path.is_file():
+                    raise FileNotFoundError(
+                        f"Mask for image {image_path} was not found: {mask_path}"
+                    )
+
+                self.image_paths.append(image_path)
+                self.mask_paths.append(mask_path)
 
         # Таблица подстановки на все 256 возможных значений uint8: всё, чего нет
         # в маппинге (включая мусорные значения вроде license plate), падает в ignore_index
@@ -284,13 +320,13 @@ class CityscapesSegmentation(Dataset):
 
         mask = torch.from_numpy(self.label_id_to_train_id[raw_mask])
 
-        if self.transform is not None:
-            image, mask = self.transform(image, mask)
-        else:
-            image = pil_to_tensor(image).float() / 255.0
-            mask = mask.to(torch.int64)
+        if self.transform is None:
+            return pil_to_tensor(image).float() / 255.0, mask.to(torch.int64)
 
-        return image, mask
+        # Трансформ с видом для учителя отдаёт тройку — она так и уходит
+        # в даталоадер: default_collate собирает батч поэлементно, а тренер
+        # разбирает её обратно (см. split_segmentation_batch).
+        return self.transform(image, mask)
 
 
 def cifar10(
@@ -368,20 +404,30 @@ def cityscapes_segmentation(
     train: bool,
     transform: Callable | None = None,
     ignore_index: int = 255,
+    train_splits: Sequence[str] = ("train",),
+    val_splits: Sequence[str] = ("val",),
+    train_annotations: str = "gtFine",
+    val_annotations: str = "gtFine",
 ) -> Dataset:
     """Create a Cityscapes semantic segmentation dataset.
 
     root указывает на каталог, где рядом лежат leftImg8bit/ и gtFine/
     (в отличие от детекционной cityscapes(), которой передаётся сам
     leftImg8bit/ плюс отдельный каталог с COCO-аннотациями).
+
+    train_splits/train_annotations нужны для дополнительных данных: 20k кадров
+    train_extra размечены только грубо (gtCoarse), поэтому сплит и тип
+    разметки задаются отдельно от валидации, которая обязана остаться на
+    gtFine — иначе mIoU перестанет быть сравнимым с публичными числами.
     """
     root = Path(to_absolute_path(str(root)))
 
     return CityscapesSegmentation(
         root=root,
-        split="train" if train else "val",
+        splits=train_splits if train else val_splits,
         transform=transform,
         ignore_index=ignore_index,
+        annotations=train_annotations if train else val_annotations,
     )
 
 

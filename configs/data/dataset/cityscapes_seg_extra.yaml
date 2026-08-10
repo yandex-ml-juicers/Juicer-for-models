@@ -1,0 +1,43 @@
+# Cityscapes train + train_extra: 2975 точно размеченных кадров плюс 19998
+# грубо размеченных (leftImg8bit_trainextra.zip, 44 ГБ + gtCoarse.zip).
+#
+# Чем грубая разметка отличается от точной: полигоны обведены «внутри»
+# объектов, между ними остаются широкие полосы ignore, и границы по ней
+# выучить нельзя. Поэтому она годится для ПРЕДОБУЧЕНИЯ (сцен больше, классы
+# те же, модель успевает выучить общее устройство городской сцены), после
+# которого идёт дообучение на точной разметке.
+#
+# Рекомендуемый порядок — тот же, что у самих авторов Cityscapes и у
+# лидербордных решений:
+#   1) предобучение:  data/dataset=cityscapes_seg_extra, ~1/3 эпох,
+#                     обычный lr;
+#   2) дообучение:    data/dataset=cityscapes_seg (только gtFine),
+#                     model.student.checkpoint_path=<best.pt первого этапа>,
+#                     lr в 3-10 раз меньше.
+# Обратный порядок (сначала точная, потом грубая) хуже: последним модель
+# видит именно грубые границы и запоминает их.
+#
+# Валидация в обоих случаях одна и та же — val с gtFine, иначе mIoU
+# перестанет быть сравнимым с прошлыми прогонами.
+#
+# Битый кадр troisdorf_000000_000073 (в архиве он полностью чёрный)
+# датасет выбрасывает сам.
+build:
+  _target_: src.data.datasets.cityscapes_segmentation
+  root: data/raw/cityscapes
+  ignore_index: 255
+  train_splits: [train, train_extra]
+  train_annotations: gtCoarse
+  val_splits: [val]
+  val_annotations: gtFine
+
+num_classes: 19
+ignore_index: 255
+
+image_size: [1024, 2048]
+crop_size: [512, 1024]
+scale_range: [0.5, 2.0]
+
+normalize:
+  mean: [0.485, 0.456, 0.406]
+  std: [0.229, 0.224, 0.225]

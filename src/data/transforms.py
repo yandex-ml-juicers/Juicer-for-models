@@ -190,6 +190,7 @@ def build_segmentation_transform_train(
     random_erasing_ratio: Sequence[float] = (0.3, 3.3),
     random_erasing_value: float | str = 0.0,
     random_erasing_erases_labels: bool = False,
+    teacher_skips: Sequence[str] = (),
 ) -> segmentation_transforms.SegmentationCompose:
     """Стандартный train-рецепт семантической сегментации Cityscapes.
 
@@ -220,7 +221,28 @@ def build_segmentation_transform_train(
         blur_p: вероятность гауссова размытия.
         random_erasing_p: вероятность стереть прямоугольник.
         random_erasing_erases_labels: помечать ли стёртое как ignore_index.
+        teacher_skips: какие из фотометрических аугментаций НЕ должен видеть
+            учитель дистилляции — подмножество {"jitter", "blur", "erasing"}.
+            Непустой список включает второй вид кадра: датасет начинает
+            отдавать (кадр ученика, кадр учителя, маска), и учитель считает
+            таргеты по кадру без перечисленных аугментаций. Геометрию
+            (масштаб/кроп/отражение) пропустить нельзя: она общая для обоих
+            видов, иначе таргет перестал бы совпадать с маской попиксельно.
     """
+    known_skips = {"jitter", "blur", "erasing"}
+    teacher_skips = set(teacher_skips)
+    if not teacher_skips <= known_skips:
+        raise ValueError(
+            f"teacher_skips принимает только {sorted(known_skips)}, "
+            f"получено {sorted(teacher_skips - known_skips)}"
+        )
+
+    def student_only(name: str, transform):
+        """Помечает аугментацию как невидимую учителю, если она в teacher_skips."""
+        if name in teacher_skips:
+            return segmentation_transforms.StudentOnly(transform)
+        return transform
+
     ops: list = [
         segmentation_transforms.SegmentationRandomScale(
             scale_range=(float(scale_range[0]), float(scale_range[1])),
@@ -235,21 +257,27 @@ def build_segmentation_transform_train(
 
     if color_jitter > 0 or hue > 0:
         ops.append(
-            segmentation_transforms.SegmentationColorJitter(
-                brightness=color_jitter,
-                contrast=color_jitter,
-                saturation=color_jitter,
-                hue=hue,
-                p=color_jitter_p,
+            student_only(
+                "jitter",
+                segmentation_transforms.SegmentationColorJitter(
+                    brightness=color_jitter,
+                    contrast=color_jitter,
+                    saturation=color_jitter,
+                    hue=hue,
+                    p=color_jitter_p,
+                ),
             )
         )
 
     if blur_p > 0:
         ops.append(
-            segmentation_transforms.SegmentationGaussianBlur(
-                p=blur_p,
-                kernel_size=blur_kernel_size,
-                sigma=blur_sigma,
+            student_only(
+                "blur",
+                segmentation_transforms.SegmentationGaussianBlur(
+                    p=blur_p,
+                    kernel_size=blur_kernel_size,
+                    sigma=blur_sigma,
+                ),
             )
         )
 
@@ -258,15 +286,21 @@ def build_segmentation_transform_train(
 
     if random_erasing_p > 0:
         ops.append(
-            segmentation_transforms.SegmentationRandomErasing(
-                p=random_erasing_p,
-                scale=random_erasing_scale,
-                ratio=random_erasing_ratio,
-                value=random_erasing_value,
-                erase_labels=random_erasing_erases_labels,
-                ignore_index=ignore_index,
+            student_only(
+                "erasing",
+                segmentation_transforms.SegmentationRandomErasing(
+                    p=random_erasing_p,
+                    scale=random_erasing_scale,
+                    ratio=random_erasing_ratio,
+                    value=random_erasing_value,
+                    erase_labels=random_erasing_erases_labels,
+                    ignore_index=ignore_index,
+                ),
             )
         )
+
+    if any(isinstance(op, segmentation_transforms.StudentOnly) for op in ops):
+        return segmentation_transforms.SegmentationTeacherViewCompose(ops)
 
     return segmentation_transforms.SegmentationCompose(ops)
 
