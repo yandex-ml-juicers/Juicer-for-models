@@ -16,6 +16,7 @@ from torchvision.models import get_model
 
 from transformers import LwDetrConfig, LwDetrForObjectDetection
 
+from ultralytics import YOLO
 from ultralytics.nn.tasks import DetectionModel
 from ultralytics.nn.modules.block import C2f, SPPF
 from ultralytics.nn.modules.head import Detect
