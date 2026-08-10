@@ -19,10 +19,16 @@ from torchvision.models import get_model
 from transformers import LwDetrConfig, LwDetrForObjectDetection
 
 from src.models.segformer import SegFormer
+from src.models.segnext import IMAGENET_WEIGHTS, SegNeXt, convert_mmseg_state_dict
 from src.models.stochastic_depth import apply_stochastic_depth
 from src.models.timm_unet import TIMM_UNET_VARIANTS, TimmUNet
 from src.models.unet import UNET_VARIANTS, UNet
-from src.utils.checkpoints import load_checkpoint_into, resolve_weights_dir
+from src.utils.checkpoints import (
+    download_file,
+    load_checkpoint_into,
+    load_converted_checkpoint,
+    resolve_weights_dir,
+)
 
 
 def from_torch_hub(repo: str, name: str, pretrained: bool = False) -> nn.Module:
@@ -268,6 +274,72 @@ def segformer_for_segmentation(
         return model
 
     return load_checkpoint_into(model, checkpoint_path, f"SegFormer-{variant.upper()}")
+
+
+def segnext_for_segmentation(
+    variant: str = "t",
+    num_classes: int = 19,
+    pretrained: str | None = "imagenet",
+    checkpoint_path: str | None = None,
+    weights_dir: str | None = None,
+    align_corners: bool = False,
+    drop_path_rate: float | None = None,
+    dropout: float = 0.1,
+) -> nn.Module:
+    """SegNeXt-T/S/B/L для семантической сегментации.
+
+    Args:
+        pretrained: None | "imagenet" — энкодер MSCAN, предобученный на
+            ImageNet (конвертация OpenMMLab, качается автоматически).
+            Голова декодера при этом инициализируется случайно — это рецепт
+            самой статьи и штатный режим для УЧЕНИКА.
+            Игнорируется, если задан checkpoint_path.
+        checkpoint_path: путь к весам целиком — так SegNeXt становится
+            УЧИТЕЛЕМ. Понимает три формата: чекпоинт нашего тренера,
+            чекпоинт mmsegmentation и чекпоинт оригинального репозитория
+            SegNeXt (см. convert_mmseg_state_dict).
+
+    Про веса на Cityscapes. Автоматически скачиваемых нет: OpenMMLab
+    опубликовал SegNeXt только на ADE20K, а cityscapes-чекпоинты авторов
+    лежат на TsingHua Cloud (ссылки — в README
+    github.com/Visual-Attention-Network/SegNeXt). Файл нужно скачать руками
+    и указать сюда checkpoint_path; переименовывать ключи не нужно.
+    """
+    model = SegNeXt(
+        variant=variant,
+        num_classes=num_classes,
+        drop_path_rate=drop_path_rate,
+        dropout=dropout,
+        align_corners=align_corners,
+    )
+
+    if checkpoint_path is not None:
+        return load_converted_checkpoint(
+            model, checkpoint_path, convert_mmseg_state_dict, f"SegNeXt-{variant.upper()}"
+        )
+
+    if pretrained is None:
+        return model
+
+    if pretrained != "imagenet":
+        raise ValueError(
+            f"pretrained должен быть None | 'imagenet', получено {pretrained!r}. "
+            f"Веса на Cityscapes задаются через checkpoint_path."
+        )
+
+    url = IMAGENET_WEIGHTS[variant]
+    weights_path = download_file(
+        url, resolve_weights_dir(weights_dir) / "segnext" / url.rsplit("/", 1)[-1]
+    )
+    # strict=False: в файле только энкодер, декодер остаётся случайным.
+    return load_converted_checkpoint(
+        model,
+        str(weights_path),
+        convert_mmseg_state_dict,
+        f"MSCAN-{variant.upper()} (ImageNet)",
+        strict=False,
+        expected_prefix="encoder.",
+    )
 
 
 def lwdetr_small_for_detection(

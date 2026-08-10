@@ -4,12 +4,15 @@ from src.models.factory import (
     from_detectors,
     from_torch_hub,
     segformer_for_segmentation,
+    segnext_for_segmentation,
     timm_unet_for_segmentation,
     unet_for_segmentation,
 )
 from src.models.feature_extractor import FeatureExtractor, unwrap_model
 from src.models.feature_taps import STAGE_TAP_STRIDES, STAGE_TAPS, FeatureTaps
+from src.models.multi_scale import MultiScaleInference
 from src.models.segformer import SEGFORMER_VARIANTS, SegFormer
+from src.models.segnext import SEGNEXT_VARIANTS, SegNeXt
 from src.models.stochastic_depth import (
     StochasticDepthBatchNorm2d,
     apply_stochastic_depth,
@@ -22,10 +25,13 @@ __all__ = [
     "ChannelAdapters",
     "FeatureExtractor",
     "FeatureTaps",
+    "MultiScaleInference",
     "STAGE_TAPS",
     "STAGE_TAP_STRIDES",
     "SegFormer",
     "SEGFORMER_VARIANTS",
+    "SegNeXt",
+    "SEGNEXT_VARIANTS",
     "StochasticDepthBatchNorm2d",
     "TIMM_UNET_VARIANTS",
     "TimmUNet",
@@ -37,6 +43,7 @@ __all__ = [
     "from_detectors",
     "from_torch_hub",
     "segformer_for_segmentation",
+    "segnext_for_segmentation",
     "timm_unet_for_segmentation",
     "unet_for_segmentation",
     "unwrap_model",
