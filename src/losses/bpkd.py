@@ -6,7 +6,7 @@ import torch
 import torch.nn.functional as F
 
 from src.losses.base import DistillationLoss
-from src.losses.segmentation_utils import align_logits
+from src.losses.segmentation_utils import align_logits, subsample_spatially
 
 
 def boundary_mask(labels: torch.Tensor, width: int) -> torch.Tensor:
@@ -65,22 +65,32 @@ class BPKDLoss(DistillationLoss):
         edge_weight: float = 3.0,
         body_weight: float = 3.0,
         edge_width: int = 7,
+        spatial_stride: int = 1,
         ignore_index: int = 255,
         label_smoothing: float = 0.0,
     ) -> None:
         """
         Args:
             edge_width: ширина граничной полосы в пикселях (в статье 7).
+            spatial_stride: прореживание пикселей перед подсчётом обоих членов.
+                BPKD материализует вдвое больше полноразмерных тензоров, чем
+                CWD (попиксельная ветка плюс маскированные копии для канальной),
+                а на кропе 512x1024 каждый такой тензор — сотни мегабайт.
+                stride=2 режет память вчетверо; полоса границы при ширине 7
+                переживает прореживание, а статистики каналов не меняются.
         """
         super().__init__()
         if temperature <= 0.0:
             raise ValueError(f"temperature должна быть > 0, получено {temperature}")
+        if spatial_stride < 1:
+            raise ValueError(f"spatial_stride должен быть >= 1, получено {spatial_stride}")
 
         self.temperature = float(temperature)
         self.ce_weight = float(ce_weight)
         self.edge_weight = float(edge_weight)
         self.body_weight = float(body_weight)
         self.edge_width = int(edge_width)
+        self.spatial_stride = int(spatial_stride)
         self.ignore_index = int(ignore_index)
         self.label_smoothing = float(label_smoothing)
 
@@ -133,6 +143,12 @@ class BPKDLoss(DistillationLoss):
         mask = boundary_mask(labels, self.edge_width)
         if mask.shape[2:] != student.shape[2:]:
             mask = F.interpolate(mask, size=student.shape[2:], mode="nearest")
+
+        # Прореживание — после построения маски: полоса границы считается по
+        # полной разметке, иначе при stride > 1 она бы истончилась вдвое.
+        student = subsample_spatially(student, self.spatial_stride)
+        teacher = subsample_spatially(teacher, self.spatial_stride)
+        mask = subsample_spatially(mask, self.spatial_stride)
 
         edge = self._edge_loss(student, teacher, mask)
         body = self._body_loss(student, teacher, mask)

@@ -22,18 +22,33 @@ EXPERIMENTS = [
 
 # Сегментация: бейзлайны без дистилляции + методы дистилляции
 # SegFormer-B2 -> U-Net.
+# Абляция лоссов на прогонах без дистилляции: каждый отличается от своего
+# бейзлайна (..._aug) ровно блоком loss.
+LOSS_ABLATIONS = [
+    f"scratch/cityscapes_scratch_timm_unet_{size}_aug_{loss}"
+    for size in ("small", "base")
+    for loss in ("dice", "ohem", "lovasz")
+]
+
 SEGMENTATION_EXPERIMENTS = [
     "scratch/cityscapes_scratch_segformer_b2",
     "scratch/cityscapes_scratch_segformer_b5",
     "scratch/cityscapes_scratch_unet",
     "scratch/cityscapes_scratch_timm_unet",
     "scratch/cityscapes_scratch_timm_unet_small_aug",
+    "scratch/cityscapes_scratch_timm_unet_base_aug",
     "segmentation/vanilla-KD/cityscapes_pixel-KD_segformer_b2_to_unet_base",
+    "segmentation/vanilla-KD/cityscapes_pixel-KD_segformer_b5_to_unet_small",
     "segmentation/CWD/cityscapes_CWD_segformer_b2_to_unet_base",
+    "segmentation/CWD/cityscapes_CWD_segformer_b5_to_unet_small",
     "segmentation/FitNets/cityscapes_FitNets_segformer_b2_to_unet_base",
     "segmentation/FitNets/cityscapes_FitNets_segformer_b2_to_unet_small",
-    "segmentation/FitNets/cityscapes_FitNets_dice_ohem_segformer_b2_to_unet_small",
+    "segmentation/FitNets/cityscapes_FitNets_dice_ohem_segformer_b5_to_unet_small",
     "segmentation/DIST/cityscapes_DIST_segformer_b2_to_timm_unet_base",
+    "segmentation/DIST/cityscapes_DIST_segformer_b5_to_timm_unet_small",
+    "segmentation/BPKD/cityscapes_BPKD_segformer_b5_to_unet_small",
+    "segmentation/HeteroAKD/cityscapes_HeteroAKD_segformer_b5_to_unet_small",
+    *LOSS_ABLATIONS,
 ]
 
 
@@ -101,6 +116,49 @@ class TestTeacherViewExperiment:
         assert cfg.loss_schedule.ce_weight.end > cfg.loss_schedule.ce_weight.start
 
 
+class TestLossAblation:
+    """Прогоны «тот же ученик, другой лосс» на scratch-бейзлайнах."""
+
+    @pytest.mark.parametrize("experiment", LOSS_ABLATIONS)
+    def test_differs_from_the_baseline_only_in_the_loss(self, experiment):
+        """Если разойдётся хоть что-то ещё — lr, число эпох, аугментации, —
+        разницу в mIoU нельзя будет отнести к лоссу, и весь прогон
+        превращается в трату GPU-часов."""
+        baseline_name = experiment.rsplit("_", 1)[0]
+        baseline = compose_config([f"experiment={baseline_name}"])
+        ablation = compose_config([f"experiment={experiment}"])
+
+        for section in ("trainer", "optimizer", "scheduler", "data", "model", "augment"):
+            assert ablation[section] == baseline[section], section
+        assert ablation.data.transform == baseline.data.transform
+        assert ablation.loss._target_ != baseline.loss._target_
+
+    @pytest.mark.parametrize("experiment", LOSS_ABLATIONS)
+    def test_names_do_not_collide(self, experiment):
+        """reuse_last_task_id: True — значит совпадение имён затрёт чужой
+        прогон в ClearML и сложит артефакты в один каталог outputs/."""
+        cfg = compose_config([f"experiment={experiment}"])
+        assert cfg.name == experiment.rsplit("/", 1)[-1]
+
+    def test_ohem_turns_label_smoothing_off(self):
+        """Сглаживание держит per-pixel лосс выше нуля даже на угаданном
+        пикселе, порог -log(thresh) перестаёт отсекать, и OHEM вырождается
+        в обычную CE. Вместе эти два приёма не работают."""
+        for experiment in LOSS_ABLATIONS:
+            if experiment.endswith("_ohem"):
+                assert compose_config([f"experiment={experiment}"]).loss.label_smoothing == 0.0
+
+    def test_others_keep_the_baseline_smoothing(self):
+        """У Dice и Lovász CE-половина обязана совпасть с бейзлайном
+        до последнего параметра, иначе сравнивается не только лосс."""
+        baseline = compose_config(["experiment=scratch/cityscapes_scratch_timm_unet_small_aug"])
+        for experiment in LOSS_ABLATIONS:
+            if experiment.endswith(("_dice", "_lovasz")):
+                cfg = compose_config([f"experiment={experiment}"])
+                assert cfg.loss.label_smoothing == baseline.loss.label_smoothing
+                assert cfg.loss.ce_weight == 1.0
+
+
 def test_loss_schedule_paths_exist_in_the_loss():
     """Опечатка в пути расписания иначе всплыла бы через час обучения."""
     from src.training import LossWeightScheduler
@@ -122,7 +180,7 @@ def test_composite_counts_cross_entropy_once():
     посчитать дважды с непонятным итоговым весом. Здесь попиксельную
     классификацию берёт на себя только OHEM."""
     cfg = compose_config(
-        ["experiment=segmentation/FitNets/cityscapes_FitNets_dice_ohem_segformer_b2_to_unet_small"]
+        ["experiment=segmentation/FitNets/cityscapes_FitNets_dice_ohem_segformer_b5_to_unet_small"]
     )
     with_ce = [
         name
@@ -151,10 +209,11 @@ def test_segmentation_experiments_are_wired_for_segmentation(experiment):
     assert cfg.data.dataset.num_classes == 19
     # ignore_index должен доехать до лосса, иначе void-пиксели Cityscapes
     # станут двадцатым «классом» и испортят обучение. У композиции своего
-    # ignore_index нет — он задан в каждом слагаемом.
+    # ignore_index нет — он задан в слагаемых; те, что его не объявляют,
+    # полагаются на дефолт 255, и он обязан совпасть с датасетом.
     losses = cfg.loss.get("losses")
     for loss_cfg in losses.values() if losses is not None else [cfg.loss]:
-        assert loss_cfg.ignore_index == cfg.data.dataset.ignore_index
+        assert loss_cfg.get("ignore_index", 255) == cfg.data.dataset.ignore_index
 
 
 def test_segmentation_scratch_experiments_have_no_teacher():
@@ -232,7 +291,7 @@ def test_base_segmentation_transform_stays_unchanged():
 FITNETS_EXPERIMENTS = [
     "segmentation/FitNets/cityscapes_FitNets_segformer_b2_to_unet_base",
     "segmentation/FitNets/cityscapes_FitNets_segformer_b2_to_unet_small",
-    "segmentation/FitNets/cityscapes_FitNets_dice_ohem_segformer_b2_to_unet_small",
+    "segmentation/FitNets/cityscapes_FitNets_dice_ohem_segformer_b5_to_unet_small",
 ]
 
 

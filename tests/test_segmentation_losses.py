@@ -151,6 +151,19 @@ class TestBPKD:
         result = BPKDLoss(ignore_index=IGNORE_INDEX)(student, teacher, labels)
         assert result["edge"] >= 0 and result["body"] >= 0
 
+    def test_subsampling_keeps_the_value_close(self, batch):
+        """spatial_stride нужен ради памяти, и оценка от него не должна
+        разъезжаться: иначе прогоны с разным stride несравнимы."""
+        student, teacher, labels = batch
+        full = BPKDLoss(ce_weight=0.0, spatial_stride=1, ignore_index=IGNORE_INDEX)
+        thinned = BPKDLoss(ce_weight=0.0, spatial_stride=2, ignore_index=IGNORE_INDEX)
+
+        # Пиксели прорежены вчетверо, поэтому канальная сумма KL падает
+        # примерно во столько же раз — сравниваем порядок, а не значение.
+        assert thinned(student, teacher, labels)["edge"] == pytest.approx(
+            full(student, teacher, labels)["edge"], rel=0.5
+        )
+
     def test_edge_term_ignores_what_happens_inside_the_body(self):
         """Ошибка ученика вдали от границы не должна двигать edge-член —
         иначе он ничем не отличался бы от обычной попиксельной KD."""
