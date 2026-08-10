@@ -25,6 +25,15 @@ docs/ — документация по конкретным подсистем�
 
 [Документация по аугментациям](augmentations.md) — Mixup/CutMix, Random Erasing,
 stochastic depth, dropout и что из этого включено по умолчанию (ничего).
+Там же — `teacher_skips`: как показывать ученику сильные аугментации, а
+учителю дистилляции слабые.
+
+# Лоссы
+
+[Документация по лоссам](losses.md) — что есть (CE, Dice, OHEM, Focal, Lovász,
+KD/CWD/DIST/FitNets/MGD/BPKD/HeteroAKD), как складывать несколько лоссов
+в один (`CompositeLoss`), как менять их веса по ходу обучения
+(`loss_schedule`) и как включить мультимасштабные таргеты учителя.
 
 # Lightning 
 

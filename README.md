@@ -73,6 +73,75 @@ python scripts/train.py experiment=<...> model.student.dropout=0.1          # U-
 Что каждый рычаг делает, когда его включать и почему для сегментации нужен
 CutMix, а не Mixup — в [docs/augmentations.md](docs/augmentations.md).
 
+Отдельный случай — дистилляция: учитель предобучен на чистых кадрах и на
+сильной фотометрии проседает, то есть отдаёт ученику испорченные таргеты.
+`teacher_skips` в train-трансформе даёт ученику сильный кадр, а учителю —
+слабый, при общей геометрии. Что показывать учителю, а что нет — меряется:
+
+```bash
+python scripts/probe_teacher_augmentations.py experiment=<...> +probe.samples=50
+```
+
+## Лоссы
+
+```bash
+# лоссы сегментации: CE + Dice / трудные пиксели / прямая оптимизация IoU
+python scripts/train.py experiment=<...> loss=dice
+python scripts/train.py experiment=<...> loss=ohem      # loss=focal
+python scripts/train.py experiment=<...> loss=lovasz
+
+# дистилляция: граница отдельно от тела, разнородные архитектуры
+python scripts/train.py experiment=<...> loss=bpkd
+python scripts/train.py experiment=<...> loss=heteroakd
+
+# несколько лоссов сразу (CE + FitNets + Dice)
+python scripts/train.py experiment=<...> loss=composite_fitnets_dice
+```
+
+Веса слагаемых можно менять по ходу обучения — например гасить дистилляцию
+к концу, когда учитель начинает тянуть ученика к своим ошибкам:
+
+```yaml
+loss_schedule:
+  hint_weight: {schedule: cosine, start: 0.7, end: 0.0, start_epoch: 120}
+  ce_weight:   {schedule: cosine, start: 0.3, end: 1.0, start_epoch: 120}
+```
+
+И отдельно — мультимасштабные таргеты учителя (несколько прогонов вместо
+одного, зато чище):
+
+```yaml
+model:
+  teacher_inference: {scales: [0.75, 1.0, 1.25], flip: true}
+```
+
+Подробности — в [docs/losses.md](docs/losses.md).
+
+## SegNeXt
+
+Свёрточный сегментатор, который на Cityscapes догоняет трансформеры своего
+размера (T: 4.3M / 79.8 mIoU, S: 13.9M / 81.3, B: 27.6M / 82.6, L: 48.9M / 83.2).
+Годится и учеником, и учителем:
+
+```bash
+# ученик: энкодер MSCAN с ImageNet качается автоматически
+python scripts/train.py experiment=scratch/cityscapes_scratch_segnext_t
+python scripts/train.py experiment=<...> model/student=segnext model.student.variant=s
+
+# учитель: веса на Cityscapes нужно скачать руками
+python scripts/train.py experiment=<...> model/teacher=segnext \
+    model.teacher.checkpoint_path=data/weights/segnext/segnext_base_1024x1024_city.pth
+```
+
+Автоматически скачиваемых cityscapes-весов у SegNeXt нет: OpenMMLab
+опубликовал только ADE20K, а чекпоинты авторов лежат на TsingHua Cloud
+(таблица Cityscapes в README
+[Visual-Attention-Network/SegNeXt](https://github.com/Visual-Attention-Network/SegNeXt)).
+Файл кладётся в `data/weights/segnext/` и указывается в `checkpoint_path` —
+ключи переименовывать не нужно, конвертер понимает и mmsegmentation, и
+оригинальный репозиторий. Второй путь, без чужих файлов, — обучить SegNeXt
+самим (`scratch/cityscapes_scratch_segnext_t`) и подставить `best.pt`.
+
 Артефакты каждого запуска — в `outputs/<name>/<дата_время>/`:
 `.hydra/config.yaml` (полный снапшот конфига), `train.log`, `history.csv`
 (метрики и все компоненты лосса по эпохам), `best.pt` / `last.pt`.
