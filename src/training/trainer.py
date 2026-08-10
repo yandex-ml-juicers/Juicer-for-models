@@ -95,6 +95,7 @@ class Trainer:
         progress_bar: bool = True,
         metrics_callback: tuple[Callable, Callable, Callable] | None = None,
         scalars: dict[str, float | int | str],
+        accumulation_steps: int = 1,
     ) -> None:
         if criterion.requires_teacher and teacher is None:
             raise ValueError(
@@ -126,6 +127,7 @@ class Trainer:
         self.metrics_callback_single = metrics_callback[1] if metrics_callback is not None else None
         self.metrics_callback_table = metrics_callback[2] if metrics_callback is not None else None
         self.scalars = scalars
+        self.accumulation_steps = accumulation_steps
         # metrics = {'loss.train_loss': }
         self.train_confmat: ConfusionMatrixAccumulator | None = None
         if {"precision", "recall", "f1"} & set(self.scalars):
@@ -434,16 +436,20 @@ def detection_evaluate(
 
         targets_device = prepare_targets(targets, device, targers_mode)
 
-        outputs = model(pixel_values=images, labels=targets_device)
-        losses = criterion(outputs, teacher_outputs=None, labels=targets_device)
+        if "lwdetr" in str(type(model)).lower():
+            outputs = model(pixel_values=images, labels=targets_device)
+            losses = criterion(outputs, teacher_outputs=None, labels=targets_device)
+            val_loss = losses["total"].item()
+            if prediction_postprocessor is not None:
+                predictions = prediction_postprocessor(outputs, images)
+            else:
+                predictions = outputs
+        else:
+            predictions = model(images)
+            val_loss = 0.0
 
         batch_size = len(images)
-        loss_meter.update(losses["total"].item(), batch_size)
-
-        if prediction_postprocessor is not None:
-            predictions = prediction_postprocessor(outputs, images)
-        else:
-            predictions = outputs
+        loss_meter.update(val_loss, batch_size)
 
         predictions_for_metric = []
         targets_for_metric = []
@@ -519,7 +525,8 @@ class DetectionTrainer:
         scalars: dict[str, float | int | str],
         prediction_postprocessor: Callable | None = None,
         label_offset: int = 1,
-        targers_mode: str | None = None
+        targers_mode: str | None = None,
+        accumulation_steps: int = 1
     ) -> None:
 
         if criterion.requires_teacher and teacher is None:
@@ -531,7 +538,7 @@ class DetectionTrainer:
 
         self.label_offset = label_offset
         self.targers_mode = targers_mode
-
+        self.accumulation_steps = accumulation_steps
         self.student = student
         self.teacher = teacher
         self.criterion = criterion
@@ -689,6 +696,9 @@ class DetectionTrainer:
             leave=False,
         )
 
+        # Обнуляем градиенты ПЕРЕД началом эпохи
+        self.optimizer.zero_grad(set_to_none=True)
+
         for step, (images, targets) in enumerate(iterator):
             if self.limit_train_batches is not None and step >= self.limit_train_batches:
                 iterator.close()
@@ -698,7 +708,6 @@ class DetectionTrainer:
             targets = prepare_targets(targets, self.device, self.targers_mode)
             batch_size = len(images)
 
-            self.optimizer.zero_grad(set_to_none=True)
             if self.student_extractor is not None:
                 self.student_extractor.clear()
             if self.teacher_extractor is not None:
@@ -713,10 +722,14 @@ class DetectionTrainer:
                 if isinstance(images, (list, tuple)):
                     images = torch.stack(images, dim=0)
 
-                if self.teacher is not None:
-                    student_outputs = self.student(images)
+                if "lwdetr" in str(type(self.student)).lower():
+                    if self.teacher is not None:
+                        student_outputs = self.student(images)
+                    else:
+                        student_outputs = self.student(pixel_values=images, labels=targets)
                 else:
-                    student_outputs = self.student(pixel_values=images, labels=targets)
+                    student_outputs = self.student(images, targets)
+
 
                 losses = self.criterion(
                     student_outputs,
@@ -730,38 +743,50 @@ class DetectionTrainer:
                     ),
                 )
 
-            self.scaler.scale(losses["total"]).backward()
-            self.scaler.unscale_(self.optimizer)
+                # --- НАКОПЛЕНИЕ ГРАДИЕНТОВ ---
+                # Делим лосс на шаги накопления
+                loss_scaled = losses["total"] / self.accumulation_steps
 
-            params = [p for group in self.optimizer.param_groups for p in group["params"]]
-            clip_threshold = self.grad_clip_norm if self.grad_clip_norm is not None else float("inf") 
-            grad_norm = torch.nn.utils.clip_grad_norm_(params, clip_threshold)
+            self.scaler.scale(loss_scaled).backward()
 
-            self.scaler.step(self.optimizer)
-            self.scaler.update()
+            # Делаем шаг оптимизатора только раз в N шагов (или в самом конце эпохи)
+            if (step + 1) % self.accumulation_steps == 0 or (step + 1) == len(self.train_loader):
+                self.scaler.unscale_(self.optimizer)
 
-            grad_norm_value = float(grad_norm)
-            meters_avg["avg_grad_norm"].update(grad_norm_value, n=1)
-            max_grad_norm = max(max_grad_norm, grad_norm_value)
+                params = [p for group in self.optimizer.param_groups for p in group["params"]]
+                clip_threshold = self.grad_clip_norm if self.grad_clip_norm is not None else float("inf")
+                grad_norm = torch.nn.utils.clip_grad_norm_(params, clip_threshold)
 
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+                self.optimizer.zero_grad(set_to_none=True) # Обнуляем только после шага
+
+                # Логируем градиенты только когда реально обновляем веса
+                grad_norm_value = float(grad_norm)
+                meters_avg["avg_grad_norm"].update(grad_norm_value, n=1)
+                max_grad_norm = max(max_grad_norm, grad_norm_value)
+
+            # Логируем веса и лоссы как обычно
             with torch.no_grad():
-                weight_norm = torch.norm(torch.stack([p.detach().norm() for p in params]))
-            weight_norm_value = float(weight_norm)
-            meters_avg["avg_weight_norm"].update(weight_norm_value, n=1)
-            max_weight_norm = max(max_weight_norm, weight_norm_value)
+                params_for_norm = [p for group in self.optimizer.param_groups for p in group["params"]]
+                weight_norm = torch.norm(torch.stack([p.detach().norm() for p in params_for_norm]))
+                weight_norm_value = float(weight_norm)
+                meters_avg["avg_weight_norm"].update(weight_norm_value, n=1)
+                max_weight_norm = max(max_weight_norm, weight_norm_value)
 
             for key, value in losses.items():
                 meters_avg_loss[key].update(value.item(), batch_size)
 
             iterator.set_postfix({"loss": f"{losses['total'].item():.3f}"})
 
-            train_loss_components = {key: meter.avg for key, meter in meters_avg_loss.items()}
-            meters_other["max_grad_norm"] = max_grad_norm
-            meters_other["max_weight_norm"] = max_weight_norm
+        # --- КОНЕЦ ЦИКЛА (теперь return снаружи) ---
+        train_loss_components = {key: meter.avg for key, meter in meters_avg_loss.items()}
+        meters_other["max_grad_norm"] = max_grad_norm
+        meters_other["max_weight_norm"] = max_weight_norm
 
-            other_train_metrics = {**{key: meter.avg for key, meter in meters_avg.items()}, **meters_other}
+        other_train_metrics = {**{key: meter.avg for key, meter in meters_avg.items()}, **meters_other}
 
-            return train_loss_components, other_train_metrics
+        return train_loss_components, other_train_metrics
 
     def _save_checkpoint(
         self,

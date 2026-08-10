@@ -123,6 +123,13 @@ def clearml_reporter(task):
 
 @hydra.main(config_path="../configs", config_name="config", version_base="1.3")
 def main(cfg: DictConfig) -> float:
+    import torch
+    
+    torch.multiprocessing.set_sharing_strategy('file_system')
+    
+    import torch._dynamo
+    torch._dynamo.config.disable = True
+
     task = init_clearml(cfg)
 
     output_dir = Path(HydraConfig.get().runtime.output_dir)
@@ -141,8 +148,28 @@ def main(cfg: DictConfig) -> float:
     criterion = instantiate(cfg.loss).to(device)
 
     # Обучаемые параметры лосса (адаптеры feature-KD) оптимизируются вместе с учеником.
-    params = list(student.parameters()) + list(criterion.parameters())
-    optimizer = instantiate(cfg.optimizer)(params)  
+    if cfg.task_type == "detection" and "lwdetr" in cfg.model.student._target_:
+        log.info("Настройка раздельного Learning Rate для DETR (backbone lr = lr * 0.1)")
+        backbone_params = []
+        head_params = []
+        for name, param in student.named_parameters():
+            if param.requires_grad:
+                if "backbone" in name:
+                    backbone_params.append(param)
+                else:
+                    head_params.append(param)
+        # Группы параметров: для ViT (backbone) уменьшаем LR в 10 раз
+        optimizer_params = [
+            {"params": backbone_params, "lr": cfg.optimizer.lr * 0.1},
+            {"params": head_params, "lr": cfg.optimizer.lr},
+            {"params": list(criterion.parameters()), "lr": cfg.optimizer.lr}
+        ]
+        optimizer = instantiate(cfg.optimizer)(optimizer_params)
+    else:
+        # Для классификации оставляем как было
+        params = list(student.parameters()) + list(criterion.parameters())
+        optimizer = instantiate(cfg.optimizer)(params)
+
     scheduler = instantiate(cfg.scheduler)(optimizer) if cfg.get("scheduler") is not None else None
 
     if cfg.task_type == "classification":
