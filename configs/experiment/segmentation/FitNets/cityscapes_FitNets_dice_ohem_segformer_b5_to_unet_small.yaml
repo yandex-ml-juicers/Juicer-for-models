@@ -19,7 +19,7 @@ defaults:
   - override /data/transform/eval: cityscapes_seg_transform
   - override /model/teacher: segformer
   - override /model/student: timm_unet
-  - override /loss: composite_fitnets_dice
+  - override /loss: composite_base
   - override /optimizer: adamw
   - override /scheduler: warmup_cosine
   - override /augment: cutmix_segmentation
@@ -37,7 +37,7 @@ clearml:
   plots:
     enabled: true
     every_n_epochs: 10
-  reuse_last_task_id: True
+  reuse_last_task_id: false
   continue_last_task: False
   output_uri: false
 
@@ -52,40 +52,51 @@ trainer:
 # Веса weights.* — то, что гасит планировщик ниже.
 loss:
   losses:
-    kd:
+    fitnets:
+      _target_: src.losses.FitNetsKD
       ce_weight: 0.0
-      hint_weight: 1.0
-      logits_weight: 0.6
+      hint_weight: 3.0
+      logits_weight: 1.5
       temperature: 1.0
       layers:
         taps.stage3: { student_channels: 112, teacher_channels: 320, weight: 0.8 }
         taps.stage4: { student_channels: 320, teacher_channels: 512, weight: 0.1 }
-    seg:
+    dice:
+      _target_: src.losses.DiceLoss
       ce_weight: 0.0
-      dice_weight: 1.0
-    hard:
+      dice_weight: 3.5
+    ohem:
       _target_: src.losses.OhemCrossEntropy
       thresh: 0.7
       keep_ratio: 0.1
       ignore_index: ${data.dataset.ignore_index}
-  weights:
-    kd: 1.0
-    seg: 0.3
-    hard: 0.2
+    lovasz:
+      _target_: src.losses.LovaszSoftmax
+      ce_weight: 0.0
+      lovasz_weight: 3.5
+      pixel_stride: 2
+      label_smoothing: 0.05
+      ignore_index: ${data.dataset.ignore_index}
 
-# Дистилляция гаснет к концу, а сегментационные слагаемые набирают вес.
+  weights:
+    fitnets: 0.5
+    dice: 0.1
+    ohem: 0.3
+    lovasz: 0.1
+
 loss_schedule:
-  weights.kd: {schedule: cosine, start: 1.0, end: 0.0, start_epoch: 120}
-  weights.seg: {schedule: cosine, start: 0.3, end: 0.7, start_epoch: 120}
-  weights.hard: {schedule: cosine, start: 0.2, end: 0.5, start_epoch: 120}
+  weights.fitnets: {schedule: cosine, start: 1.0, end: 0.0, start_epoch: 120}
+  weights.dice: {schedule: cosine, start: 1.0, end: 0.7, start_epoch: 120}
+  weights.ohem: {schedule: cosine, start: 1.0, end: 0.5, start_epoch: 120}
+  weights.lovasz: {schedule: cosine, start: 1.0, end: 0.5, start_epoch: 120}
 
 optimizer:
-  lr: 5.0e-4
+  lr: 1.0e-3
   weight_decay: 3.0e-2
 
 scheduler:
-  warmup_epochs: 30
-  eta_min: 1.0e-4
+  warmup_epochs: 0
+  eta_min: 3.0e-4
 
 data:
   loader:

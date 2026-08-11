@@ -20,7 +20,7 @@ defaults:
   - override /data/transform/eval: cityscapes_seg_transform
   - override /model/teacher: segformer
   - override /model/student: timm_unet
-  - override /loss: composite_heteroakd_dice
+  - override /loss: composite_base
   - override /optimizer: adamw
   - override /scheduler: warmup_cosine
   - override /augment: cutmix_segmentation
@@ -36,65 +36,74 @@ clearml:
   tags: [cityscapes, KD, HeteroAKD, segformer-b5, unet-small, segmentation]
   scalars: ['KL_divergence', 'agreement_rate']
   plots:
-    enabled: true
+    enabled: False
     every_n_epochs: 10
-  reuse_last_task_id: True
+  reuse_last_task_id: false
   continue_last_task: False
   output_uri: false
 
 trainer:
-  epochs: 200
+  epochs: 100
   amp: true
   grad_clip_norm: 2.5
 
 loss:
   losses:
     hetero:
+      _target_: src.losses.HeteroAKDLoss
       # taps.stage4 — страйд 32: 320 каналов у efficientnet_b0, 512 у MiT-B5.
       layer: taps.stage4
       student_channels: 320
       teacher_channels: 512
       temperature: 1.0
       ce_weight: 0.0
-      kd_weight: 0.1
+      kd_weight: 1.3
       # hakd — взвешенное СРЕДНЕЕ по пикселям (веса KEM суммируются в
       # единицу), поэтому его значение на порядок меньше остальных членов:
       # при весе 1.0 замер дал 0.03 против 1.27 у proj, то есть сам метод
       # давал 2% своего же слагаемого. 15 выводит его в 35-40%.
-      hakd_weight: 15.0
+      hakd_weight: 30.0
       # proj — единственное, что обучает проектор УЧИТЕЛЯ (таргет отсоединён
       # от графа), поэтому в ноль его ронять нельзя: без обученного проектора
       # KMM всегда будет считать учителя ненадёжным, hakd так и останется
       # около нуля. Половина веса — компромисс.
-      proj_weight: 0.5
-    seg:
+      proj_weight: 1.5
+    dice:
+      _target_: src.losses.DiceLoss
       ce_weight: 0.0
-      dice_weight: 1.0
-    hard:
+      dice_weight: 3.5
+    ohem:
       _target_: src.losses.OhemCrossEntropy
       thresh: 0.7
       keep_ratio: 0.1
       ignore_index: ${data.dataset.ignore_index}
-  weights:
-    hetero: 1.0
-    seg: 0.3
-    hard: 0.2
+    lovasz:
+      _target_: src.losses.LovaszSoftmax
+      ce_weight: 0.0
+      lovasz_weight: 3.5
+      pixel_stride: 2
+      label_smoothing: 0.05
+      ignore_index: ${data.dataset.ignore_index}
 
-# Гасим только сам дистилляционный член. proj_weight внутри лосса не трогаем:
-# проекторы обязаны оставаться привязанными к классам до конца обучения,
-# иначе KMM/KEM в последних эпохах начнут считать надёжность по мусору.
+  weights:
+    hetero: 0.5
+    dice: 0.1
+    ohem: 0.3
+    lovasz: 0.1
+
 loss_schedule:
   weights.hetero: {schedule: cosine, start: 1.0, end: 0.0, start_epoch: 120}
-  weights.seg: {schedule: cosine, start: 0.3, end: 0.7, start_epoch: 120}
-  weights.hard: {schedule: cosine, start: 0.2, end: 0.5, start_epoch: 120}
+  weights.dice: {schedule: cosine, start: 1.0, end: 0.7, start_epoch: 120}
+  weights.ohem: {schedule: cosine, start: 1.0, end: 0.5, start_epoch: 120}
+  weights.lovasz: {schedule: cosine, start: 1.0, end: 0.5, start_epoch: 120}
 
 optimizer:
-  lr: 5.0e-4
+  lr: 1.0e-3
   weight_decay: 3.0e-2
 
 scheduler:
-  warmup_epochs: 30
-  eta_min: 1.0e-4
+  warmup_epochs: 0
+  eta_min: 3.0e-4
 
 data:
   loader:
