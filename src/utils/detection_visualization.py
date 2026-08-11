@@ -10,9 +10,14 @@ def visualize_detection(
     score_threshold: float = 0.3,
 ) -> torch.Tensor:
 
-    image = image.detach().cpu()
+    image = image.detach().cpu().float()
+
+    mean = torch.tensor([0.485, 0.456, 0.406], dtype=torch.float32).view(3, 1, 1)
+    std = torch.tensor([0.229, 0.224, 0.225], dtype=torch.float32).view(3, 1, 1)
 
     # если image после Normalize — сначала денормализовать
+    image = image * std + mean
+    image = image.clamp(0, 1)
     image = (image * 255).to(torch.uint8)
 
     gt_labels = [label_to_name[int(label)] for label in target["labels"]]

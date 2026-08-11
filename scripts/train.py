@@ -7,6 +7,8 @@
 import logging
 from pathlib import Path
 
+import torch
+
 import hydra
 from hydra.core.hydra_config import HydraConfig
 from hydra.utils import instantiate
@@ -149,18 +151,17 @@ def clearml_reporter(task):
     ) -> None:
         image = image.detach().cpu()
 
-        mean = torch.tensor([0.485, 0.456, 0.406], dtype=image.dtype).view(3, 1, 1)
-        std = torch.tensor([0.229, 0.224, 0.225], dtype=image.dtype).view(3, 1, 1)
-
-        image = image * std + mean
-        image = image.clamp(0.0, 1.0)
-        image = image.permute(1, 2, 0).mul(255).to(torch.uint8).numpy()
+        if image.dtype == torch.uint8:
+            image = image.permute(1, 2, 0).numpy()
+        else:
+            image = image.clamp(0, 1)
+            image = image.permute(1, 2, 0).numpy()
 
         logger.report_image(
             title="Validation Detection",
             series=series,
             iteration=iteration,
-            image=image.permute(1, 2, 0).numpy(),
+            image=image,
     )
 
     return report_scalar, report_single, report_table, report_debug_sample
