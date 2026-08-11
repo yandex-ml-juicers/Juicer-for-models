@@ -196,6 +196,31 @@ CITYSCAPES_SEGMENTATION_CLASSES = (
     "motorcycle",
     "bicycle",
 )
+# Официальные цвета Cityscapes в порядке trainId — те же, что в публикациях
+# и в notebooks/segmentation_predictions_visualization.ipynb. Держим рядом с
+# именами классов, чтобы предсказания везде раскрашивались одинаково.
+CITYSCAPES_SEGMENTATION_PALETTE = (
+    (128, 64, 128),   # road
+    (244, 35, 232),   # sidewalk
+    (70, 70, 70),     # building
+    (102, 102, 156),  # wall
+    (190, 153, 153),  # fence
+    (153, 153, 153),  # pole
+    (250, 170, 30),   # traffic light
+    (220, 220, 0),    # traffic sign
+    (107, 142, 35),   # vegetation
+    (152, 251, 152),  # terrain
+    (70, 130, 180),   # sky
+    (220, 20, 60),    # person
+    (255, 0, 0),      # rider
+    (0, 0, 142),      # car
+    (0, 0, 70),       # truck
+    (0, 60, 100),     # bus
+    (0, 80, 100),     # train
+    (0, 0, 230),      # motorcycle
+    (119, 11, 32),    # bicycle
+)
+
 # Канонический маппинг Cityscapes labelId -> trainId (19 оценочных классов).
 
 CITYSCAPES_LABEL_ID_TO_TRAIN_ID = {
@@ -281,6 +306,7 @@ class CityscapesSegmentation(Dataset):
         self.transform = transform
         self.ignore_index = ignore_index
         self.classes = CITYSCAPES_SEGMENTATION_CLASSES
+        self.palette = CITYSCAPES_SEGMENTATION_PALETTE
         self.num_classes = len(CITYSCAPES_SEGMENTATION_CLASSES)
 
     def __len__(self) -> int:

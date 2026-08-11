@@ -1,3 +1,8 @@
+# Базовый train-рецепт Cityscapes: scale -> crop -> flip -> jitter.
+#
+# Значения подобраны так, чтобы совпадать с уже посчитанными бейзлайнами —
+# менять их здесь нельзя, иначе прошлые прогоны перестанут быть сравнимыми.
+# Усиленный набор лежит рядом: cityscapes_seg_strong_transform.yaml.
 _target_: src.data.transforms.build_segmentation_transform_train
 mean: ${data.dataset.normalize.mean}
 std: ${data.dataset.normalize.std}
@@ -6,3 +11,12 @@ scale_range: ${data.dataset.scale_range}
 ignore_index: ${data.dataset.ignore_index}
 color_jitter: 0.4
 hflip_p: 0.5
+
+# Ниже — рычаги, выключенные в базовом рецепте. Оставлены явно, чтобы их
+# было видно из конфига, а не только из сигнатуры build_segmentation_transform_train.
+hue: 0.0                  # сдвиг оттенка; 0.05 уже заметно меняет цвета машин
+color_jitter_p: 1.0       # вероятность применить джиттер к кадру
+cat_max_ratio: null       # отбраковка кропов, где один класс занимает > доли пикселей
+blur_p: 0.0               # гауссово размытие
+random_erasing_p: 0.0     # случайное стирание прямоугольника
+random_erasing_erases_labels: false  # true — помечать стёртое как ignore_index

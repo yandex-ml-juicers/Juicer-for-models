@@ -26,11 +26,26 @@ def build_transform_train(
     mean: Sequence[float],
     std: Sequence[float],
     image_size: int | None = None,
+    hflip_p: float = 0.5,
+    rand_augment_num_ops: int = 0,
+    rand_augment_magnitude: int = 9,
+    random_erasing_p: float = 0.0,
+    random_erasing_scale: Sequence[float] = (0.02, 0.2),
+    random_erasing_ratio: Sequence[float] = (0.3, 3.3),
+    random_erasing_value: float | str = "random",
 ) -> transforms.Compose:
-    """ToTensor + Normalize, опционально с Resize (для ImageNet-учителей, 224).
+    """RandomResizedCrop + flip (+ опционально RandAugment и RandomErasing).
 
-    Аугментаций нет намеренно: бейзлайны в ноутбуках обучались без них,
-    а воспроизводить нужно ровно их. Точка расширения — сюда.
+    Дефолты повторяют прежнее поведение один в один: без RandAugment и без
+    стирания. Всё новое включается только явно из конфига, чтобы уже
+    посчитанные бейзлайны остались сравнимыми.
+
+    Args:
+        rand_augment_num_ops: сколько операций RandAugment применять к кадру;
+            0 — не применять. Стандартный ImageNet-рецепт — 2 при magnitude 9.
+        random_erasing_p: вероятность стереть прямоугольник. Стирание идёт
+            ПОСЛЕ Normalize, поэтому "random" — это шум из N(0, 1) уже
+            в нормализованной шкале (так же устроен torchvision).
     """
     ops: list = []
     if image_size is not None:
@@ -41,9 +56,24 @@ def build_transform_train(
             interpolation=transforms.InterpolationMode.BILINEAR,
             antialias=True,
         ))
-        ops.append(transforms.RandomHorizontalFlip(p=0.5))
+    if hflip_p > 0:
+        ops.append(transforms.RandomHorizontalFlip(p=hflip_p))
+    if rand_augment_num_ops > 0:
+        # До ToTensor: RandAugment работает с PIL/uint8.
+        ops.append(transforms.RandAugment(
+            num_ops=rand_augment_num_ops,
+            magnitude=rand_augment_magnitude,
+            interpolation=transforms.InterpolationMode.BILINEAR,
+        ))
     ops.append(transforms.ToTensor())
     ops.append(transforms.Normalize(tuple(mean), tuple(std)))
+    if random_erasing_p > 0:
+        ops.append(transforms.RandomErasing(
+            p=random_erasing_p,
+            scale=tuple(random_erasing_scale),
+            ratio=tuple(random_erasing_ratio),
+            value=random_erasing_value,
+        ))
     return transforms.Compose(ops)
 
 
@@ -51,16 +81,21 @@ def build_transform_eval(
     mean: Sequence[float],
     std: Sequence[float],
     image_size: int | None = None,
+    resize_size: int | None = None,
 ) -> transforms.Compose:
-    """ToTensor + Normalize, опционально с Resize (для ImageNet-учителей, 224).
+    """Resize по короткой стороне + CenterCrop, затем ToTensor + Normalize.
 
-    Аугментаций нет намеренно: бейзлайны в ноутбуках обучались без них,
-    а воспроизводить нужно ровно их. Точка расширения — сюда.
+    resize_size=None означает канонические 87.5% ImageNet-рецепта:
+    resize до image_size / 0.875 и центральный кроп до image_size
+    (224 -> 256, как было захардкожено раньше). Явное значение нужно, только
+    если воспроизводится чужой рецепт с другим соотношением.
     """
     ops: list = []
     if image_size is not None:
+        if resize_size is None:
+            resize_size = int(round(image_size / 0.875))
         ops.append(transforms.Resize(
-            size=256,
+            size=resize_size,
             interpolation=transforms.InterpolationMode.BILINEAR,
             antialias=True
         ))
@@ -95,7 +130,7 @@ def build_transform_tinyvit_train(
         p=0.25,
         scale=(0.02, 0.20),
         ratio=(0.3, 3.3), 
-        value="random"
+        value="random" # type: ignore
     ))
     return transforms.Compose(ops)
 
@@ -107,8 +142,14 @@ def build_transform_tinyvit_eval(
 ) -> transforms.Compose:
     ops: list = []
     if image_size is not None:
-        ops.append(transforms.Resize(size=256, interpolation=transforms.InterpolationMode.BICUBIC))
-    ops.append(transforms.CenterCrop(image_size))
+        # 256/224 — то же соотношение 0.875, что и в build_transform_eval.
+        ops.append(transforms.Resize(
+            size=int(round(image_size / 0.875)),
+            interpolation=transforms.InterpolationMode.BICUBIC,
+        ))
+        # CenterCrop обязан быть внутри этой ветки: с image_size=None
+        # он падает с TypeError вместо того, чтобы просто ничего не делать.
+        ops.append(transforms.CenterCrop(image_size))
     ops.append(transforms.ToTensor())
     ops.append(transforms.Normalize(tuple(mean), tuple(std)))
     return transforms.Compose(ops)
@@ -215,18 +256,47 @@ def build_segmentation_transform_train(
     ignore_index: int = 255,
     color_jitter: float = 0.5,
     hflip_p: float = 0.5,
+    hue: float = 0.0,
+    color_jitter_p: float = 1.0,
+    cat_max_ratio: float | None = None,
+    blur_p: float = 0.0,
+    blur_kernel_size: int = 5,
+    blur_sigma: Sequence[float] = (0.1, 2.0),
+    random_erasing_p: float = 0.0,
+    random_erasing_scale: Sequence[float] = (0.02, 0.2),
+    random_erasing_ratio: Sequence[float] = (0.3, 3.3),
+    random_erasing_value: float | str = 0.0,
+    random_erasing_erases_labels: bool = False,
 ) -> segmentation_transforms.SegmentationCompose:
     """Стандартный train-рецепт семантической сегментации Cityscapes.
 
-    scale -> crop -> flip -> jitter -> tensor -> normalize.
+    scale -> crop -> flip -> jitter -> blur -> tensor -> normalize -> erasing.
 
     Порядок не произвольный: геометрия применяется до фотометрии (иначе
-    jitter считался бы по уже обрезанной статистике), а ToTensor/Normalize
-    идут последними, потому что до них дешевле работать с uint8/PIL.
+    jitter считался бы по уже обрезанной статистике), ToTensor/Normalize
+    идут ближе к концу, потому что до них дешевле работать с uint8/PIL,
+    а стирание — самым последним, потому что оно задаётся в нормализованной
+    шкале (см. SegmentationRandomErasing).
 
     Обучение идёт на кропах, а не на полном кадре 1024x2048: полный кадр
     не влезает в память батчем осмысленного размера, а случайный масштаб
     с кропом заодно даёт модели объекты разных размеров.
+
+    Всё, что добавлено сверх базового рецепта (hue, cat_max_ratio, blur,
+    erasing), по умолчанию ВЫКЛЮЧЕНО: базовый конфиг обязан оставаться тем же,
+    иначе уже посчитанные бейзлайны команды перестанут быть сравнимыми.
+    Усиленный набор лежит отдельным конфигом — configs/data/transform/train/
+    cityscapes_seg_strong_transform.yaml.
+
+    Args:
+        color_jitter: сила brightness/contrast/saturation; 0 — выключить.
+        color_jitter_p: вероятность применить джиттер к кадру.
+        hue: сила сдвига оттенка (0.05 уже заметно; 0 — выключен).
+        cat_max_ratio: доля, выше которой доминирование одного класса делает
+            кроп непригодным; None — брать первый попавшийся кроп.
+        blur_p: вероятность гауссова размытия.
+        random_erasing_p: вероятность стереть прямоугольник.
+        random_erasing_erases_labels: помечать ли стёртое как ignore_index.
     """
     ops: list = [
         segmentation_transforms.SegmentationRandomScale(
@@ -235,21 +305,45 @@ def build_segmentation_transform_train(
         segmentation_transforms.SegmentationRandomCrop(
             crop_size=(int(crop_size[0]), int(crop_size[1])),
             ignore_index=ignore_index,
+            cat_max_ratio=cat_max_ratio,
         ),
         segmentation_transforms.SegmentationRandomHorizontalFlip(p=hflip_p),
     ]
 
-    if color_jitter > 0:
+    if color_jitter > 0 or hue > 0:
         ops.append(
             segmentation_transforms.SegmentationColorJitter(
                 brightness=color_jitter,
                 contrast=color_jitter,
                 saturation=color_jitter,
+                hue=hue,
+                p=color_jitter_p,
+            )
+        )
+
+    if blur_p > 0:
+        ops.append(
+            segmentation_transforms.SegmentationGaussianBlur(
+                p=blur_p,
+                kernel_size=blur_kernel_size,
+                sigma=blur_sigma,
             )
         )
 
     ops.append(segmentation_transforms.SegmentationToTensor())
     ops.append(segmentation_transforms.SegmentationNormalize(mean, std))
+
+    if random_erasing_p > 0:
+        ops.append(
+            segmentation_transforms.SegmentationRandomErasing(
+                p=random_erasing_p,
+                scale=random_erasing_scale,
+                ratio=random_erasing_ratio,
+                value=random_erasing_value,
+                erase_labels=random_erasing_erases_labels,
+                ignore_index=ignore_index,
+            )
+        )
 
     return segmentation_transforms.SegmentationCompose(ops)
 

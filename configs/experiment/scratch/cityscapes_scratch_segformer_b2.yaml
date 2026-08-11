@@ -1,0 +1,68 @@
+# @package _global_
+# Учитель дистилляции: SegFormer-B2 (~27.4M) на Cityscapes, 19 классов.
+# Чекпоинт этого прогона идёт в model/teacher.checkpoint_path экспериментов KD.
+defaults:
+  - override /data/dataset: cityscapes_seg
+  - override /data/transform/train: cityscapes_seg_transform
+  - override /data/transform/eval: cityscapes_seg_transform
+  - override /model/teacher: null
+  - override /model/student: segformer
+  - override /loss: ce
+  - override /optimizer: adamw
+  - override /scheduler: warmup_cosine
+  # Батч на карту мал, поэтому BatchNorm считаем глобально (см. конфиг группы).
+  - override /distributed: sync_bn
+
+name: cityscapes_scratch_segformer_b2
+device: cuda
+
+# У bilinear-интерполяции (апсемпл логитов) и nll_loss2d нет детерминированных
+# CUDA-ядер — при deterministic=true запуск падает с RuntimeError.
+deterministic: false
+
+task_type: "segmentation"
+
+clearml:
+  enabled: True
+  tags: [cityscapes, teacher, scratch, segformer-b2, segmentation]
+  scalars: []
+  reuse_last_task_id: False
+  continue_last_task: False
+  output_uri: false
+
+trainer:
+  epochs: 100
+  amp: true
+  grad_clip_norm: 1.0
+
+loss:
+  ignore_index: ${data.dataset.ignore_index}
+  label_smoothing: 0.0
+
+# lr 6e-5 — из статьи SegFormer (AdamW, poly). Здесь poly заменён на
+# warmup+cosine: расписание репозитория, разница на 100 эпохах невелика.
+optimizer:
+  lr: 6.0e-5
+  weight_decay: 1.0e-2
+
+scheduler:
+  warmup_epochs: 5
+  eta_min: 1.0e-6
+
+data:
+  loader:
+    batch_size: 8
+    # Валидация в родном 1024x2048 — вчетверо больше пикселей, чем в кропе.
+    eval_batch_size: 4
+    num_workers: 8
+    pin_memory: true
+    persistent_workers: true
+
+model:
+  student:
+    variant: b2
+    # Штатный рецепт статьи: энкодер с ImageNet, голова декодера с нуля.
+    # SegFormer, обученный полностью случайно на 2975 картинках Cityscapes,
+    # до пригодного в роли учителя mIoU не доходит.
+    # Нужен буквально "с нуля" — поставьте pretrained: null и поднимите lr до ~3e-4.
+    pretrained: imagenet

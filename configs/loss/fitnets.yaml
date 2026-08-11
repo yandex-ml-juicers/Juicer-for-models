@@ -1,0 +1,43 @@
+# FitNets hint loss (arXiv:1412.6550, ICLR 2015).
+# total = ce_weight*CE + hint_weight*MSE(regressor(F_student), F_teacher)
+#
+# Имена слоёв — это КАНОНИЧЕСКИЕ ТАПЫ (src/models/feature_taps.py), а не
+# внутренние модули моделей: Trainer снимает признаки одним и тем же списком
+# имён и с ученика, и с учителя, а у SegFormer и U-Net общих имён слоёв нет.
+#   taps.stage1 -> страйд 4, taps.stage2 -> 8, taps.stage3 -> 16, taps.stage4 -> 32
+#
+# Каналы ниже — под пару SegFormer-B2 (учитель) -> U-Net-base (ученик):
+#   SegFormer-B2   стадии [64, 128, 320, 512]
+#   U-Net base=32  стадии [128, 256, 512] (stage4 нет, см. ниже)
+# Регрессор 1x1 внутри лосса как раз и существует ради такого несовпадения:
+# 512 каналов ученика он проецирует в 320 каналов учителя.
+#
+# ВАЖНО про stage4: у U-Net с depth=4 самая глубокая карта — боттлнек на
+# страйде 16, то есть stage3. Тапа stage4 у него физически нет, и запрос
+# taps.stage4 упадёт при сборке FeatureExtractor. Нужен stage4 — поднимайте
+# depth до 5 (вход обязан быть кратен 32, и модель растёт вчетверо).
+_target_: src.losses.FitNetsKD
+_convert_: all  # вложенные узлы приходят в конструктор обычными dict
+
+ce_weight: 1.0
+hint_weight: 1.0
+
+# В статье hint — ОДИН промежуточный слой; stage3 (страйд 16) — самый
+# информативный уровень сегментатора и одновременно самый глубокий, который
+# есть у обеих моделей. Чтобы дистиллировать несколько стадий, добавьте их
+# сюда (ширины ученика смотрите в model.tap_channels):
+#   taps.stage2: { student_channels: 256, teacher_channels: 128, weight: 1.0 }
+layers:
+  taps.stage3: { student_channels: 512, teacher_channels: 320, weight: 1.0 }
+
+# В оригинале MSE считается по сырым картам. true — нормировать по HxW перед
+# MSE (полезно, если масштабы активаций учителя и ученика сильно разошлись).
+normalize_features: false
+
+# KD по логитам поверх hint'а. 0 — чистая абляция FitNets (по умолчанию),
+# > 0 — вариант "FitNets + Hinton".
+logits_weight: 0.0
+temperature: 4.0
+
+ignore_index: ${data.dataset.ignore_index}
+label_smoothing: 0.0

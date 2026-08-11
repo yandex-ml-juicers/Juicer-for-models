@@ -1,0 +1,20 @@
+# DIST — Knowledge Distillation from A Stronger Teacher (arXiv:2205.10536, NeurIPS 2022).
+# total = ce_weight*CE + T^2*(beta*inter + gamma*intra)
+#
+# Вместо точного совпадения вероятностей (KL) требуется совпадение ПОРЯДКА:
+#   inter — корреляция Пирсона по классам внутри пикселя,
+#   intra — корреляция Пирсона по пикселям внутри класса (в пределах картинки).
+_target_: src.losses.DISTLoss
+
+temperature: 4.0
+ce_weight: 1.0
+beta: 1.0    # вес межклассового члена
+gamma: 1.0   # вес внутриклассового члена
+
+# Прореживание пикселей перед подсчётом корреляций: лосс материализует
+# несколько тензоров размера логитов, и на кропе 512x1024 каждый весит сотни
+# мегабайт. stride=2 режет память вчетверо, статистики не меняются.
+spatial_stride: 2
+
+ignore_index: ${data.dataset.ignore_index}
+label_smoothing: 0.0
