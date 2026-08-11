@@ -294,6 +294,74 @@ class TestCompositeLoss:
         )
         assert {"kd", "seg", "kd_hint", "seg_dice", "seg_ce"} <= set(result)
 
+    def test_contributions_are_the_weighted_terms(self, batch, features):
+        """Вклад = вес * сырое значение слагаемого. По нему, а не по
+        компонентам, видно, кто на самом деле тянет сумму."""
+        student, teacher, labels = batch
+        result = self.make()(
+            student, teacher, labels,
+            student_features=features[0], teacher_features=features[1],
+        )
+        assert torch.allclose(result["kd_weighted"], 0.7 * result["kd"])
+        assert torch.allclose(result["seg_weighted"], 0.3 * result["seg"])
+
+    def test_shares_sum_to_one(self, batch, features):
+        student, teacher, labels = batch
+        result = self.make()(
+            student, teacher, labels,
+            student_features=features[0], teacher_features=features[1],
+        )
+        shares = torch.stack([result["kd_share"], result["seg_share"]])
+        assert torch.allclose(shares.sum(), torch.ones(()), atol=1e-6)
+
+    def test_share_tracks_the_weight_not_the_raw_value(self, batch, features):
+        """Смысл графика: при росте веса доля слагаемого обязана расти,
+        хотя само значение слагаемого не меняется вовсе."""
+        student, teacher, labels = batch
+
+        # Один и тот же лосс на оба замера: у FitNetsKD регрессор
+        # инициализируется случайно, и на разных экземплярах сырое значение
+        # отличалось бы само по себе, а проверяем мы влияние ВЕСА.
+        criterion = self.make()
+
+        def share_of_kd(kd_weight: float) -> tuple[float, float]:
+            criterion.weights = {"kd": kd_weight, "seg": 0.3}
+            result = criterion(
+                student, teacher, labels,
+                student_features=features[0], teacher_features=features[1],
+            )
+            return result["kd"].item(), result["kd_share"].item()
+
+        raw_low, share_low = share_of_kd(0.1)
+        raw_high, share_high = share_of_kd(10.0)
+
+        assert raw_low == pytest.approx(raw_high), "сырое значение от веса зависеть не должно"
+        assert share_high > share_low
+
+    def test_contributions_are_detached(self, batch, features):
+        """Логи не должны держать граф: backward идёт только по total."""
+        student, teacher, labels = batch
+        result = self.make()(
+            student, teacher, labels,
+            student_features=features[0], teacher_features=features[1],
+        )
+        assert result["total"].requires_grad
+        for key in ("kd_weighted", "seg_weighted", "kd_share", "seg_share"):
+            assert not result[key].requires_grad, key
+
+    def test_degenerate_total_produces_no_shares(self, batch, features):
+        """При нулевой сумме доли не определены — вместо inf их просто нет."""
+        student, teacher, labels = batch
+        criterion = self.make()
+        criterion.weights = {"kd": 0.0, "seg": 0.0}
+        result = criterion(
+            student, teacher, labels,
+            student_features=features[0], teacher_features=features[1],
+        )
+        assert result["total"].abs().item() == 0.0
+        assert "kd_share" not in result
+        assert "kd_weighted" in result
+
     def test_adapters_of_the_terms_stay_visible_to_the_optimizer(self):
         """Параметры слагаемых обязаны быть параметрами композиции —
         иначе регрессор FitNets просто не будет обучаться."""

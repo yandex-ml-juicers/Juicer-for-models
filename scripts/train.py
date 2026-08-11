@@ -192,7 +192,19 @@ def clearml_reporter(task):
             # Логируем все отдельные компоненты лосса (например: train_loss_ce, train_loss_kd)
             if key.startswith("train_loss_") and key != "train_loss_total":
                 series_name = key.removeprefix("train_loss_")
-                _safe_report("loss_components", series_name, value)
+                # Вклады слагаемых композиции — то же, что компоненты, но
+                # домноженное на веса (loss_contributions) и отнормированное
+                # к единице (loss_shares). Именно по ним подбираются веса:
+                # в loss_components лежат СЫРЫЕ значения, на которые вес
+                # не влияет, и по ним не видно, кто тянет сумму.
+                if series_name.endswith("_weighted"):
+                    _safe_report(
+                        "loss_contributions", series_name.removesuffix("_weighted"), value
+                    )
+                elif series_name.endswith("_share"):
+                    _safe_report("loss_shares", series_name.removesuffix("_share"), value)
+                else:
+                    _safe_report("loss_components", series_name, value)
             # Веса слагаемых, если они меняются по расписанию: без этого
             # графика падение дистилляционного члена не отличить от того,
             # что ученик догнал учителя.

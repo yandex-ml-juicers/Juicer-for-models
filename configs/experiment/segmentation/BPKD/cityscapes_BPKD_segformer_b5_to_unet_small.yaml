@@ -48,7 +48,11 @@ loss:
     bpkd:
       temperature: 1.0
       ce_weight: 0.0
-      edge_weight: 1.0
+      # edge в 2.5 раза тяжелее body — то же соотношение, что в статье
+      # (там 50 против 20). При паритете 1:1 замер показал 30/70 в пользу
+      # body, а body — это буквально CWD, и прогон дублировал бы соседний
+      # эксперимент вместо того, чтобы мерить вклад границ.
+      edge_weight: 2.5
       body_weight: 1.0
       edge_width: 7
       spatial_stride: 2
@@ -60,13 +64,18 @@ loss:
       thresh: 0.7
       keep_ratio: 0.1
       ignore_index: ${data.dataset.ignore_index}
+  # bpkd: 0.2, а не 0.8 как cwd, потому что сам лосс крупнее: у него два
+  # слагаемых, и телесное на прореженной сетке даёт значения примерно вдвое
+  # больше CWD. При 0.8 дистилляция забирала 86% суммы против 63-72% у
+  # остальных прогонов сетки, то есть сегментационные члены переставали
+  # работать. 0.2 выравнивает ВКЛАД, а не число в конфиге.
   weights:
-    bpkd: 0.8
+    bpkd: 0.2
     seg: 0.3
     hard: 0.2
 
 loss_schedule:
-  weights.bpkd: {schedule: cosine, start: 0.8, end: 0.0, start_epoch: 120}
+  weights.bpkd: {schedule: cosine, start: 0.2, end: 0.0, start_epoch: 120}
   weights.seg: {schedule: cosine, start: 0.3, end: 0.7, start_epoch: 120}
   weights.hard: {schedule: cosine, start: 0.2, end: 0.5, start_epoch: 120}
 

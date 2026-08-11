@@ -79,6 +79,7 @@ class CompositeLoss(DistillationLoss):
         teacher_features: dict | None = None,
     ) -> dict[str, torch.Tensor]:
         result: dict[str, torch.Tensor] = {}
+        weighted_terms: dict[str, torch.Tensor] = {}
         total: torch.Tensor | None = None
 
         for name, loss in self.losses.items():
@@ -92,10 +93,45 @@ class CompositeLoss(DistillationLoss):
             weighted = self.weights[name] * parts["total"]
             total = weighted if total is None else total + weighted
 
+            weighted_terms[name] = weighted
             result[name] = parts["total"]
             result.update(
                 {f"{name}_{key}": value for key, value in parts.items() if key != "total"}
             )
 
         result["total"] = total
+        result.update(self._contributions(weighted_terms, total))
         return result
+
+    @staticmethod
+    def _contributions(
+        weighted_terms: Mapping[str, torch.Tensor],
+        total: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        """Вклад каждого слагаемого в сумму: абсолютный и как доля от неё.
+
+        Зачем это отдельно от result[name]. Под именем слагаемого в логи уходит
+        его СЫРОЙ total, на который вес не влияет вовсе — по этим числам нельзя
+        понять, кто на самом деле тянет сумму: слагаемое с весом 0.05 и
+        значением 40 весит вчетверо больше, чем слагаемое с весом 1.0 и
+        значением 0.5. Именно по вкладам, а не по компонентам, подбираются веса.
+
+        Доли нормированы на total, поэтому в сумме дают ровно единицу.
+
+        Значения только для логов и отсоединены от графа: в backward идёт
+        result["total"], а эти ключи тренер лишь усредняет по эпохе.
+        """
+        total = total.detach()
+        contributions: dict[str, torch.Tensor] = {}
+
+        # На вырожденной сумме доли улетают в бесконечность; логгер их всё
+        # равно отбросит, но лучше не плодить нечисловые значения в history.csv.
+        share_is_meaningful = bool(total.abs() > 1e-12)
+
+        for name, weighted in weighted_terms.items():
+            weighted = weighted.detach()
+            contributions[f"{name}_weighted"] = weighted
+            if share_is_meaningful:
+                contributions[f"{name}_share"] = weighted / total
+
+        return contributions
