@@ -280,7 +280,6 @@ def clearml_reporter(task):
                     yaxis=plot.yaxis,
                 )
 
-    return report_scalar, report_single, report_table, report_plots
     def report_debug_sample(
         image,
         series: str,

@@ -265,7 +265,7 @@ class Trainer:
         progress_bar: bool = True,
         find_unused_parameters: bool = False,
         broadcast_buffers: bool = True,
-        metrics_callback: tuple[Callable, Callable, Callable, Callable] | None = None,
+        metrics_callback: tuple[Callable, ...] | None = None,
         scalars: dict[str, float | int | str],
         batch_augment: Callable | None = None,
     ) -> None:
@@ -1260,7 +1260,7 @@ class SegmentationTrainer:
         progress_bar: bool = True,
         find_unused_parameters: bool = False,
         broadcast_buffers: bool = True,
-        metrics_callback: tuple[Callable, Callable, Callable, Callable] | None = None,
+        metrics_callback: tuple[Callable, ...] | None = None,
         scalars: dict[str, float | int | str],
         ignore_index: int = 255,
         batch_augment: Callable | None = None,
