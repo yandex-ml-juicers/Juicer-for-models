@@ -159,9 +159,15 @@ def build_base_transform_for_cityscapes(
     std: Sequence[float],
     train: bool = True,
     image_size: tuple[int, int] | None = None,
+    horizontal_flip: float = 0.0,
 ) -> detection_transforms.DetectionCompose:
     ops: list = []
     if train:
+        # Флип идёт первым: он не меняет геометрию кадра, а кроп ниже
+        # рассчитывает свои параметры уже по итоговому изображению.
+        if horizontal_flip > 0.0:
+            ops.append(detection_transforms.DetectionRandomHorizontalFlip(p=horizontal_flip))
+
         ops.append(
                 detection_transforms.DetectionRandomResizedCrop(
                     size=image_size,
