@@ -1,3 +1,5 @@
+from collections.abc import Sequence
+
 import torch
 from torchvision.utils import draw_bounding_boxes, make_grid
 
@@ -7,16 +9,20 @@ def visualize_detection(
     target: dict,
     prediction: dict,
     label_to_name: dict[int, str],
+    mean: Sequence[float] | None = None,
+    std: Sequence[float] | None = None,
     score_threshold: float = 0.3,
 ) -> torch.Tensor:
 
     image = image.detach().cpu().float()
 
-    mean = torch.tensor([0.485, 0.456, 0.406], dtype=torch.float32).view(3, 1, 1)
-    std = torch.tensor([0.229, 0.224, 0.225], dtype=torch.float32).view(3, 1, 1)
+    # Денормализация ровно тогда, когда была нормализация: у YOLO вход
+    # остаётся в 0..1, и прежние ImageNet-константы обесцвечивали кадр.
+    if mean is not None and std is not None:
+        mean_tensor = torch.tensor(mean, dtype=torch.float32).view(-1, 1, 1)
+        std_tensor = torch.tensor(std, dtype=torch.float32).view(-1, 1, 1)
+        image = image * std_tensor + mean_tensor
 
-    # если image после Normalize — сначала денормализовать
-    image = image * std + mean
     image = image.clamp(0, 1)
     image = (image * 255).to(torch.uint8)
 

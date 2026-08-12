@@ -742,6 +742,7 @@ class DetectionTrainer:
         targers_mode: str | None = None,
         track_train_map: bool = True,
         class_names: dict[int, str] | None = None,
+        normalize: tuple[Sequence[float], Sequence[float]] | None = None,
         plots: dict | None = None,
     ) -> None:
 
@@ -756,6 +757,9 @@ class DetectionTrainer:
         self.targers_mode = targers_mode
         self.track_train_map = track_train_map
         self.class_names = class_names
+        # (mean, std) из конфига датасета или None, если нормализации нет:
+        # возвращает Debug Samples исходные цвета. То же, что у SegmentationTrainer.
+        self.normalize = normalize
 
         plots = dict(plots) if plots is not None else {}
         # Debug Samples выключаются любым из двух нулей: debug_samples: 0 —
@@ -1205,6 +1209,8 @@ class DetectionTrainer:
                 target=target,
                 prediction=prediction,
                 label_to_name=dataset.label_to_name,
+                mean=self.normalize[0] if self.normalize else None,
+                std=self.normalize[1] if self.normalize else None,
                 score_threshold=0.3,
             )
 
