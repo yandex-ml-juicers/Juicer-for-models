@@ -11,6 +11,7 @@ from src.utils.logger import MetricsHistory, get_logger
 from src.utils.metrics import AverageMeter, accuracy
 from src.utils.seed import make_generator, seed_everything, seed_worker
 from src.utils.prediction_postprocessor import lwdetr_prediction_postprocessor, yolov8_prediction_postprocessor
+from src.utils.prepare_targets import prepare_targets
 
 __all__ = [
     "AverageMeter",
@@ -33,6 +34,6 @@ __all__ = [
     "seed_worker",
     "unwrap",
     "lwdetr_prediction_postprocessor",
-    "yolov8_prediction_postprocessor"
-    "prepare_targets"
+    "yolov8_prediction_postprocessor",
+    "prepare_targets",
 ]

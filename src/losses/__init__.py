@@ -28,6 +28,6 @@ __all__ = [
     "DISTLoss",
     "FitNetsKD",
     "PixelWiseKD",
-    "YOLOv8Loss"
-    "DCKDLoss"
+    "YOLOv8Loss",
+    "DCKDLoss",
 ]
