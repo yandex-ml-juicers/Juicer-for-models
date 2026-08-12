@@ -20,7 +20,7 @@ def visualize_detection(
     image = image.clamp(0, 1)
     image = (image * 255).to(torch.uint8)
 
-    gt_labels = [label_to_name[int(label)] for label in target["labels"]]
+    gt_labels = [label_to_name.get(int(label), str(int(label))) for label in target["labels"]]
     gt_image = draw_bounding_boxes(image=image, boxes=target["boxes"].cpu(), labels=gt_labels, width=3)
 
     scores = prediction["scores"].cpu()
@@ -30,7 +30,10 @@ def visualize_detection(
     labels = prediction["labels"].cpu()[keep]
     scores = scores[keep]
 
-    pred_labels = [f"{label_to_name[int(label)]} {score:.2f}" for label, score in zip(labels, scores)]
+    pred_labels = [
+        f"{label_to_name.get(int(label), str(int(label)))} {score:.2f}"
+        for label, score in zip(labels, scores)
+    ]
     pred_image = draw_bounding_boxes(
         image=image,
         boxes=boxes,
