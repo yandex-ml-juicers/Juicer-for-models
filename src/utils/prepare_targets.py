@@ -1,18 +1,20 @@
 from collections.abc import Sequence
 
 import torch
+from torch import Tensor
 from torchvision.ops import box_convert
 
 def prepare_targets(
     targets: Sequence[dict],
     device: torch.device | str,
     mode: str,
+    label_offset: int = 0
 ) -> list[dict]:
     if mode == "lw-detr-small":
         prepared_targets = []
 
         for target in targets:
-            class_labels = target["labels"].to(device=device, dtype=torch.long, non_blocking=True)
+            class_labels = target["labels"].to(device=device, dtype=torch.long, non_blocking=True) - label_offset
             boxes = target["boxes"].to(device=device, dtype=torch.float32, non_blocking=True)
 
             size = target["size"].to(device=device, dtype=torch.float32, non_blocking=True)
@@ -37,12 +39,9 @@ def prepare_targets(
         bboxes = []
 
         for image_idx, target in enumerate(targets):
-            labels = target["labels"].to(device=device, dtype=torch.float32, non_blocking=True)
+            labels = target["labels"].to(device=device, dtype=torch.float32, non_blocking=True) - label_offset
             boxes = target["boxes"].to(device=device, dtype=torch.float32, non_blocking=True)
             size = target["size"].to(device=device, dtype=torch.float32, non_blocking=True)
-
-            # Если labels в датасете идут от 1 до 8
-            labels = labels - 1
 
             height, width = size.unbind()
 
