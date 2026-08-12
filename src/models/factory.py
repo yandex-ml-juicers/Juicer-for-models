@@ -360,7 +360,17 @@ def yolov8n(
         model.names = cityscapes_names
 
     if weights is not None:
-        pretrained_model = YOLO(str(weights)).model
+        # hydra.job.chdir=True: CWD — это каталог запуска, поэтому путь из
+        # конфига разворачивается в абсолютный. Явная ошибка лучше молчаливой
+        # докачки: иначе прогон стартует не с тех весов, что в конфиге.
+        weights_path = Path(to_absolute_path(str(weights)))
+        if not weights_path.is_file():
+            raise FileNotFoundError(
+                f"Файл весов не найден: {weights_path}. "
+                "Ожидается локальная копия COCO-претрейна (data/weights/yolov8n.pt)."
+            )
+
+        pretrained_model = YOLO(str(weights_path)).model
         model.load(pretrained_model, verbose=True)
 
     for layer in model.model:
