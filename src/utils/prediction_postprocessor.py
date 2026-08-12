@@ -9,8 +9,9 @@ from ultralytics.utils.tal import dist2bbox, make_anchors
 def lwdetr_prediction_postprocessor(
     outputs,
     images: list[Tensor] | Tensor,
-    score_threshold: float = 0.05,
+    score_threshold: float = 0.001,
     label_offset: int = 0,
+    max_detections: int = 100,
 ) -> list[dict[str, Tensor]]:
     if isinstance(images, Tensor):
         images = list(images)
@@ -18,20 +19,32 @@ def lwdetr_prediction_postprocessor(
     logits = outputs.logits
     pred_boxes = outputs.pred_boxes
 
+    num_classes = logits.shape[-1]
     probabilities = logits.sigmoid()
-    scores, predicted_labels = probabilities.max(dim=-1)
+
+    # DETR-семейство обучается сигмоидой на класс, и один запрос может отвечать
+    # сразу за несколько классов. probabilities.max(dim=-1) оставлял от запроса
+    # ровно один вариант и терял recall, поэтому top-k берётся по расплющенной
+    # паре (запрос x класс) — так же, как в референсной реализации DETR.
+    flat_scores = probabilities.flatten(1)
+    top_scores, top_indices = flat_scores.topk(min(max_detections, flat_scores.shape[1]), dim=1)
+
+    query_indices = top_indices // num_classes
+    class_indices = top_indices % num_classes
 
     boxes = box_convert(pred_boxes, in_fmt="cxcywh", out_fmt="xyxy")
     predictions = []
 
-    for image, image_boxes, image_scores, image_labels in zip(
+    for image, image_boxes, image_queries, image_labels, image_scores in zip(
         images,
         boxes,
-        scores,
-        predicted_labels,
+        query_indices,
+        class_indices,
+        top_scores,
     ):
         height, width = image.shape[-2:]
 
+        image_boxes = image_boxes[image_queries]
         scale = image_boxes.new_tensor([width, height, width, height])
         image_boxes = image_boxes * scale
         keep = image_scores >= score_threshold

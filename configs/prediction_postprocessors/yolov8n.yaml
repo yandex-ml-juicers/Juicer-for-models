@@ -4,7 +4,7 @@ _partial_: true
 score_threshold: 0.001
 iou_threshold: 0.7
 
-label_offset: 0
+label_offset: ${data.dataset.build.label_offset}
 
 strides: [8, 16, 32]
 reg_max: 16
