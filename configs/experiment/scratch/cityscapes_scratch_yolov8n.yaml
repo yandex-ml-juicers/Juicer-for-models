@@ -39,6 +39,7 @@ scheduler:
 
 data:
   dataset:
+    image_size: [512, 1024]
     targets_format_mode: "yolov8n"
     build:
       label_offset: 0
