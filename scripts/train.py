@@ -205,11 +205,30 @@ def clearml_reporter(task):
 
             "train_mar_100": ("mAR@100", "train"),
             "eval_mar_100": ("mAR@100", "eval"),
+
+            # Разбивка по размерам: на Cityscapes после ресайза большая часть
+            # объектов мелкая, и именно эта тройка показывает, где теряется mAP.
+            "eval_map_small": ("mAP by size", "small"),
+            "eval_map_medium": ("mAP by size", "medium"),
+            "eval_map_large": ("mAP by size", "large"),
+
+            # Диагностика коллапса: обе величины падают раньше, чем mAP
+            # успевает дойти до нуля.
+            "eval_predictions_per_image": ("detections", "per_image"),
+            "eval_max_score": ("detections", "max_score"),
         }
 
         for key, (title, series_name) in detection_metrics.items():
             if key in row:
-                _safe_report("detection_metrics", series_name, row[key])
+                # title берётся из словаря: с захардкоженным именем графика все
+                # метрики писались в одну серию и затирали друг друга.
+                _safe_report(title, series_name, row[key])
+
+        # per-class AP приходит ключами вида eval_ap_person. Перечислить их
+        # в словаре нельзя: имена классов зависят от датасета.
+        for key, value in row.items():
+            if key.startswith("eval_ap_"):
+                _safe_report("AP per class", key.removeprefix("eval_ap_"), value)
 
         # 9. Метрики сегментации
         segmentation_metrics = {
@@ -363,12 +382,6 @@ def main(cfg: DictConfig) -> float:
             student = nn.SyncBatchNorm.convert_sync_batchnorm(student)
             log.info("BatchNorm заменён на SyncBatchNorm")
 
-        # заменяем слои BatchNorm до сборки optimizer
-        if cfg.distributed.sync_bn and dist.is_distributed:
-            student = nn.SyncBatchNorm.convert_sync_batchnorm(student)
-            log.info("BatchNorm заменён на SyncBatchNorm")
-
-
         # Обучаемые параметры лосса (адаптеры feature-KD) оптимизируются вместе с учеником.
         if cfg.task_type == "detection" and cfg.data.dataset.targets_format_mode == "lw-detr-small":
             params = (
@@ -381,11 +394,10 @@ def main(cfg: DictConfig) -> float:
         optimizer = instantiate(cfg.optimizer)(params)  
         scheduler = instantiate(cfg.scheduler)(optimizer) if cfg.get("scheduler") is not None else None
 
-        prediction_postprocessor = (
-            instantiate(cfg.prediction_postprocessors)
-            if cfg.prediction_postprocessors is not None
-            else None
-        )
+        # cfg.get(...): при `prediction_postprocessors: null` Hydra ключ в struct не создаёт,
+        # прямое обращение падает с ConfigAttributeError.
+        postprocessor_cfg = cfg.get("prediction_postprocessors")
+        prediction_postprocessor = instantiate(postprocessor_cfg) if postprocessor_cfg is not None else None
 
         if cfg.task_type == "classification":
             trainer = Trainer(
@@ -423,6 +435,9 @@ def main(cfg: DictConfig) -> float:
                 prediction_postprocessor=prediction_postprocessor,
                 label_offset=cfg.data.dataset.build.label_offset,
                 targers_mode=cfg.data.dataset.targets_format_mode,
+                # Подписывают per-class AP; без них в логе останутся индексы 0..7.
+                class_names=getattr(train_loader.dataset, "label_to_name", None),
+                plots=_plain(cfg.clearml.get("plots")),
                 **cfg.trainer,
             )
         elif cfg.task_type == "segmentation":

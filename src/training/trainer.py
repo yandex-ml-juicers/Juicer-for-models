@@ -562,6 +562,33 @@ class Trainer:
         torch.save(checkpoint, self.output_dir / filename)
 
 
+def pick_debug_indices(dataset, count: int) -> list[int]:
+    """Равномерно разбросанные по валидации индексы картинок для Debug Samples.
+
+    Равномерно, а не случайно и не первые подряд: Cityscapes отсортирован по
+    городам, поэтому первые N кадров — это N видов одной улицы, а случайная
+    выборка на каждой отправке даёт новые кадры, которые не с чем сравнивать.
+    Фиксированные кадры — единственный способ увидеть, как меняется предсказание.
+
+    count <= 0 — картинки не отправляются вовсе.
+    """
+    if count <= 0:
+        return []
+
+    try:
+        total = len(dataset)
+    except TypeError:  # IterableDataset — индексов нет
+        return []
+
+    count = min(count, total)
+    if count == 0:
+        return []
+    if count == 1:
+        return [0]
+
+    return [round(i * (total - 1) / (count - 1)) for i in range(count)]
+
+
 @torch.no_grad()
 def detection_evaluate(
     model: nn.Module,
@@ -571,7 +598,8 @@ def detection_evaluate(
     prediction_postprocessor: Callable | None = None,
     label_offset: int = 1,
     limit_batches: int | None = None,
-    targers_mode: str | None = None
+    targers_mode: str | None = None,
+    class_names: dict[int, str] | None = None,
 ) -> tuple[float, float]:
     was_model_training = model.training
     was_criterion_training = criterion.training
@@ -580,7 +608,22 @@ def detection_evaluate(
     criterion.eval()
 
     loss_meter = AverageMeter()
-    metric = MeanAveragePrecision(box_format="xyxy", iou_type="bbox")
+    # sync_on_compute=False: состояние метрики лежит на CPU, а группа процессов
+    # поднята с nccl-бэкендом даже при world_size=1 — иначе compute() уходит
+    # в all_gather по CPU-тензорам и падает.
+    # class_metrics=True включает map_per_class: на Cityscapes классы
+    # различаются по числу объектов в 200 раз (car 27153 против train 171),
+    # и средний mAP без разбивки не говорит ничего.
+    metric = MeanAveragePrecision(
+        box_format="xyxy",
+        iou_type="bbox",
+        class_metrics=True,
+        sync_on_compute=False,
+    )
+
+    total_predictions = 0
+    total_images = 0
+    max_score = 0.0
 
     for step, (images, targets) in enumerate(loader):
         if limit_batches is not None and step >= limit_batches:
@@ -590,7 +633,7 @@ def detection_evaluate(
         if isinstance(images, (list, tuple)):
             images = torch.stack(images, dim=0)
 
-        targets_device = prepare_targets(targets, device, targers_mode)
+        targets_device = prepare_targets(targets, device, targers_mode, label_offset)
 
         if targers_mode == "lw-detr-small":
             outputs = model(pixel_values=images, labels=targets_device)
@@ -610,21 +653,22 @@ def detection_evaluate(
         targets_for_metric = []
 
         for prediction, target in zip(predictions, targets):
+            scores = prediction["scores"]
+            total_predictions += int(scores.numel())
+            if scores.numel():
+                max_score = max(max_score, float(scores.max()))
+
+            # Постпроцессор уже вернул метки в системе датасета (label_offset
+            # прибавлен там), таргеты в ней же — вычитать его здесь нечего.
             predictions_for_metric.append({
                 "boxes": prediction["boxes"].detach().cpu(),
                 "scores": prediction["scores"].detach().cpu(),
-                "labels": (
-                    prediction["labels"].detach().cpu()
-                    - label_offset
-                ),
+                "labels": prediction["labels"].detach().cpu(),
             })
 
             metric_target = {
                 "boxes": target["boxes"].detach().cpu(),
-                "labels": (
-                    target["labels"].detach().cpu()
-                    - label_offset
-                ),
+                "labels": target["labels"].detach().cpu(),
             }
 
             if "area" in target:
@@ -632,6 +676,7 @@ def detection_evaluate(
 
             targets_for_metric.append(metric_target)
 
+        total_images += len(predictions_for_metric)
         metric.update(predictions_for_metric, targets_for_metric)
 
     computed_metrics = metric.compute()
@@ -641,7 +686,24 @@ def detection_evaluate(
         "map_50": computed_metrics["map_50"].item(),
         "map_75": computed_metrics["map_75"].item(),
         "mar_100": computed_metrics["mar_100"].item(),
+        # Разбивка по размерам: после ресайза 1024x2048 -> 512x1024 около 70%
+        # объектов Cityscapes попадают в COCO-категорию "small".
+        "map_small": computed_metrics["map_small"].item(),
+        "map_medium": computed_metrics["map_medium"].item(),
+        "map_large": computed_metrics["map_large"].item(),
+        # Диагностика коллапса: и число детекций, и максимум score падают
+        # раньше, чем mAP успевает дойти до нуля.
+        "predictions_per_image": total_predictions / max(total_images, 1),
+        "max_score": max_score,
     }
+
+    # torchmetrics отдаёт -1 для классов, которых нет в выборке.
+    classes = torch.atleast_1d(computed_metrics["classes"])
+    per_class = torch.atleast_1d(computed_metrics["map_per_class"])
+
+    for class_id, value in zip(classes.tolist(), per_class.tolist()):
+        name = class_names.get(class_id, class_id) if class_names else class_id
+        metrics[f"ap_{name}"] = float(value)
 
     if was_model_training:
         model.train()
@@ -678,6 +740,9 @@ class DetectionTrainer:
         prediction_postprocessor: Callable | None = None,
         label_offset: int = 1,
         targers_mode: str | None = None,
+        track_train_map: bool = True,
+        class_names: dict[int, str] | None = None,
+        plots: dict | None = None,
     ) -> None:
 
         if criterion.requires_teacher and teacher is None:
@@ -689,6 +754,15 @@ class DetectionTrainer:
 
         self.label_offset = label_offset
         self.targers_mode = targers_mode
+        self.track_train_map = track_train_map
+        self.class_names = class_names
+
+        plots = dict(plots) if plots is not None else {}
+        # Debug Samples выключаются любым из двух нулей: debug_samples: 0 —
+        # «картинки не нужны совсем», debug_every_n_epochs: 0 — «не слать
+        # периодически». Раньше отправка была захардкожена каждые 5 эпох.
+        self.debug_every_n_epochs = int(plots.get("debug_every_n_epochs", 10))
+        self.debug_indices = pick_debug_indices(eval_loader.dataset, int(plots.get("debug_samples", 4)))
 
         self.student = student
         self.teacher = teacher
@@ -713,7 +787,7 @@ class DetectionTrainer:
         self.metrics_callback_scalar = metrics_callback[0] if metrics_callback is not None else None
         self.metrics_callback_single = metrics_callback[1] if metrics_callback is not None else None
         self.metrics_callback_table = metrics_callback[2] if metrics_callback is not None else None
-        self.metrics_callback_debug = metrics_callback[4] if metrics_callback is not None and len(metrics_callback) > 3 else None
+        self.metrics_callback_debug = metrics_callback[4] if metrics_callback is not None and len(metrics_callback) > 4 else None
 
         self.scalars = scalars
 
@@ -752,7 +826,9 @@ class DetectionTrainer:
 
     def fit(self) -> dict:
         history = MetricsHistory(self.output_dir / "history.csv")
-        best_map, best_epoch = 0.0, 0
+        # -1.0, а не 0.0: при коллапсе модели mAP ровно 0.0 и условие `>` никогда
+        # не сработало бы — best.pt не создавался вовсе.
+        best_map, best_epoch = -1.0, 0
 
         try:
             for epoch in range(1, self.epochs + 1):
@@ -768,7 +844,8 @@ class DetectionTrainer:
                     prediction_postprocessor=self.prediction_postprocessor,
                     label_offset=self.label_offset,
                     limit_batches=self.limit_eval_batches,
-                    targers_mode=self.targers_mode
+                    targers_mode=self.targers_mode,
+                    class_names=self.class_names,
                 )
 
                 self._report_detection_samples(epoch)
@@ -780,10 +857,10 @@ class DetectionTrainer:
                     "epoch": epoch,
                     "lr": lr,
                     "eval_loss": eval_loss,
-                    "eval_map": eval_metrics["map"],
-                    "eval_map_50": eval_metrics["map_50"],
-                    "eval_map_75": eval_metrics["map_75"],
-                    "eval_mar_100": eval_metrics["mar_100"],
+                    # Перечисление ключей руками означало бы, что новые метрики
+                    # (per-class AP, разбивка по размерам) не доедут ни до
+                    # history.csv, ни до колбэков.
+                    **{f"eval_{key}": value for key, value in eval_metrics.items()},
                     "time_epoch": round(time.time() - start, 1),
                     **{
                         f"train_loss_{key}": value
@@ -845,7 +922,7 @@ class DetectionTrainer:
         meters_avg: dict[str, AverageMeter] = defaultdict(AverageMeter)
         meters_avg_loss: dict[str, AverageMeter] = defaultdict(AverageMeter)
         meters_other: dict[str, float | int | str] = {}
-        meters_map = MeanAveragePrecision(box_format="xyxy", iou_type="bbox")
+        meters_map = MeanAveragePrecision(box_format="xyxy", iou_type="bbox", sync_on_compute=False)
 
         iterator = tqdm(
             self.train_loader,
@@ -862,7 +939,7 @@ class DetectionTrainer:
             targets_for_meters_map = targets
 
             images = [image.to(self.device, non_blocking=True) for image in images]
-            targets = prepare_targets(targets, self.device, self.targers_mode)
+            targets = prepare_targets(targets, self.device, self.targers_mode, self.label_offset)
             batch_size = len(images)
 
             self.optimizer.zero_grad(set_to_none=True)
@@ -912,7 +989,7 @@ class DetectionTrainer:
 
             norms.update(grad_norm, params)
 
-            if step % 5 == 0:
+            if self.track_train_map and step % 5 == 0:
                 self._update_detection_meters_map(
                     metric=meters_map,
                     student_outputs=student_outputs,
@@ -930,8 +1007,6 @@ class DetectionTrainer:
 
             iterator.set_postfix({"loss": f"{losses['total'].item():.3f}"})
 
-        computed_meters_map = meters_map.compute()
-        
         train_loss_components = {key: meter.avg for key, meter in meters_avg_loss.items()}
         meters_other.update(norms.results())
 
@@ -939,15 +1014,16 @@ class DetectionTrainer:
             agreement_rate = agreement_correct / max(agreement_total, 1)
 
         other_train_metrics = {
-            **{key: meter.avg for key, meter in meters_avg.items()}, 
+            **{key: meter.avg for key, meter in meters_avg.items()},
             **meters_other,
-
-            # NEW
-            "map": computed_meters_map["map"].item(),
-            "map_50": computed_meters_map["map_50"].item(),
-            "map_75": computed_meters_map["map_75"].item(),
-            "mar_100": computed_meters_map["mar_100"].item(),
         }
+
+        if self.track_train_map:
+            computed_meters_map = meters_map.compute()
+            other_train_metrics |= {
+                key: computed_meters_map[key].item()
+                for key in ("map", "map_50", "map_75", "mar_100")
+            }
 
         if self.teacher is not None:
             other_train_metrics["agreement_rate"] = agreement_rate
@@ -1016,13 +1092,13 @@ class DetectionTrainer:
                     {
                         "boxes": boxes.detach().float().cpu(),
                         "scores": scores.detach().float().cpu(),
-                        "labels": (labels.detach().long().cpu() - self.label_offset),
+                        "labels": labels.detach().long().cpu(),
                     }
                 )
 
                 metric_target = {
                     "boxes": (target["boxes"].detach().float().cpu()),
-                    "labels": (target["labels"].detach().long().cpu() - self.label_offset),
+                    "labels": target["labels"].detach().long().cpu(),
                 }
 
                 if "area" in target:
@@ -1096,13 +1172,15 @@ class DetectionTrainer:
     @torch.no_grad()
     def _report_detection_samples(self, epoch: int) -> None:
 
-        if self.metrics_callback_debug is None:
+        if self.metrics_callback_debug is None or not self.debug_indices:
             return
-        if epoch % 5 != 0:
+        # Последняя эпоха отправляется всегда: иначе итог прогона зависел бы от
+        # того, кратно ли число эпох периоду.
+        if not (self.debug_every_n_epochs > 0 and (epoch % self.debug_every_n_epochs == 0 or epoch == self.epochs)):
             return
 
         dataset = self.eval_loader.dataset
-        indices = random.sample(range(len(dataset)), k=min(4, len(dataset)))
+        indices = self.debug_indices
 
         samples = [dataset[i] for i in indices]
 
