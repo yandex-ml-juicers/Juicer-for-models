@@ -437,6 +437,9 @@ def main(cfg: DictConfig) -> float:
                 targers_mode=cfg.data.dataset.targets_format_mode,
                 # Подписывают per-class AP; без них в логе останутся индексы 0..7.
                 class_names=getattr(train_loader.dataset, "label_to_name", None),
+                # Возвращает Debug Samples исходные цвета; None, если
+                # нормализации не было (у YOLO вход остаётся в 0..1).
+                normalize=_normalize_stats(cfg.data.dataset),
                 plots=_plain(cfg.clearml.get("plots")),
                 **cfg.trainer,
             )

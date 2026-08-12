@@ -185,6 +185,38 @@ class DetectionRandomResizedCrop:
         # If suitable crop was not found, resize original image
         return DetectionResize(self.size)(image, target)
 
+class DetectionFilterBoxes:
+    """Выбрасывает боксы тоньше min_size пикселей по любой из сторон.
+
+    После кропа рамка объекта на краю кадра обрезается по границе, и от неё
+    остаётся полоска в доли пикселя: предсказать её нельзя, а ассайнер YOLO
+    считает её обычным положительным примером.
+    """
+
+    def __init__(self, min_size: float = 2.0) -> None:
+        self.min_size = min_size
+
+    def __call__(
+        self,
+        image: Image.Image | Tensor,
+        target: dict[str, Tensor],
+    ) -> tuple[Image.Image | Tensor, dict[str, Tensor]]:
+        boxes = target["boxes"]
+
+        if boxes.numel() == 0:
+            return image, target
+
+        keep = ((boxes[:, 2] - boxes[:, 0]) >= self.min_size) & (
+            (boxes[:, 3] - boxes[:, 1]) >= self.min_size
+        )
+
+        target = target.copy()
+        for key in ("boxes", "labels", "area", "iscrowd"):
+            if key in target:
+                target[key] = target[key][keep]
+
+        return image, target
+
 class DetectionColorJitter:
     """Randomly changes image brightness, contrast, saturation and hue."""
 
