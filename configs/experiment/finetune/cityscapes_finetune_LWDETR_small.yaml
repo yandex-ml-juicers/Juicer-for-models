@@ -20,22 +20,32 @@ clearml:
   enabled: True
   tags: [cityscapes, teacher, finetune, LW-DETR-small]
   output_uri: false
+  plots:
+    # 0 — Debug Samples не отправляются вовсе.
+    debug_samples: 0
 
 trainer:
   epochs: 80
   amp: true
+  # DETR-семейство штатно обучают с клиппингом градиентов.
+  grad_clip_norm: 0.1
+  # В train-режиме LwDetr отдаёт num_queries * group_detr = 3900 запросов,
+  # то есть каждый объект попадает в train-mAP тринадцатью копиями.
+  track_train_map: false
 
 optimizer:
-  lr: 1.0e-3
-  lr_encoder: 1.5e-3
-  weight_decay: 0.05
+  lr: 1.0e-4
+  lr_encoder: 1.5e-4
+  weight_decay: 1.0e-4
   fused: true
 
 scheduler:
   warmup_epochs: 5
   start_factor: 0.01
   end_factor: 1.0
-  eta_min: 1.0e-4
+  # Пол косинуса держим на два порядка ниже базового lr: при eta_min = lr
+  # отжигать было нечего.
+  eta_min: 1.0e-6
 
 data:
   dataset:
@@ -43,6 +53,9 @@ data:
     targets_format_mode: "lw-detr-small"
     build:
       label_offset: 0
+  transform:
+    train:
+      horizontal_flip: 0.5
   loader:
     batch_size: 16
     num_workers: 8
@@ -51,7 +64,9 @@ data:
 
 model:
   student:
-    dropout: 0.3
-    attention_dropout: 0.4
-    activation_dropout: 0.3
-    backbone_dropout: 0.1
+    dropout: 0.0
+    attention_dropout: 0.0
+    activation_dropout: 0.0
+    backbone_dropout: 0.0
+    # null — старт с COCO-весов; путь к .pt — дообучение своего чекпоинта.
+    checkpoint_path: null
