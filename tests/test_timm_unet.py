@@ -24,6 +24,8 @@ NUM_CLASSES = 5
 # размер ученика — то, по чему сравнивают методы, и расхождение таблицы
 # с реальностью должно ловиться сразу.
 EXPECTED_MILLIONS = {
+    "mobilenetv3_small": 1.25,
+    "edgenext_xxs": 1.53,
     "mobilenetv2": 2.33,
     "efficientnet_b0": 4.24,
     "convnext_femto": 6.58,

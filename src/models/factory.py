@@ -18,6 +18,7 @@ from torchvision.models import get_model
 
 from transformers import LwDetrConfig, LwDetrForObjectDetection
 
+from src.models.mask2former import Mask2Former
 from src.models.segformer import SegFormer
 from src.models.segnext import IMAGENET_WEIGHTS, SegNeXt, convert_mmseg_state_dict
 from src.models.stochastic_depth import apply_stochastic_depth
@@ -339,6 +340,34 @@ def segnext_for_segmentation(
         f"MSCAN-{variant.upper()} (ImageNet)",
         strict=False,
         expected_prefix="encoder.",
+    )
+
+
+def mask2former_for_segmentation(
+    variant: str = "tiny",
+    num_classes: int = 19,
+    pretrained: str | None = "cityscapes",
+    weights_dir: str | None = None,
+    align_corners: bool = False,
+) -> nn.Module:
+    """Mask2Former-{tiny,small,base,large} — только учитель (см. src/models/mask2former.py).
+
+    Args:
+        variant: tiny (47M) | small (69M) | base (107M, IN21k) | large (216M).
+        pretrained: только "cityscapes" — готовый чекпоинт facebook/mask2former-
+            swin-{variant}-cityscapes-semantic. Другие значения отвергаются
+            моделью с внятной ошибкой: ученика/случайную инициализацию
+            Mask2Former здесь не собирает.
+        weights_dir: куда качать веса; по умолчанию data/weights (веса HF —
+            в <weights_dir>/huggingface, тот же кэш, что у SegFormer).
+    """
+    cache_dir = str(resolve_weights_dir(weights_dir) / "huggingface")
+    return Mask2Former(
+        variant=variant,
+        num_classes=num_classes,
+        pretrained=pretrained,
+        cache_dir=cache_dir,
+        align_corners=align_corners,
     )
 
 

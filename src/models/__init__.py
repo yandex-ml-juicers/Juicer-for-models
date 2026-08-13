@@ -1,8 +1,10 @@
 from src.models.adapters import ChannelAdapters
+from src.models.chunked_teacher import ChunkedTeacher
 from src.models.factory import (
     cifar_resnet18,
     from_detectors,
     from_torch_hub,
+    mask2former_for_segmentation,
     segformer_for_segmentation,
     segnext_for_segmentation,
     timm_unet_for_segmentation,
@@ -10,7 +12,9 @@ from src.models.factory import (
 )
 from src.models.feature_extractor import FeatureExtractor, unwrap_model
 from src.models.feature_taps import STAGE_TAP_STRIDES, STAGE_TAPS, FeatureTaps
+from src.models.mask2former import MASK2FORMER_VARIANTS, Mask2Former
 from src.models.multi_scale import MultiScaleInference
+from src.models.native_resolution_teacher import NativeResolutionTeacher
 from src.models.segformer import SEGFORMER_VARIANTS, SegFormer
 from src.models.segnext import SEGNEXT_VARIANTS, SegNeXt
 from src.models.stochastic_depth import (
@@ -23,9 +27,13 @@ from src.models.unet import UNET_VARIANTS, UNet
 
 __all__ = [
     "ChannelAdapters",
+    "ChunkedTeacher",
     "FeatureExtractor",
     "FeatureTaps",
+    "Mask2Former",
+    "MASK2FORMER_VARIANTS",
     "MultiScaleInference",
+    "NativeResolutionTeacher",
     "STAGE_TAPS",
     "STAGE_TAP_STRIDES",
     "SegFormer",
@@ -42,6 +50,7 @@ __all__ = [
     "linear_drop_path_rates",
     "from_detectors",
     "from_torch_hub",
+    "mask2former_for_segmentation",
     "segformer_for_segmentation",
     "segnext_for_segmentation",
     "timm_unet_for_segmentation",
