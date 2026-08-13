@@ -14,6 +14,7 @@ from src.losses.fitnets import FitNetsKD
 from src.losses.pixel_kd import PixelWiseKD
 from src.losses.yolov8n_loss import YOLOv8Loss
 from src.losses.dckd_loss import DCKDLoss
+from src.losses.kd_detr_loss import KDDETRLoss
 
 __all__ = [
     "CrossEntropy",
@@ -30,4 +31,5 @@ __all__ = [
     "PixelWiseKD",
     "YOLOv8Loss",
     "DCKDLoss",
+    "KDDETRLoss",
 ]

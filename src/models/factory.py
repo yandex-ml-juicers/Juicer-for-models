@@ -25,6 +25,7 @@ from ultralytics.nn.tasks import DetectionModel
 from ultralytics.nn.modules.block import C2f, SPPF
 from ultralytics.nn.modules.head import Detect
 
+from src.models.lwdetr_kd_detr import LwDetrKDDETRProbes
 from src.models.segformer import SegFormer
 from src.models.stochastic_depth import apply_stochastic_depth
 from src.models.timm_unet import TIMM_UNET_VARIANTS, TimmUNet
@@ -280,14 +281,26 @@ def segformer_for_segmentation(
 
 
 def lwdetr_small_for_detection(
-    num_classes: int = 8, 
-    disable_custom_kernels: bool = True, 
-    dropout: float = 0.1, 
-    attention_dropout: float = 0.1, 
-    activation_dropout: float = 0.1, 
-    backbone_dropout: float = 0.0, 
-    checkpoint_path: str | Path | None = None
+    num_classes: int = 8,
+    disable_custom_kernels: bool = True,
+    dropout: float = 0.1,
+    attention_dropout: float = 0.1,
+    activation_dropout: float = 0.1,
+    backbone_dropout: float = 0.0,
+    checkpoint_path: str | Path | None = None,
+    num_probe_points: int | None = None,
 ) -> nn.Module:
+    """
+    Args:
+        num_probe_points: None (по умолчанию) — обычный LwDetrForObjectDetection,
+            как раньше. Число > 0 — модель оборачивается в
+            _LwDetrWithKDDETRProbes: на каждый forward decoder дополнительно
+            прогоняется по num_probe_points probe-точкам с anchor-сетки
+            encoder'а ("general distillation points" из KD-DETR, см. docstring
+            _LwDetrWithKDDETRProbes), а результат кладётся в outputs.probe_logits
+            / outputs.probe_boxes. Нужен только для src/losses/kd_detr_loss.py;
+            для DCKD и остальных лоссов должен оставаться None.
+    """
     lwdetr_small_checkpoint = "AnnaZhang/lwdetr_small_60e_coco"
     cityscapes_classes = ["person", "rider", "car", "truck", "bus", "train", "motorcycle", "bicycle"]
 
@@ -308,42 +321,53 @@ def lwdetr_small_for_detection(
 
     model = LwDetrForObjectDetection.from_pretrained(lwdetr_small_checkpoint, config=config, ignore_mismatched_sizes=True)
 
-    if checkpoint_path is None:
+    if checkpoint_path is not None:
+        weights_path = Path(to_absolute_path(checkpoint_path))
+        if not weights_path.is_file():
+            raise FileNotFoundError(f"Checkpoint file was not found: {weights_path}")
+
+        checkpoint = torch.load(weights_path, map_location="cpu", weights_only=True)
+
+        if isinstance(checkpoint, dict) and "student_state" in checkpoint:
+            state_dict = checkpoint["student_state"]
+        elif isinstance(checkpoint, dict) and "state_dict" in checkpoint:
+            state_dict = checkpoint["state_dict"]
+        elif isinstance(checkpoint, dict) and "model" in checkpoint:
+            state_dict = checkpoint["model"]
+        else:
+            state_dict = checkpoint
+
+        state_dict = {
+            key.removeprefix("module."): value
+            for key, value in state_dict.items()
+        }
+
+        model.load_state_dict(state_dict, strict=True)
+
+    if num_probe_points is None:
         return model
 
-    weights_path = Path(to_absolute_path(checkpoint_path))
-    if not weights_path.is_file():
-        raise FileNotFoundError(f"Checkpoint file was not found: {weights_path}")
-
-    checkpoint = torch.load(weights_path, map_location="cpu", weights_only=True)
-
-    if isinstance(checkpoint, dict) and "student_state" in checkpoint:
-        state_dict = checkpoint["student_state"]
-    elif isinstance(checkpoint, dict) and "state_dict" in checkpoint:
-        state_dict = checkpoint["state_dict"]
-    elif isinstance(checkpoint, dict) and "model" in checkpoint:
-        state_dict = checkpoint["model"]
-    else:
-        state_dict = checkpoint
-
-    state_dict = {
-        key.removeprefix("module."): value
-        for key, value in state_dict.items()
-    }
-
-    model.load_state_dict(state_dict, strict=True)
-
-    return model
+    return LwDetrKDDETRProbes(model, num_probe_points=num_probe_points)
 
 
 def yolov8n(
     num_classes: int = 8,
-    weights: str | Path | None = "yolov8n.pt",
+    weights: str | Path | None = None,
+    weights_dir: str | None = "data/weights",
     backbone_dropout: float = 0.05,
     neck_dropout: float = 0.10,
     bbox_dropout: float = 0.05,
     cls_dropout: float = 0.15,
 ):
+    """
+    Args:
+        weights: путь к локальному чекпоинту; None — канонический
+            COCO-претрейн (ultralytics сам докачает его в
+            <weights_dir>/yolov8n.pt, если файла там ещё нет);
+            "random" — без претрейна, чистая инициализация.
+        weights_dir: куда докачивать канонический чекпоинт при
+            weights=None; по умолчанию data/weights.
+    """
     cityscapes_names = {
         0: "person",
         1: "rider",
@@ -359,16 +383,24 @@ def yolov8n(
     if num_classes == 8:
         model.names = cityscapes_names
 
-    if weights is not None:
-        # hydra.job.chdir=True: CWD — это каталог запуска, поэтому путь из
-        # конфига разворачивается в абсолютный. Явная ошибка лучше молчаливой
-        # докачки: иначе прогон стартует не с тех весов, что в конфиге.
-        weights_path = Path(to_absolute_path(str(weights)))
-        if not weights_path.is_file():
-            raise FileNotFoundError(
-                f"Файл весов не найден: {weights_path}. "
-                "Ожидается локальная копия COCO-претрейна (data/weights/yolov8n.pt)."
-            )
+    if weights != "random":
+        if weights is None:
+            # null — канонический COCO-претрейн. Путь ниже отдаётся в
+            # YOLO(...) как есть: если файла там нет, ultralytics сама
+            # докачает его туда (attempt_download_asset по имени файла),
+            # так что повторный запуск уже ничего не тянет из сети.
+            weights_path = resolve_weights_dir(weights_dir) / "yolov8n.pt"
+        else:
+            # hydra.job.chdir=True: CWD — это каталог запуска, поэтому путь из
+            # конфига разворачивается в абсолютный. Явная ошибка лучше молчаливой
+            # докачки для явно заданного пути: иначе прогон стартует не с тех
+            # весов, что в конфиге.
+            weights_path = Path(to_absolute_path(str(weights)))
+            if not weights_path.is_file():
+                raise FileNotFoundError(
+                    f"Файл весов не найден: {weights_path}. "
+                    "Ожидается локальная копия COCO-претрейна (data/weights/yolov8n.pt)."
+                )
 
         pretrained_model = YOLO(str(weights_path)).model
         model.load(pretrained_model, verbose=True)
