@@ -28,6 +28,9 @@ deterministic_warn_only: false # лучше держать false
 device: auto  # auto | cuda | cuda:N | cpu
 
 ckpt_path: null
+# Только для scripts/eval.py: какую модель конфига оценивать — student или
+# teacher. Учителю ckpt_path не нужен, он собирается уже с весами.
+eval_slot: student
 task_type: 'classification' # Доступны опции ['classification', 'detection', 'segmentation']
 
 model:
@@ -36,6 +39,16 @@ model:
   # обычный одиночный forward. Стоит по лишнему прогону учителя на масштаб.
   #   teacher_inference: {scales: [0.75, 1.0, 1.25], flip: true}
   teacher_inference: null
+
+# Группы параметров оптимизатора: свой lr и weight decay энкодеру, декодеру
+# и обучаемым частям лосса. null — одна группа на всё, как раньше.
+# Все значения — МНОЖИТЕЛИ от optimizer.lr / optimizer.weight_decay, поэтому
+# перебор lr не ломает соотношение частей. Подробности — в
+# src/training/param_groups.py и docs/param_groups.md.
+#   param_groups:
+#     encoder_lr_mult: 0.1          # предобученному энкодеру — десятую долю lr
+#     no_decay_on_norm_and_bias: true
+param_groups: null
 
 # Расписание весов слагаемых лосса по эпохам; null — веса постоянны.
 # Ключ — путь к весу внутри лосса, значение — правило (см.

@@ -118,6 +118,23 @@ class NormTracker:
         }
 
 
+def group_learning_rates(optimizer: torch.optim.Optimizer) -> dict[str, float]:
+    """{"lr_encoder": ..., "lr_decoder": ...} для именованных групп параметров.
+
+    Пустой словарь, когда группа одна (имён у неё нет): тогда всё уже
+    сказано скаляром "lr", и дублировать его отдельной серией незачем.
+    Нужно потому, что param_groups[0]["lr"] показывает только основную
+    группу — по нему не видно, что энкодер идёт с другим шагом.
+    """
+    if len(optimizer.param_groups) < 2:
+        return {}
+    return {
+        f"lr_{group['name']}": group["lr"]
+        for group in optimizer.param_groups
+        if "name" in group
+    }
+
+
 def mix_batch(
     batch_augment: Callable | None,
     images: Tensor,
@@ -389,6 +406,7 @@ class Trainer:
                 all_values = {
                     "epoch": epoch,
                     "lr": lr,
+                    **group_learning_rates(self.optimizer),
                     "world_size": self.dist.world_size,
                     "global_batch_size": (self.train_loader.batch_size or 0) * self.dist.world_size,
                     "eval_loss": eval_loss,
@@ -1260,6 +1278,7 @@ class SegmentationTrainer:
                 all_values = {
                     "epoch": epoch,
                     "lr": lr,
+                    **group_learning_rates(self.optimizer),
                     "world_size": self.dist.world_size,
                     "global_batch_size": (self.train_loader.batch_size or 0) * self.dist.world_size,
                     "eval_loss": eval_loss,

@@ -178,16 +178,22 @@ def test_loss_schedule_paths_exist_in_the_loss():
 def test_composite_counts_cross_entropy_once():
     """CE есть почти в каждом лоссе проекта, и в композиции её легко
     посчитать дважды с непонятным итоговым весом. Здесь попиксельную
-    классификацию берёт на себя только OHEM."""
+    классификацию берёт на себя только OHEM.
+
+    Проверяется свойство, а не имя слагаемого: имена в композициях меняются
+    от эксперимента к эксперименту, а инвариант «CE ровно в одном члене»
+    обязан держаться в любом.
+    """
     cfg = compose_config(
         ["experiment=segmentation/FitNets/cityscapes_FitNets_dice_ohem_segformer_b5_to_unet_small"]
     )
-    with_ce = [
-        name
+    with_ce = {
+        name: loss_cfg._target_.split(".")[-1]
         for name, loss_cfg in cfg.loss.losses.items()
         if loss_cfg.get("ce_weight", 0.0) > 0 or loss_cfg._target_.endswith("OhemCrossEntropy")
-    ]
-    assert with_ce == ["hard"], with_ce
+    }
+    assert len(with_ce) == 1, with_ce
+    assert "OhemCrossEntropy" in with_ce.values(), with_ce
 
 
 def test_scratch_experiments_have_no_teacher():
