@@ -6,7 +6,7 @@ import torch.nn.functional as F
 from scipy.optimize import linear_sum_assignment
 from torchvision.ops import box_iou, generalized_box_iou
 from src.losses.base import DistillationLoss
-from src.losses.yolov8n_loss import YOLOv8Loss
+from src.losses.yolo_loss import YOLO
 
 class DCKDLoss(DistillationLoss):
     """DCKD loss for LW-DETR teacher -> YOLOv8 student.
@@ -122,11 +122,11 @@ class DCKDLoss(DistillationLoss):
         self.attention_temperature = attention_temperature
         self.eps = eps
         # det больше не самописный Hungarian-лосс: студент — dense anchor-based
-        # YOLOv8, ему нужен родной TAL-assigner + DFL, а не one-to-one
-        # DETR-style мэтчинг. YOLOv8Loss — та же обёртка, на которой учится
+        # YOLO, ему нужен родной TAL-assigner + DFL, а не one-to-one
+        # DETR-style мэтчинг. YOLO — та же обёртка, на которой учится
         # baseline (cityscapes_finetune_yolov8n), так что GT-часть DCKD и
         # baseline теперь сравнимы.
-        self.task_loss = YOLOv8Loss(
+        self.task_loss = YOLO(
             num_classes=num_classes,
             strides=det_strides,
             reg_max=det_reg_max,
@@ -154,7 +154,7 @@ class DCKDLoss(DistillationLoss):
 
         # student_outputs ещё не тронут (kd_logits/kd_boxes — новые ключи, не
         # замена старых), raw_labels — исходный ultralytics-формат
-        # (batch_idx/cls/bboxes), поэтому YOLOv8Loss получает ровно то же,
+        # (batch_idx/cls/bboxes), поэтому YOLO получает ровно то же,
         # что получил бы при обычном YOLO-обучении без дистилляции.
         det = self.task_loss(student_outputs, teacher_outputs=None, labels=raw_labels)["total"]
 
@@ -361,8 +361,15 @@ class DCKDLoss(DistillationLoss):
         t_boxes: torch.Tensor
     ) -> torch.Tensor:
 
-        losses: list[torch.Tensor] = []
-        for b in range(s_logits.shape[0]):
+        batch_size = s_logits.shape[0]
+        cost_matrices: list[torch.Tensor | None] = [None] * batch_size
+        teacher_idx_per_image: list[torch.Tensor | None] = [None] * batch_size
+        student_idx_per_image: list[torch.Tensor | None] = [None] * batch_size
+
+        # Фаза A: только GPU-работа, без единого .cpu()/.item(). Все cost-матрицы
+        # батча копятся тут, поэтому CUDA-стрим может закинуть в очередь все
+        # b-итерации подряд, не останавливаясь на каждой.
+        for b in range(batch_size):
             # temperature=1.0 здесь намеренно, а не self.temperature: для
             # выбора пар (кто с кем матчится) нужны острые, неразмытые
             # вероятности учителя — иначе Hungarian-мэтчинг начинает путать
@@ -392,7 +399,31 @@ class DCKDLoss(DistillationLoss):
 
             cost = self._matching_cost(t_probs=t_probs[t_idx], t_boxes=t_boxes[b, t_idx], s_probs=s_probs[s_idx], s_boxes=s_boxes[b, s_idx])
 
-            row, col = linear_sum_assignment(cost.detach().float().cpu().numpy())
+            cost_matrices[b] = cost.detach().float()
+            teacher_idx_per_image[b] = t_idx
+            student_idx_per_image[b] = s_idx
+
+        # Единая точка синхронизации на весь батч вместо одной на каждую
+        # картинку: раньше .cpu().numpy() внутри цикла форсировал sync
+        # CUDA-стрима 32 раза подряд, простаивая GPU между вызовами scipy.
+        # Первый .cpu() здесь дожидается уже полностью посчитанной на GPU
+        # очереди (Фаза A), остальные — быстрые, GPU уже свободен.
+        cost_matrices_cpu = [
+            cost.cpu().numpy() if cost is not None else None
+            for cost in cost_matrices
+        ]
+
+        # Фаза B: чистый CPU, без обращений к GPU — Hungarian-матчинг, как раньше.
+        losses: list[torch.Tensor] = []
+        for b in range(batch_size):
+            cost_cpu = cost_matrices_cpu[b]
+            if cost_cpu is None:
+                continue
+
+            t_idx = teacher_idx_per_image[b]
+            s_idx = student_idx_per_image[b]
+
+            row, col = linear_sum_assignment(cost_cpu)
             row = torch.as_tensor(row, device=s_logits.device, dtype=torch.long)
             col = torch.as_tensor(col, device=s_logits.device, dtype=torch.long)
 
@@ -630,39 +661,38 @@ class DCKDLoss(DistillationLoss):
         masks: list[torch.Tensor] = []
 
         for b in range(s_boxes.shape[0]):
-            mask = s_boxes.new_zeros((1, height, width))
-            if gt_boxes[b].numel() == 0:
-                masks.append(mask)
-                continue
+            components: list[torch.Tensor] = []
 
             # Floor по каждому GT-боксу: local_mask не должна занулиться там,
             # где студент ещё не научился уверенно детектировать объект — а
             # именно туда feature-дистилляция должна давить сильнее всего.
-            # torch.maximum ниже (по student-боксам) может её только поднять,
-            # никогда не опустить.
-            if self.local_gt_floor > 0.0:
-                for gt_box in gt_boxes[b]:
-                    x1, y1, x2, y2 = self._box_pixel_bounds(gt_box, width, height)
-                    if x2 > x1 and y2 > y1:
-                        mask[:, y1:y2, x1:x2] = self.local_gt_floor
+            # Растеризуется векторно (все GT-боксы картинки разом), итог
+            # объединяется через max ниже — тот же эффект, что раньше давали
+            # присваивания в срез по каждому боксу отдельно.
+            if self.local_gt_floor > 0.0 and gt_boxes[b].numel() > 0:
+                floor_weights = gt_boxes[b].new_full((gt_boxes[b].shape[0],), self.local_gt_floor)
+                components.append(self._rasterize_weighted_boxes(gt_boxes[b], floor_weights, height, width))
 
-            k = min(self.student_topk, scores[b].numel())
-            if k == 0:
-                masks.append(mask)
-                continue
+            if gt_boxes[b].numel() > 0:
+                k = min(self.student_topk, scores[b].numel())
 
-            idx = torch.topk(scores[b], k=k, sorted=False).indices
-            boxes = s_boxes[b, idx].detach()
-            box_scores = scores[b, idx].detach()
-            iou = box_iou(self._cxcywh_to_xyxy(boxes), self._cxcywh_to_xyxy(gt_boxes[b]))
-            keep = iou.max(dim=-1).values >= self.local_iou_threshold
+                if k > 0:
+                    idx = torch.topk(scores[b], k=k, sorted=False).indices
+                    boxes = s_boxes[b, idx].detach()
+                    box_scores = scores[b, idx].detach()
+                    iou = box_iou(self._cxcywh_to_xyxy(boxes), self._cxcywh_to_xyxy(gt_boxes[b]))
+                    keep = iou.max(dim=-1).values >= self.local_iou_threshold
 
-            for box, score in zip(boxes[keep], box_scores[keep]):
-                x1, y1, x2, y2 = self._box_pixel_bounds(box, width, height)
+                    # torch.maximum по student-боксам раньше могла только
+                    # поднять floor, никогда не опустить — здесь то же самое:
+                    # компонента kept-боксов участвует в max наравне с floor.
+                    if keep.any():
+                        components.append(self._rasterize_weighted_boxes(boxes[keep], box_scores[keep], height, width))
 
-                if x2 > x1 and y2 > y1:
-                    current = mask[:, y1:y2, x1:x2]
-                    mask[:, y1:y2, x1:x2] = torch.maximum(current, score)
+            if components:
+                mask = torch.stack(components, dim=0).amax(dim=0)
+            else:
+                mask = s_boxes.new_zeros((1, height, width))
 
             masks.append(mask)
 
@@ -844,17 +874,34 @@ class DCKDLoss(DistillationLoss):
         return torch.stack((cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2), dim=-1)
 
     @staticmethod
-    def _box_pixel_bounds(box: torch.Tensor, width: int, height: int) -> tuple[int, int, int, int]:
-        """cxcywh (нормализованный, [0, 1]) -> целочисленные границы пикселей
-        карты признаков размера (height, width). Общий хелпер для всех мест
-        _local_mask, где box нужно растрировать на сетку.
+    def _rasterize_weighted_boxes(boxes: torch.Tensor, weights: torch.Tensor, height: int, width: int) -> torch.Tensor:
+        """Растеризует N cxcywh-боксов (нормализованных) на сетку (height,
+        width), каждому присваивая вес weights[i]; итог — поэлементный max по
+        боксам. Векторный эквивалент прежнего python-цикла + _box_pixel_bounds:
+        те же floor/ceil-границы пикселей, что и раньше, но для всех боксов
+        сразу и без единого .item()/.cpu() (а значит без GPU-стопов на каждый
+        бокс — критично для плотных Cityscapes-сцен с десятками объектов на
+        картинку).
         """
-        cx, cy, bw, bh = box
-        x1 = int(torch.floor((cx - bw / 2) * width).clamp(0, width - 1).item())
-        y1 = int(torch.floor((cy - bh / 2) * height).clamp(0, height - 1).item())
-        x2 = int(torch.ceil((cx + bw / 2) * width).clamp(1, width).item())
-        y2 = int(torch.ceil((cy + bh / 2) * height).clamp(1, height).item())
-        return x1, y1, x2, y2
+        cx, cy, bw, bh = boxes.unbind(-1)
+        x1 = torch.floor((cx - bw / 2) * width).clamp(0, width - 1)
+        y1 = torch.floor((cy - bh / 2) * height).clamp(0, height - 1)
+        x2 = torch.ceil((cx + bw / 2) * width).clamp(1, width)
+        y2 = torch.ceil((cy + bh / 2) * height).clamp(1, height)
+
+        xs = torch.arange(width, device=boxes.device, dtype=boxes.dtype).view(1, 1, width)
+        ys = torch.arange(height, device=boxes.device, dtype=boxes.dtype).view(1, height, 1)
+
+        # Полуоткрытые интервалы [x1, x2) x [y1, y2) — то же самое, что раньше
+        # давал срез mask[:, y1:y2, x1:x2]. Вырожденные боксы (x2<=x1 после
+        # floor/ceil/clamp) естественно не дают вклада — без явной проверки.
+        inside = (
+            (xs >= x1.view(-1, 1, 1)) & (xs < x2.view(-1, 1, 1)) &
+            (ys >= y1.view(-1, 1, 1)) & (ys < y2.view(-1, 1, 1))
+        )  # [N, H, W]
+
+        filled = inside.to(weights.dtype) * weights.view(-1, 1, 1)
+        return filled.amax(dim=0, keepdim=True)  # [1, H, W]
 
     @staticmethod
     def _normalize_mask(mask: torch.Tensor) -> torch.Tensor:
