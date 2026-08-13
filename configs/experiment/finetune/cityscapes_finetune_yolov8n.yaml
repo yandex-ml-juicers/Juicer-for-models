@@ -4,8 +4,8 @@ defaults:
   - override /data/transform/train: cityscapes_transform_for_yolo
   - override /data/transform/eval: cityscapes_transform_for_yolo
   - override /model/teacher: null
-  - override /model/student: yolov8n
-  - override /loss: yolov8n
+  - override /model/student: yolo
+  - override /loss: yolo
   - override /optimizer: yolo_sgd
   - override /scheduler: warmup_cosine
   - override /prediction_postprocessors: yolov8n
@@ -20,11 +20,14 @@ clearml:
   enabled: True
   tags: [cityscapes, student, finetune, yolov8n]
   output_uri: false
+  plots:
+    # 0 — Debug Samples не отправляются вовсе.
+    debug_samples: 0
 
 trainer:
   epochs: 100
   amp: true
-  # Клиппинга нет. Реальная норма градиента здесь 150-230 (YOLOv8Loss по
+  # Клиппинга нет. Реальная норма градиента здесь 150-230 (YOLO-лосс по
   # конвенции ultralytics умножает лосс на batch_size), и порог 1.0 нормировал
   # каждый шаг до единицы: длина шага переставала зависеть от градиента, а
   # эффективный lr падал быстрее косинуса, потому что норма росла по ходу
@@ -69,6 +72,7 @@ data:
 
 model:
   student:
+    weights: null
     backbone_dropout: 0.0
     neck_dropout: 0.0
     bbox_dropout: 0.0
