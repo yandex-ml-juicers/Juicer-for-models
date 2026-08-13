@@ -1,0 +1,81 @@
+# @package _global_
+defaults:
+  - override /data/dataset: cityscapes
+  - override /data/transform/train: cityscapes_transform_for_yolo
+  - override /data/transform/eval: cityscapes_transform_for_yolo
+  - override /model/teacher: lwdetr_kd_detr
+  - override /model/student: yolo
+  - override /loss: kd_detr
+  - override /optimizer: SGD
+  - override /scheduler: warmup_cosine
+  - override /prediction_postprocessors: yolov8n
+
+name: cityscapes_KDDETR_LWDETR_small_to_yolov9t
+device: cuda
+deterministic: false
+
+task_type: "detection"
+
+clearml:
+  enabled: True
+  tags: [cityscapes, KD-DETR, LW-DETR-small, yolov9t]
+  output_uri: false
+  plots:
+    # 0 — Debug Samples не отправляются вовсе.
+    debug_samples: 0
+
+trainer:
+  epochs: 100
+  amp: true
+
+optimizer:
+  lr: 0.01
+  momentum: 0.937
+  weight_decay: 0.005
+
+scheduler:
+  warmup_epochs: 5
+  start_factor: 0.01
+  end_factor: 1.0
+  eta_min: 1.0e-4
+
+data:
+  dataset:
+    image_size: [512, 1024]
+    targets_format_mode: "yolov8n"
+    build:
+      label_offset: 0
+  loader:
+    batch_size: 32
+    num_workers: 8
+    persistent_workers: true
+    pin_memory: true
+
+model:
+  student:
+    model_name: yolov9t
+    weights: null
+    # См. DCKD-конфиг: backbone-дропаут yolo() у yolov9t - no-op (нет
+    # C2f/SPPF), cls_dropout встаёт нормально (та же Detect-голова).
+    backbone_dropout: 0.0
+    neck_dropout: 0.0
+    bbox_dropout: 0.0
+    cls_dropout: 0.08
+  teacher:
+    checkpoint_path: "data/weights/lw-detr-small/best.pt"
+    num_probe_points: 300   # "general distillation points" статьи, диапазон 300-900
+
+loss:
+  num_classes: 8
+
+  lambda_distill: 1.0
+
+  lambda_cls: 1.0
+  lambda_l1: 5.0
+  lambda_giou: 2.0
+
+  temperature: 2.0
+
+  teacher_has_no_object: false
+
+  eps: 1.0e-6
