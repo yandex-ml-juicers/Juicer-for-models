@@ -4,7 +4,7 @@ defaults:
   - override /data/transform/train: cityscapes_transform_for_yolo
   - override /data/transform/eval: cityscapes_transform_for_yolo
   - override /model/teacher: lwdetr
-  - override /model/student: yolov8n
+  - override /model/student: yolo
   - override /loss: dckd
   - override /optimizer: SGD
   - override /scheduler: warmup_cosine
@@ -20,6 +20,9 @@ clearml:
   enabled: True
   tags: [cityscapes, DCKD, LW-DETR-small, yolov8n]
   output_uri: false
+  plots:
+    # 0 — Debug Samples не отправляются вовсе.
+    debug_samples: 0
 
 trainer:
   epochs: 100
@@ -50,6 +53,7 @@ data:
 
 model:
   student:
+    weights: null
     backbone_dropout: 0.02
     neck_dropout: 0.0
     bbox_dropout: 0.0
