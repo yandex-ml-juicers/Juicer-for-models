@@ -1,15 +1,15 @@
 # @package _global_
 # Сетка "6 методов дистилляции x 4 пары учитель/студент" (см.
 # outputs/claude-analis/analysis.md, ответ на вопросы про capacity gap и
-# набор лоссов). Учитель SegFormer-B2 (eval mIoU~0.7994) ->
-# unet_small (timm_unet/efficientnet_b0, ~4.24M).
+# набор лоссов). Учитель SegFormer-B0 (eval mIoU~0.7444) ->
+# unet_nano (timm_unet/mobilenetv3_small, ~1.25M).
 #
 # Структура (dice+lovasz рядом с KD-членом, форма loss_schedule,
 # оптимизатор/батч/трейнер) — БЕЗ ИЗМЕНЕНИЙ из
 # segmentation/diagnostics/cityscapes_BPKD_segformer_b2_to_unet_small.yaml
 # (так просили) — меняется учитель/студент и KD-слагаемое.
 #
-# FitNets (arXiv:1412.6550): hint по stage3+stage4, каналы замерены runtime (student 112/320, teacher 320/512).
+# CWD (arXiv:2011.13256): temperature/cwd_weight — дефолт статьи из configs/loss/cwd.yaml, тапы не нужны.
 defaults:
   - override /data/dataset: cityscapes_seg
   - override /data/transform/train: cityscapes_seg_strong_transform_for_segmentation
@@ -21,7 +21,7 @@ defaults:
   - override /scheduler: warmup_cosine
   - override /augment: cutmix_segmentation
 
-name: cityscapes_FitNets_segformer_b2_to_unet_small
+name: cityscapes_CWD_segformer_b0_to_unet_nano
 device: cuda
 deterministic: false
 
@@ -29,7 +29,7 @@ task_type: "segmentation"
 
 clearml:
   enabled: True
-  tags: [cityscapes, KD, FitNets, segformer-b2, unet-small, segmentation]
+  tags: [cityscapes, KD, CWD, segformer-b0, unet-nano, segmentation]
   scalars: ['KL_divergence', 'agreement_rate', 'teacher_miou']
   plots:
     enabled: False
@@ -45,18 +45,11 @@ trainer:
 
 loss:
   losses:
-    fitnets:
-      _target_: src.losses.FitNetsKD
-      _convert_: all
+    cwd:
+      _target_: src.losses.ChannelWiseKD
+      temperature: 4.0
       ce_weight: 0.0
-      hint_weight: 1.0
-      logits_weight: 0.6
-      temperature: 2.0
-      normalize_features: false
-      layers:
-        taps.stage3: { student_channels: 112, teacher_channels: 320, weight: 1.0 }
-        taps.stage4: { student_channels: 320, teacher_channels: 512, weight: 0.6 }
-      ignore_index: ${data.dataset.ignore_index}
+      cwd_weight: 3.0
     dice:
       _target_: src.losses.DiceLoss
       ce_weight: 1.5
@@ -70,12 +63,12 @@ loss:
       ignore_index: ${data.dataset.ignore_index}
 
   weights:
-    fitnets: 1.0
+    cwd: 1.0
     dice: 1.0
     lovasz: 0.5
 
 loss_schedule:
-  weights.fitnets: {schedule: cosine, start: 1.0, end: 0.50, start_epoch: 75}
+  weights.cwd: {schedule: cosine, start: 1.0, end: 0.50, start_epoch: 75}
   weights.dice: {schedule: cosine, start: 1.0, end: 0.50, start_epoch: 75}
   weights.lovasz: {schedule: cosine, start: 0.5, end: 1.25, start_epoch: 75}
 
@@ -97,10 +90,10 @@ data:
 
 model:
   student:
-    variant: efficientnet_b0
+    variant: mobilenetv3_small
     pretrained: true
     dropout: 0.1
   teacher:
-    variant: b2
+    variant: b0
     pretrained: cityscapes
     checkpoint_path: null

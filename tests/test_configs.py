@@ -67,6 +67,34 @@ SEGMENTATION_EXPERIMENTS = [
     "segmentation/diagnostics/cityscapes_BPKD_segformer_b2_to_unet_small",
     "segmentation/diagnostics/cityscapes_BPKD_segformer_b1_to_unet_tiny",
     "segmentation/diagnostics/cityscapes_BPKD_segformer_b5_to_unet_base",
+    # Сетка "6 методов дистилляции x 4 пары учитель/студент" (см.
+    # outputs/claude-analis/analysis.md): BPKD/CWD/FitNets/pixel-KD/DIST/
+    # HeteroAKD на unet_small(B2)/unet_tiny(B1)/unet_nano(B0)/segnext_t(B2)
+    # + два одиночных BPKD вне сетки (B1->unet_small, B0->unet_tiny).
+    "segmentation/BPKD/cityscapes_BPKD_segformer_b1_to_unet_small",
+    "segmentation/BPKD/cityscapes_BPKD_segformer_b0_to_unet_tiny",
+    "segmentation/CWD/cityscapes_CWD_segformer_b2_to_unet_small",
+    "segmentation/FitNets/cityscapes_FitNets_segformer_b2_to_unet_small",
+    "segmentation/vanilla-KD/cityscapes_pixel-KD_segformer_b2_to_unet_small",
+    "segmentation/DIST/cityscapes_DIST_segformer_b2_to_unet_small",
+    "segmentation/HeteroAKD/cityscapes_HeteroAKD_segformer_b2_to_unet_small",
+    "segmentation/CWD/cityscapes_CWD_segformer_b1_to_unet_tiny",
+    "segmentation/FitNets/cityscapes_FitNets_segformer_b1_to_unet_tiny",
+    "segmentation/vanilla-KD/cityscapes_pixel-KD_segformer_b1_to_unet_tiny",
+    "segmentation/DIST/cityscapes_DIST_segformer_b1_to_unet_tiny",
+    "segmentation/HeteroAKD/cityscapes_HeteroAKD_segformer_b1_to_unet_tiny",
+    "segmentation/BPKD/cityscapes_BPKD_segformer_b0_to_unet_nano",
+    "segmentation/CWD/cityscapes_CWD_segformer_b0_to_unet_nano",
+    "segmentation/FitNets/cityscapes_FitNets_segformer_b0_to_unet_nano",
+    "segmentation/vanilla-KD/cityscapes_pixel-KD_segformer_b0_to_unet_nano",
+    "segmentation/DIST/cityscapes_DIST_segformer_b0_to_unet_nano",
+    "segmentation/HeteroAKD/cityscapes_HeteroAKD_segformer_b0_to_unet_nano",
+    "segmentation/BPKD/cityscapes_BPKD_segformer_b2_to_segnext_t",
+    "segmentation/CWD/cityscapes_CWD_segformer_b2_to_segnext_t",
+    "segmentation/FitNets/cityscapes_FitNets_segformer_b2_to_segnext_t",
+    "segmentation/vanilla-KD/cityscapes_pixel-KD_segformer_b2_to_segnext_t",
+    "segmentation/DIST/cityscapes_DIST_segformer_b2_to_segnext_t",
+    "segmentation/HeteroAKD/cityscapes_HeteroAKD_segformer_b2_to_segnext_t",
 ]
 
 
@@ -128,10 +156,21 @@ class TestTeacherViewExperiment:
         assert isinstance(transform, SegmentationTeacherViewCompose)
 
     def test_distillation_terms_fade_out(self):
-        """Расписание обязано гасить дистилляцию, а не наоборот."""
+        """Расписание обязано гасить дистилляцию, а не наоборот.
+
+        Ищем KD-слагаемое по имени пути по остаточному принципу (не dice/
+        lovasz/seg/ce) — композитный рецепт называет его по методу (bpkd,
+        fitnets, cwd, ...), а не всегда "hint"/"kd" по-старому. Проверяем
+        только сам инвариант "KD-вес не растёт" — что делают GT-слагаемые
+        (dice/lovasz) рецепт не обязывает единообразно: в текущем шаблоне
+        dice тоже гасится, а lovasz растёт, и оба варианта законны."""
         cfg = compose_config([f"experiment={self.EXPERIMENT}"])
-        assert cfg.loss_schedule.hint_weight.end < cfg.loss_schedule.hint_weight.start
-        assert cfg.loss_schedule.ce_weight.end > cfg.loss_schedule.ce_weight.start
+        schedule = cfg.loss_schedule
+        gt_keys = {"weights.dice", "weights.lovasz", "weights.seg", "ce_weight"}
+        kd_paths = [key for key in schedule if key not in gt_keys]
+        assert kd_paths, f"не нашёл KD-путь в loss_schedule: {list(schedule)}"
+        for kd_path in kd_paths:
+            assert schedule[kd_path].end < schedule[kd_path].start, kd_path
 
 
 class TestLossAblation:
@@ -316,17 +355,40 @@ FITNETS_EXPERIMENTS = [
     "segmentation/FitNets/cityscapes_FitNets_segformer_b2_to_unet_base",
     "segmentation/FitNets/cityscapes_FitNets_segformer_b2_to_unet_small",
     "segmentation/FitNets/cityscapes_FitNets_dice_ohem_segformer_b5_to_unet_small",
+    # Сетка "6 методов x 4 пары" (см. outputs/claude-analis/analysis.md).
+    "segmentation/FitNets/cityscapes_FitNets_segformer_b1_to_unet_tiny",
+    "segmentation/FitNets/cityscapes_FitNets_segformer_b0_to_unet_nano",
+    "segmentation/FitNets/cityscapes_FitNets_segformer_b2_to_segnext_t",
 ]
 
 
 def fitnets_layers(cfg):
-    """Спецификация тапов лосса — из самого лосса или из слагаемого композиции."""
+    """Спецификация тапов лосса — из самого лосса или из слагаемого композиции.
+
+    Слагаемое ищем по _target_ (FitNetsKD), а не по фиксированному имени
+    ключа: в разных композитных рецептах KD-слагаемое называется по-разному
+    ("kd" в старом composite_fitnets_dice.yaml, "fitnets" в новых
+    b1/b0/segnext-конфигах) — имя в конфиге не должно быть частью контракта.
+    """
     losses = cfg.loss.get("losses")
-    return cfg.loss.layers if losses is None else losses.kd.layers
+    if losses is None:
+        return cfg.loss.layers
+    for loss_cfg in losses.values():
+        if loss_cfg._target_.endswith("FitNetsKD"):
+            return loss_cfg.layers
+    raise AssertionError(f"не нашёл слагаемое FitNetsKD среди {list(losses)}")
 
 
 def build_student(cfg):
-    from src.models import TIMM_UNET_VARIANTS, TimmUNet
+    """Свежесобранный студент — чтобы свериться с его РЕАЛЬНЫМИ tap_channels,
+    а не с таблицей (у timm-моделей ширины стадий целиком определяются
+    энкодером и не хранятся отдельно нигде, кроме самой модели)."""
+    from src.models import SEGNEXT_VARIANTS, TIMM_UNET_VARIANTS, SegNeXt, TimmUNet
+
+    target = cfg.model.student._target_
+    if target.endswith("segnext_for_segmentation"):
+        assert cfg.model.student.variant in SEGNEXT_VARIANTS
+        return SegNeXt(variant=cfg.model.student.variant, num_classes=19)
 
     return TimmUNet(
         encoder_name=TIMM_UNET_VARIANTS[cfg.model.student.variant]["encoder_name"],
