@@ -10,6 +10,7 @@ configs/model/teacher/*.yaml и configs/model/student/*.yaml.
 """
 
 import timm
+import warnings
 from pathlib import Path
 
 import torch
@@ -25,6 +26,7 @@ from ultralytics.nn.tasks import DetectionModel
 from ultralytics.nn.modules.block import C2f, SPPF
 from ultralytics.nn.modules.head import Detect
 
+from src.models.lwdetr_clockdistill import LwDetrCLoCKDistillMemory
 from src.models.lwdetr_kd_detr import LwDetrKDDETRProbes
 from src.models.segformer import SegFormer
 from src.models.stochastic_depth import apply_stochastic_depth
@@ -289,6 +291,7 @@ def lwdetr_small_for_detection(
     backbone_dropout: float = 0.0,
     checkpoint_path: str | Path | None = None,
     num_probe_points: int | None = None,
+    clockdistill: bool = False,
 ) -> nn.Module:
     """
     Args:
@@ -300,6 +303,12 @@ def lwdetr_small_for_detection(
             _LwDetrWithKDDETRProbes), а результат кладётся в outputs.probe_logits
             / outputs.probe_boxes. Нужен только для src/losses/kd_detr_loss.py;
             для DCKD и остальных лоссов должен оставаться None.
+        clockdistill: True — модель оборачивается в LwDetrCLoCKDistillMemory
+            (src/models/lwdetr_clockdistill.py): наружу дополнительно
+            отдаются decoder и геометрия его входа для второго,
+            target-aware decoder-прохода. Нужен только для
+            src/losses/clockdistill_loss.py; несовместим с
+            num_probe_points (обе — разные обёртки одной и той же модели).
     """
     lwdetr_small_checkpoint = "AnnaZhang/lwdetr_small_60e_coco"
     cityscapes_classes = ["person", "rider", "car", "truck", "bus", "train", "motorcycle", "bicycle"]
@@ -344,13 +353,20 @@ def lwdetr_small_for_detection(
 
         model.load_state_dict(state_dict, strict=True)
 
-    if num_probe_points is None:
+    if num_probe_points is not None and clockdistill:
+        raise ValueError("num_probe_points и clockdistill — взаимоисключающие обёртки")
+
+    if num_probe_points is None and not clockdistill:
         return model
 
-    return LwDetrKDDETRProbes(model, num_probe_points=num_probe_points)
+    if num_probe_points is not None:
+        return LwDetrKDDETRProbes(model, num_probe_points=num_probe_points)
+
+    return LwDetrCLoCKDistillMemory(model)
 
 
-def yolov8n(
+def yolo(
+    model_name: str = "yolov8n",
     num_classes: int = 8,
     weights: str | Path | None = None,
     weights_dir: str | None = "data/weights",
@@ -359,14 +375,34 @@ def yolov8n(
     bbox_dropout: float = 0.05,
     cls_dropout: float = 0.15,
 ):
-    """
+    """Универсальная фабрика для любой YOLO-архитектуры из ultralytics —
+    yolov8{n,s,m,l,x}, yolov9{t,s,m,c,e}, yolov10{n,s,m,b,l,x}, yolo11{n,...},
+    yolo12{n,...} и т.д. Подходит любое имя, для которого в пакете ultralytics
+    есть cfg cfg/models/**/<model_name>.yaml (это все стоковые архитектуры;
+    ultralytics сама ищет файл по имени независимо от подпапки).
+
     Args:
+        model_name: имя архитектуры/масштаба ultralytics, например "yolov8n",
+            "yolov9t", "yolov10n", "yolo11n". Определяет и cfg (структуру
+            сети), и имя файла канонического претрейна.
         weights: путь к локальному чекпоинту; None — канонический
-            COCO-претрейн (ultralytics сам докачает его в
-            <weights_dir>/yolov8n.pt, если файла там ещё нет);
+            претрейн (ultralytics сама докачает его в
+            <weights_dir>/<model_name>.pt, если файла там ещё нет);
             "random" — без претрейна, чистая инициализация.
         weights_dir: куда докачивать канонический чекпоинт при
             weights=None; по умолчанию data/weights.
+        backbone_dropout, neck_dropout, bbox_dropout, cls_dropout: точечный
+            dropout в блоках C2f/SPPF (backbone/neck) и в ветках cv2/cv3
+            Detect-головы (bbox/cls). Это инъекция под конкретные типы
+            модулей v8-семейства: она работает для архитектур, что
+            унаследовали C2f/SPPF/Detect (v8, v10, v11, v12), но НЕ для
+            архитектур без них (например чистый YOLOv9 использует
+            RepNCSPELAN4/ELAN1/SPPELAN вместо C2f/SPPF). Если запрошен
+            ненулевой dropout, а подходящих слоёв в модели не нашлось —
+            функция не глотает это молча, а кидает предупреждение.
+            Для v10Detect (наследник Detect с доп. one2one-веткой)
+            bbox/cls dropout встаёт только в общую cv2/cv3-ветку
+            (one2many), one2one-ветка его не получает.
     """
     cityscapes_names = {
         0: "person",
@@ -379,17 +415,17 @@ def yolov8n(
         7: "bicycle",
     }
 
-    model = DetectionModel(cfg="yolov8n.yaml", ch=3, nc=num_classes, verbose=False)
+    model = DetectionModel(cfg=f"{model_name}.yaml", ch=3, nc=num_classes, verbose=False)
     if num_classes == 8:
         model.names = cityscapes_names
 
     if weights != "random":
         if weights is None:
-            # null — канонический COCO-претрейн. Путь ниже отдаётся в
-            # YOLO(...) как есть: если файла там нет, ultralytics сама
-            # докачает его туда (attempt_download_asset по имени файла),
-            # так что повторный запуск уже ничего не тянет из сети.
-            weights_path = resolve_weights_dir(weights_dir) / "yolov8n.pt"
+            # null — канонический претрейн. Путь ниже отдаётся в YOLO(...)
+            # как есть: если файла там нет, ultralytics сама докачает его
+            # туда (attempt_download_asset по имени файла), так что
+            # повторный запуск уже ничего не тянет из сети.
+            weights_path = resolve_weights_dir(weights_dir) / f"{model_name}.pt"
         else:
             # hydra.job.chdir=True: CWD — это каталог запуска, поэтому путь из
             # конфига разворачивается в абсолютный. Явная ошибка лучше молчаливой
@@ -399,7 +435,7 @@ def yolov8n(
             if not weights_path.is_file():
                 raise FileNotFoundError(
                     f"Файл весов не найден: {weights_path}. "
-                    "Ожидается локальная копия COCO-претрейна (data/weights/yolov8n.pt)."
+                    f"Ожидается локальная копия претрейна ({model_name}.pt)."
                 )
 
         pretrained_model = YOLO(str(weights_path)).model
@@ -409,23 +445,45 @@ def yolov8n(
     # CUDA-кернел на каждый C2f/SPPF/Detect-branch, на каждом шаге forward и
     # backward. При дообучении дропауты часто выключены (p=0), поэтому слои
     # оборачиваются только когда дропаут реально используется.
+    dropout_applied = {"backbone": False, "neck": False, "bbox": False, "cls": False}
+
     for layer in model.model:
         if isinstance(layer, C2f):
-            dropout = (backbone_dropout if layer.i < 10 else neck_dropout)
+            is_backbone = layer.i < 10
+            dropout = backbone_dropout if is_backbone else neck_dropout
             if dropout > 0:
                 layer.cv2 = nn.Sequential(layer.cv2, nn.Dropout2d(p=dropout))
+                dropout_applied["backbone" if is_backbone else "neck"] = True
 
         elif isinstance(layer, SPPF):
             if backbone_dropout > 0:
                 layer.cv2 = nn.Sequential(layer.cv2, nn.Dropout2d(p=backbone_dropout))
+                dropout_applied["backbone"] = True
 
         elif isinstance(layer, Detect):
             if bbox_dropout > 0:
                 for branch in layer.cv2:
                     branch.insert(len(branch) - 1, nn.Dropout2d(p=bbox_dropout))
+                dropout_applied["bbox"] = True
 
             if cls_dropout > 0:
                 for branch in layer.cv3:
                     branch.insert(len(branch) - 1, nn.Dropout2d(p=cls_dropout))
+                dropout_applied["cls"] = True
+
+    requested = {
+        "backbone": backbone_dropout > 0,
+        "neck": neck_dropout > 0,
+        "bbox": bbox_dropout > 0,
+        "cls": cls_dropout > 0,
+    }
+    missed = [name for name, was_requested in requested.items() if was_requested and not dropout_applied[name]]
+    if missed:
+        warnings.warn(
+            f"yolo(model_name={model_name!r}): запрошен dropout для {missed}, "
+            "но в этой архитектуре нет подходящих слоёв (C2f/SPPF/Detect) — "
+            "dropout не применён.",
+            stacklevel=2,
+        )
 
     return model
