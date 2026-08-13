@@ -25,13 +25,13 @@ clearml:
     debug_samples: 0
 
 trainer:
-  epochs: 80
+  epochs: 40
   amp: true
   # DETR-семейство штатно обучают с клиппингом градиентов.
   grad_clip_norm: 0.1
   # В train-режиме LwDetr отдаёт num_queries * group_detr = 3900 запросов,
   # то есть каждый объект попадает в train-mAP тринадцатью копиями.
-  track_train_map: false
+  track_train_map: true
 
 optimizer:
   lr: 1.0e-4
