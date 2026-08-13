@@ -10,12 +10,16 @@ configs/model/teacher/*.yaml и configs/model/student/*.yaml.
 """
 
 import timm
+from pathlib import Path
+import torchvision
 import torch
 from torch import nn
 from torchvision import models as tv_models
 from torchvision.models._api import WeightsEnum
 from torchvision.models import get_model
-
+from torchvision.models.detection import FasterRCNN
+from torchvision.models.detection.rpn import AnchorGenerator
+from torchvision.models import resnet18, ResNet18_Weights
 from transformers import LwDetrConfig, LwDetrForObjectDetection
 
 from src.models.segformer import SegFormer
@@ -274,33 +278,66 @@ def lwdetr_small_for_detection(
     num_classes: int = 8,
     disable_custom_kernels: bool = True,
 ) -> nn.Module:
-    lwdetr_small_checkpoint = "AnnaZhang/lwdetr_small_60e_coco"
-    cityscapes_classes = [
-        "person",
-        "rider",
-        "car",
-        "truck",
-        "bus",
-        "train",
-        "motorcycle",
-        "bicycle",
-    ]
+    from transformers import LwDetrConfig, LwDetrForObjectDetection
+    
+    # Берем только чертеж архитектуры Small
+    model_name = "AnnaZhang/lwdetr_small_60e_coco"
+    
+    # Конфигурация классов Cityscapes
+    cityscapes_classes = ["person", "rider", "car", "truck", "bus", "train", "motorcycle", "bicycle"]
+    id2label = {i: name for i, name in enumerate(cityscapes_classes)}
+    label2id = {name: i for i, name in id2label.items()}
 
-    id2label = {
-        index: class_name
-        for index, class_name in enumerate(cityscapes_classes)
-    }
+    # 1. Загружаем РОДНОЙ конфиг (в нем уже прописано num_feature_levels=2)
+    config = LwDetrConfig.from_pretrained(model_name)
+    
+    # 2. Обновляем только классы и включаем Group DETR (это ускорит Scratch)
+    config.update({
+        "num_labels": num_classes,
+        "id2label": id2label,
+        "label2id": label2id,
+        "disable_custom_kernels": disable_custom_kernels,
+        "use_group_detr": True,
+        "num_groups": 11
+    })
 
-    label2id = {
-        class_name: index
-        for index, class_name in id2label.items()
-    }
+    # 3. Создаем "пустую" модель (ВЕСА НЕ ГРУЗЯТСЯ, ЭТО SCRATCH)
+    model = LwDetrForObjectDetection(config)
+    return model
 
-    config = LwDetrConfig.from_pretrained(
-        lwdetr_small_checkpoint,
-        id2label=id2label,
-        label2id=label2id,
-        disable_custom_kernels=disable_custom_kernels,
+def faster_rcnn_resnet18_for_detection(
+    num_classes: int = 8,
+) -> nn.Module:
+
+    backbone_model = resnet18(weights=None)
+    
+    
+    modules = list(backbone_model.children())[:-2]
+    backbone = nn.Sequential(*modules)
+    
+    
+    backbone.out_channels = 512
+    
+    
+    anchor_generator = AnchorGenerator(
+        sizes=((32, 64, 128, 256, 512),),
+        aspect_ratios=((0.5, 1.0, 2.0),)
     )
-
-    return LwDetrForObjectDetection(config)
+    
+    
+    roi_pooler = torchvision.ops.MultiScaleRoIAlign(
+        featmap_names=['0'],
+        output_size=7,
+        sampling_ratio=2
+    )
+    
+    
+    model = FasterRCNN(
+        backbone,
+        num_classes=num_classes + 1,
+        rpn_anchor_generator=anchor_generator,
+        box_roi_pool=roi_pooler
+    )
+    
+    return model
+   

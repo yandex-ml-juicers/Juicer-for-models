@@ -6,6 +6,7 @@ from src.losses.mgd import MGDLoss
 from src.losses.relational import SimilarityPreservationLoss
 from src.losses.aid_teacher_adaptation import AIDTeacherAdaptationLoss
 from src.losses.lwdetr_small_loss import LWDETRLoss
+from src.losses.faster_rcnn_loss import FasterRCNNLoss
 
 # Дистилляция семантической сегментации
 from src.losses.cwd import ChannelWiseKD
@@ -22,6 +23,7 @@ __all__ = [
     "SimilarityPreservationLoss",
     "AIDTeacherAdaptationLoss",
     "LWDETRLoss",
+    "FasterRCNNLoss"
     "ChannelWiseKD",
     "DISTLoss",
     "FitNetsKD",

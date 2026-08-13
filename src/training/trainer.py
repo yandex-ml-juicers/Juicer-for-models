@@ -297,6 +297,7 @@ class Trainer:
         self.metrics_callback_single = metrics_callback[1] if metrics_callback is not None else None
         self.metrics_callback_table = metrics_callback[2] if metrics_callback is not None else None
         self.scalars = scalars
+        self.accumulation_steps = accumulation_steps
         # metrics = {'loss.train_loss': }
         self.train_confmat: ConfusionMatrixAccumulator | None = None
         if {"precision", "recall", "f1"} & set(self.scalars):
@@ -627,16 +628,20 @@ def detection_evaluate(
 
         targets_device = prepare_targets(targets, device, targers_mode)
 
-        outputs = model(pixel_values=images, labels=targets_device)
-        losses = criterion(outputs, teacher_outputs=None, labels=targets_device)
+        if "lwdetr" in str(type(model)).lower():
+            outputs = model(pixel_values=images, labels=targets_device)
+            losses = criterion(outputs, teacher_outputs=None, labels=targets_device)
+            val_loss = losses["total"].item()
+            if prediction_postprocessor is not None:
+                predictions = prediction_postprocessor(outputs, images)
+            else:
+                predictions = outputs
+        else:
+            predictions = model(images)
+            val_loss = 0.0
 
         batch_size = len(images)
-        loss_meter.update(losses["total"].item(), batch_size)
-
-        if prediction_postprocessor is not None:
-            predictions = prediction_postprocessor(outputs, images)
-        else:
-            predictions = outputs
+        loss_meter.update(val_loss, batch_size)
 
         predictions_for_metric = []
         targets_for_metric = []
@@ -712,7 +717,8 @@ class DetectionTrainer:
         scalars: dict[str, float | int | str],
         prediction_postprocessor: Callable | None = None,
         label_offset: int = 1,
-        targers_mode: str | None = None
+        targers_mode: str | None = None,
+        accumulation_steps: int = 1
     ) -> None:
 
         if criterion.requires_teacher and teacher is None:
@@ -724,7 +730,7 @@ class DetectionTrainer:
 
         self.label_offset = label_offset
         self.targers_mode = targers_mode
-
+        self.accumulation_steps = accumulation_steps
         self.student = student
         self.teacher = teacher
         self.criterion = criterion
@@ -881,6 +887,9 @@ class DetectionTrainer:
             leave=False,
         )
 
+        # Обнуляем градиенты ПЕРЕД началом эпохи
+        self.optimizer.zero_grad(set_to_none=True)
+
         for step, (images, targets) in enumerate(iterator):
             if self.limit_train_batches is not None and step >= self.limit_train_batches:
                 iterator.close()
@@ -890,7 +899,6 @@ class DetectionTrainer:
             targets = prepare_targets(targets, self.device, self.targers_mode)
             batch_size = len(images)
 
-            self.optimizer.zero_grad(set_to_none=True)
             if self.student_extractor is not None:
                 self.student_extractor.clear()
             if self.teacher_extractor is not None:
@@ -905,10 +913,14 @@ class DetectionTrainer:
                 if isinstance(images, (list, tuple)):
                     images = torch.stack(images, dim=0)
 
-                if self.teacher is not None:
-                    student_outputs = self.student(images)
+                if "lwdetr" in str(type(self.student)).lower():
+                    if self.teacher is not None:
+                        student_outputs = self.student(images)
+                    else:
+                        student_outputs = self.student(pixel_values=images, labels=targets)
                 else:
-                    student_outputs = self.student(pixel_values=images, labels=targets)
+                    student_outputs = self.student(images, targets)
+
 
                 losses = self.criterion(
                     student_outputs,
@@ -922,15 +934,19 @@ class DetectionTrainer:
                     ),
                 )
 
-            self.scaler.scale(losses["total"]).backward()
-            self.scaler.unscale_(self.optimizer)
+                # --- НАКОПЛЕНИЕ ГРАДИЕНТОВ ---
+                # Делим лосс на шаги накопления
+                loss_scaled = losses["total"] / self.accumulation_steps
 
-            params = [p for group in self.optimizer.param_groups for p in group["params"]]
-            clip_threshold = self.grad_clip_norm if self.grad_clip_norm is not None else float("inf") 
-            grad_norm = torch.nn.utils.clip_grad_norm_(params, clip_threshold)
+            self.scaler.scale(loss_scaled).backward()
 
-            self.scaler.step(self.optimizer)
-            self.scaler.update()
+            # Делаем шаг оптимизатора только раз в N шагов (или в самом конце эпохи)
+            if (step + 1) % self.accumulation_steps == 0 or (step + 1) == len(self.train_loader):
+                self.scaler.unscale_(self.optimizer)
+
+                params = [p for group in self.optimizer.param_groups for p in group["params"]]
+                clip_threshold = self.grad_clip_norm if self.grad_clip_norm is not None else float("inf")
+                grad_norm = torch.nn.utils.clip_grad_norm_(params, clip_threshold)
 
             norms.update(grad_norm, params)
 

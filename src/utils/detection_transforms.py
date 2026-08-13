@@ -1,6 +1,6 @@
 import random
 from collections.abc import Callable, Sequence
-
+import random
 import torch
 from PIL import Image
 from torch import Tensor
@@ -101,5 +101,41 @@ class DetectionNormalize:
         target: dict[str, Tensor],
     ) -> tuple[Tensor, dict[str, Tensor]]:
         image = F.normalize(image, mean=self.mean, std=self.std)
+
+        return image, target
+
+class DetectionHorizontalFlip:
+    """Случайное горизонтальное отражение изображения и боксов."""
+    def __init__(self, p: float = 0.5) -> None:
+        self.p = p
+
+    def __call__(
+        self,
+        image: Image.Image | Tensor,
+        target: dict[str, Tensor],
+    ) -> tuple[Image.Image | Tensor, dict[str, Tensor]]:
+        if random.random() < self.p:
+            # 1. Отражаем изображение
+            if isinstance(image, Image.Image):
+                image = image.transpose(Image.FLIP_LEFT_RIGHT)
+                width, _ = image.size
+            else:
+                image = F.hflip(image)
+                width = image.shape[-1]
+
+            # 2. Отражаем боксы [x_min, y_min, x_max, y_max]
+            target = target.copy()
+            boxes = target["boxes"].clone()
+            
+            if boxes.numel() > 0:
+                # Новые координаты X:
+                # x_min_new = width - x_max_old
+                # x_max_new = width - x_min_old
+                old_x_min = boxes[:, 0].clone()
+                boxes[:, 0] = width - boxes[:, 2]
+                boxes[:, 2] = width - old_x_min
+                
+                # Проверка корректности (на всякий случай)
+                target["boxes"] = boxes
 
         return image, target

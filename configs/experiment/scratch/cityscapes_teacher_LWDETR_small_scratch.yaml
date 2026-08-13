@@ -1,0 +1,36 @@
+# @package _global_
+defaults:
+  - override /data/dataset: cityscapes
+  - override /data/transform/train: base_cityscapes_transform
+  - override /data/transform/eval: base_cityscapes_transform
+  - override /model/teacher: null
+  - override /model/student: lwdetr
+  - override /loss: lwdetr_small_loss
+  - override /optimizer: adam
+  - override /scheduler: warmup_cosine
+
+name: cityscapes_teacher_LWDETR_small_scratch
+
+task_type: "detection"
+device: cuda
+deterministic: false
+
+trainer:
+  epochs: 100
+  amp: true
+  save_best: true
+
+optimizer:
+  lr: 5e-5
+  weight_decay: 0.1
+  fused: true
+
+data:
+  dataset:
+    targets_format_mode: "lw-detr-small"
+    build:
+      label_offset: 0
+  loader:
+    batch_size: 16
+    num_workers: 12
+    persistent_workers: true
