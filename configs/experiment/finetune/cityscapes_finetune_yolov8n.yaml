@@ -32,7 +32,7 @@ trainer:
   grad_clip_norm: null
   # mAP на аугментированных батчах в train-режиме несравним с eval-mAP,
   # а считается он с полным NMS каждые 5 шагов.
-  track_train_map: false
+  track_train_map: true
 
 optimizer:
   # Референс ultralytics: lr0 0.01 при номинальном батче 64. Здесь лосс
