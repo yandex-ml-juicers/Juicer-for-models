@@ -49,6 +49,15 @@ SEGMENTATION_EXPERIMENTS = [
     "segmentation/BPKD/cityscapes_BPKD_segformer_b5_to_unet_small",
     "segmentation/HeteroAKD/cityscapes_HeteroAKD_segformer_b5_to_unet_small",
     *LOSS_ABLATIONS,
+    # Новые архитектуры/диагностика (см. outputs/claude-analis/analysis.md):
+    # SegNeXt-ученик, Mask2Former-учитель, наносайз timm-U-Net (0.5-2M).
+    "segmentation/diagnostics/cityscapes_teacher_miou_probe_segformer_b5_to_unet_small",
+    "scratch/cityscapes_scratch_segnext_s",
+    "segmentation/BPKD/cityscapes_BPKD_segformer_b5_to_segnext_s",
+    "segmentation/BPKD/cityscapes_BPKD_mask2former_tiny_to_unet_small",
+    "segmentation/BPKD/cityscapes_BPKD_mask2former_small_to_unet_small",
+    "scratch/cityscapes_scratch_timm_unet_mobilenetv3_small_aug_lovasz",
+    "segmentation/BPKD/cityscapes_BPKD_segformer_b5_to_timm_unet_mobilenetv3_small",
 ]
 
 

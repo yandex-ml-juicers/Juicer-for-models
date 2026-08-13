@@ -1,0 +1,116 @@
+# @package _global_
+# ДИАГНОСТИКА, не рецепт: проверка гипотезы "учителя дистиллируем не в его
+# родном разрешении" (см. outputs/claude-analis/analysis.md). Флаг
+# clearml.scalars: [teacher_miou] (src/training/trainer.py, docs/clearML.md)
+# кладёт на график segmentation_metrics линию train_teacher_mIoU — качество
+# учителя НА ТЕХ ЖЕ КРОПАХ 512x1024 (+ случайный scale_range), что ПРЯМО
+# СЕЙЧАС видит ученик при дистилляции (почти бесплатно — эти логиты и так
+# считаются каждый шаг ради KD-лосса). Публикованное качество SegFormer-B5
+# на Cityscapes на родном разрешении вы и так знаете (в этом репозитории —
+# eval_teacher_b5, ~0.81 mIoU) — сравните с train_teacher_mIoU сами, без
+# отдельной линии-ориентира на графике. Если нужна она тоже — отдельный флаг
+# clearml.scalars=[...,teacher_native_miou] (не включён здесь по умолчанию).
+# Разрыв между train_teacher_mIoU и известным вам native-числом — прямой
+# ответ, отдаёт ли учитель ученику заметно менее качественные таргеты, чем
+# способен на самом деле.
+#
+# Рецепт лосса/оптимизатора скопирован с
+# segmentation/BPKD/cityscapes_BPKD_segformer_b5_to_unet_small_CE_dice_lovasz_fast.yaml
+# (текущий лучший локальный рецепт BPKD) БЕЗ ИЗМЕНЕНИЙ, кроме:
+#   - trainer.epochs: 100 -> 60 (тут не нужен финальный mIoU, нужен график
+#     как можно раньше — 60 эпох уже дают устойчивую линию);
+#   - loss_schedule.start_epoch пересчитан пропорционально под 60 эпох
+#     (90/80 из расписания на 100 эпох -> 54/48), иначе на 60 эпохах веса
+#     остались бы всё время на "start" (start_epoch > total_epochs).
+defaults:
+  - override /data/dataset: cityscapes_seg
+  - override /data/transform/train: cityscapes_seg_strong_transform_for_segmentation
+  - override /data/transform/eval: cityscapes_seg_transform
+  - override /model/teacher: segformer
+  - override /model/student: timm_unet
+  - override /loss: composite_base
+  - override /optimizer: adamw
+  - override /scheduler: warmup_cosine
+  - override /augment: cutmix_segmentation
+
+name: cityscapes_teacher_miou_probe_segformer_b5_to_unet_small
+device: cuda
+deterministic: false
+
+task_type: "segmentation"
+
+clearml:
+  enabled: True
+  tags: [cityscapes, KD, BPKD, segformer-b5, unet-small, segmentation, diagnostics]
+  # KL/agreement — схожесть ученика с учителем; teacher_miou — собственное
+  # качество учителя (см. шапку файла и docs/clearML.md).
+  scalars: ['KL_divergence', 'agreement_rate', 'teacher_miou']
+  plots:
+    enabled: False
+    every_n_epochs: 10
+  reuse_last_task_id: False
+  continue_last_task: False
+  output_uri: false
+
+trainer:
+  epochs: 60
+  amp: true
+  grad_clip_norm: 10.0
+
+loss:
+  losses:
+    bpkd:
+      _target_: src.losses.BPKDLoss
+      temperature: 2.0
+      ce_weight: 0.0
+      edge_weight: 1.3
+      body_weight: 0.5
+      edge_width: 7
+      spatial_stride: 2
+    dice:
+      _target_: src.losses.DiceLoss
+      ce_weight: 1.5
+      dice_weight: 2.5
+    lovasz:
+      _target_: src.losses.LovaszSoftmax
+      ce_weight: 0.0
+      lovasz_weight: 3.5
+      pixel_stride: 2
+      label_smoothing: 0.05
+      ignore_index: ${data.dataset.ignore_index}
+
+  weights:
+    bpkd: 1.0
+    dice: 1.0
+    lovasz: 0.5
+
+loss_schedule:
+  weights.bpkd: {schedule: cosine, start: 1.0, end: 0.50, start_epoch: 54}
+  weights.dice: {schedule: cosine, start: 1.0, end: 0.50, start_epoch: 54}
+  weights.lovasz: {schedule: cosine, start: 0.5, end: 1.00, start_epoch: 48}
+
+optimizer:
+  lr: 2.5e-3
+  weight_decay: 3.0e-2
+
+scheduler:
+  warmup_epochs: 6
+  eta_min: 2.0e-6
+
+data:
+  loader:
+    batch_size: 24
+    eval_batch_size: 6
+    num_workers: 7
+    pin_memory: true
+    persistent_workers: true
+
+model:
+  student:
+    variant: efficientnet_b0
+    pretrained: true
+    dropout: 0.1
+  teacher:
+    variant: b5
+    pretrained: cityscapes
+    checkpoint_path: null
