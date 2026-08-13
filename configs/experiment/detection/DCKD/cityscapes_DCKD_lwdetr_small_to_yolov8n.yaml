@@ -18,11 +18,11 @@ task_type: "detection"
 
 clearml:
   enabled: True
-  tags: [cityscapes, DCKF, LW-DETR-small, yolov8n]
+  tags: [cityscapes, DCKD, LW-DETR-small, yolov8n]
   output_uri: false
 
 trainer:
-  epochs: 150
+  epochs: 100
   amp: true
 
 optimizer:
@@ -43,7 +43,7 @@ data:
     build:
       label_offset: 0
   loader:
-    batch_size: 16
+    batch_size: 32
     num_workers: 8
     persistent_workers: true
     pin_memory: true
