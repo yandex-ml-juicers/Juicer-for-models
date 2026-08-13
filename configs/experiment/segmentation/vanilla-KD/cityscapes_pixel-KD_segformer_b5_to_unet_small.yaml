@@ -44,7 +44,7 @@ loss:
   losses:
     pixel:
       _target_: src.losses.PixelWiseKD
-      temperature: 2.0
+      temperature: 2.5
       alpha: 0.5
     dice:
       _target_: src.losses.DiceLoss
@@ -65,23 +65,23 @@ loss:
 
     
   weights:
-    pixel: 0.5
+    pixel: 0.75
     dice: 0.1
-    ohem: 0.3
+    ohem: 0.45
     lovasz: 0.1
 
 loss_schedule:
-  weights.pixel: {schedule: cosine, start: 1.0, end: 0.0, start_epoch: 120}
-  weights.dice: {schedule: cosine, start: 1.0, end: 0.7, start_epoch: 120}
-  weights.ohem: {schedule: cosine, start: 1.0, end: 0.5, start_epoch: 120}
-  weights.lovasz: {schedule: cosine, start: 1.0, end: 0.5, start_epoch: 120}
+  weights.pixel: {schedule: cosine, start: 1.0, end: 0.25, start_epoch: 75}
+  weights.dice: {schedule: cosine, start: 0.1, end: 0.3, start_epoch: 60}
+  weights.ohem: {schedule: cosine, start: 0.45, end: 0.1, start_epoch: 75}
+  weights.lovasz: {schedule: cosine, start: 0.1, end: 0.75, start_epoch: 75}
 
 optimizer:
   lr: 1.0e-3
   weight_decay: 3.0e-2
 
 scheduler:
-  warmup_epochs: 0
+  warmup_epochs: 20
   eta_min: 3.0e-4
 
 data:

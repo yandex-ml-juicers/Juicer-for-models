@@ -19,7 +19,7 @@ defaults:
   - override /data/transform/eval: cityscapes_seg_transform
   - override /model/teacher: null
   - override /model/student: timm_unet
-  - override /loss: lovasz
+  - override /loss: composite_base
   - override /optimizer: adamw
   - override /scheduler: warmup_cosine
   - override /augment: cutmix_segmentation
@@ -43,27 +43,31 @@ clearml:
   output_uri: false
 
 trainer:
-  epochs: 150
+  epochs: 100
   amp: true
-  grad_clip_norm: 1.0
+  grad_clip_norm: 2.5
 
 # CE — ровно та же, что в бейзлайне (включая label_smoothing), плюс Lovász
 # с паритетным весом. Чистым Lovász (ce_weight: 0) с нуля не обучают:
 # у почти случайной модели у него нет внятного градиента.
+
 loss:
-  ce_weight: 1.0
-  lovasz_weight: 1.0
-  pixel_stride: 2
-  label_smoothing: 0.05
-  ignore_index: ${data.dataset.ignore_index}
+  losses:
+    lovasz:
+      _target_: src.losses.LovaszSoftmax
+      ce_weight: 1.0
+      lovasz_weight: 3.5
+      pixel_stride: 2
+      label_smoothing: 0.05
+      ignore_index: ${data.dataset.ignore_index}
 
 optimizer:
-  lr: 3.25e-4
+  lr: 1.0e-3
   weight_decay: 3.0e-2
 
 scheduler:
-  warmup_epochs: 10
-  eta_min: 1.0e-6
+  warmup_epochs: 20
+  eta_min: 2.0e-6
 
 data:
   loader:

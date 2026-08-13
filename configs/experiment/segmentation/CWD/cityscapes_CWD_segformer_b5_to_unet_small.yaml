@@ -44,13 +44,13 @@ loss:
   losses:
     cwd:
       _target_: src.losses.ChannelWiseKD
-      temperature: 1.0
+      temperature: 3.0
       ce_weight: 0.0
       cwd_weight: 1.0
     dice:
       _target_: src.losses.DiceLoss
-      ce_weight: 0.0
-      dice_weight: 3.5
+      ce_weight: 1.0
+      dice_weight: 2.0
     ohem:
       _target_: src.losses.OhemCrossEntropy
       thresh: 0.7
@@ -65,24 +65,24 @@ loss:
       ignore_index: ${data.dataset.ignore_index}
 
 weights:
-  cwd: 0.5
+  cwd: 0.75
   dice: 0.1
-  ohem: 0.3
+  ohem: 0.45
   lovasz: 0.1
 
 loss_schedule:
-  weights.cwd: {schedule: cosine, start: 1.0, end: 0.0, start_epoch: 120}
-  weights.dice: {schedule: cosine, start: 1.0, end: 0.7, start_epoch: 120}
-  weights.ohem: {schedule: cosine, start: 1.0, end: 0.5, start_epoch: 120}
-  weights.lovasz: {schedule: cosine, start: 1.0, end: 0.5, start_epoch: 120}
+  weights.cwd: {schedule: cosine, start: 0.12, end: 0.03, start_epoch: 75}
+  weights.dice: {schedule: cosine, start: 0.1, end: 0.3, start_epoch: 60}
+  weights.ohem: {schedule: cosine, start: 0.45, end: 0.1, start_epoch: 75}
+  weights.lovasz: {schedule: cosine, start: 0.1, end: 0.75, start_epoch: 80}
 
 optimizer:
   lr: 1.0e-3
   weight_decay: 3.0e-2
 
 scheduler:
-  warmup_epochs: 0
-  eta_min: 3.0e-4
+  warmup_epochs: 20
+  eta_min: 2.0e-6
 
 data:
   loader:

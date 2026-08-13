@@ -57,17 +57,17 @@ loss:
       teacher_channels: 512
       temperature: 1.0
       ce_weight: 0.0
-      kd_weight: 1.3
+      kd_weight: 1.20
       # hakd — взвешенное СРЕДНЕЕ по пикселям (веса KEM суммируются в
       # единицу), поэтому его значение на порядок меньше остальных членов:
       # при весе 1.0 замер дал 0.03 против 1.27 у proj, то есть сам метод
       # давал 2% своего же слагаемого. 15 выводит его в 35-40%.
-      hakd_weight: 30.0
+      hakd_weight: 20.0
       # proj — единственное, что обучает проектор УЧИТЕЛЯ (таргет отсоединён
       # от графа), поэтому в ноль его ронять нельзя: без обученного проектора
       # KMM всегда будет считать учителя ненадёжным, hakd так и останется
       # около нуля. Половина веса — компромисс.
-      proj_weight: 1.5
+      proj_weight: 1.30
     dice:
       _target_: src.losses.DiceLoss
       ce_weight: 0.0
@@ -86,23 +86,23 @@ loss:
       ignore_index: ${data.dataset.ignore_index}
 
   weights:
-    hetero: 0.5
+    hetero: 0.75
     dice: 0.1
-    ohem: 0.3
+    ohem: 0.45
     lovasz: 0.1
 
 loss_schedule:
-  weights.hetero: {schedule: cosine, start: 1.0, end: 0.0, start_epoch: 120}
-  weights.dice: {schedule: cosine, start: 1.0, end: 0.7, start_epoch: 120}
-  weights.ohem: {schedule: cosine, start: 1.0, end: 0.5, start_epoch: 120}
-  weights.lovasz: {schedule: cosine, start: 1.0, end: 0.5, start_epoch: 120}
+  weights.hetero: {schedule: cosine, start: 1.0, end: 0.25, start_epoch: 75}
+  weights.dice: {schedule: cosine, start: 0.1, end: 0.3, start_epoch: 60}
+  weights.ohem: {schedule: cosine, start: 0.45, end: 0.1, start_epoch: 75}
+  weights.lovasz: {schedule: cosine, start: 0.1, end: 0.75, start_epoch: 75}
 
 optimizer:
   lr: 1.0e-3
   weight_decay: 3.0e-2
 
 scheduler:
-  warmup_epochs: 0
+  warmup_epochs: 20
   eta_min: 3.0e-4
 
 data:
