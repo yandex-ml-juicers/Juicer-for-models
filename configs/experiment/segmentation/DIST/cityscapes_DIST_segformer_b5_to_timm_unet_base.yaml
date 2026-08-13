@@ -1,0 +1,75 @@
+# @package _global_
+# DIST (arXiv:2205.10536): SegFormer-B2 -> U-Net-base.
+# Вместо точного совпадения вероятностей требуется совпадение ПОРЯДКА —
+# метод рассчитан ровно на случай большого разрыва между учителем и учеником,
+# а разрыв "предобученный трансформер против U-Net с нуля" здесь максимальный
+# из всей сетки.
+# Бейзлайн для этого прогона — scratch/cityscapes_scratch_unet_base.
+defaults:
+  - override /data/dataset: cityscapes_seg
+  - override /data/transform/train: cityscapes_seg_strong_transform
+  - override /data/transform/eval: cityscapes_seg_transform
+  - override /model/teacher: segformer
+  - override /model/student: timm_unet
+  - override /loss: dist
+  - override /optimizer: adamw
+  - override /scheduler: warmup_cosine
+  - override /augment: cutmix_segmentation
+  - override /distributed: sync_bn
+
+name: cityscapes_DIST_segformer_b5_to_timm_unet_base
+device: cuda
+deterministic: false
+
+task_type: "segmentation"
+
+clearml:
+  enabled: True
+  tags: [cityscapes, KD, DIST, segformer-b2, unet-smal, segmentation]
+  # Схожесть ученика с учителем по пикселям: KL и доля совпавших argmax'ов.
+  # Считаются по подвыборке пикселей на probe-батчах, цена — доли процента эпохи.
+  scalars: ['KL_divergence', 'agreement_rate']
+  plots:
+    enabled: true
+    every_n_epochs: 20
+  reuse_last_task_id: True
+  continue_last_task: False
+  output_uri: false
+
+trainer:
+  epochs: 150
+  amp: true
+  grad_clip_norm: 1.0
+
+loss:
+  temperature: 4.0
+  ce_weight: 1.0
+  beta: 1.0
+  gamma: 1.0
+  spatial_stride: 2
+
+optimizer:
+  lr: 3.25e-4
+  weight_decay: 3.0e-2
+
+scheduler:
+  warmup_epochs: 10
+  eta_min: 1.0e-6
+
+data:
+  loader:
+    batch_size: 16
+    eval_batch_size: 10
+    num_workers: 16
+    pin_memory: true
+    persistent_workers: true
+
+model:
+  student:
+    variant: efficientnetv2_b2
+    pretrained: true
+    dropout: 0.1
+  teacher:
+    variant: b5
+    pretrained: cityscapes
+    checkpoint_path: null

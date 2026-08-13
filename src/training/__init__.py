@@ -1,3 +1,3 @@
-from src.training.trainer import Trainer, DetectionTrainer, evaluate
+from src.training.trainer import Trainer, DetectionTrainer, SegmentationTrainer, evaluate
 
-__all__ = ["Trainer", "evaluate", "DetectionTrainer"]
+__all__ = ["Trainer", "evaluate", "DetectionTrainer", "SegmentationTrainer"]

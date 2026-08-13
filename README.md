@@ -3,26 +3,35 @@
 
 ## Установка
 
-Требования: Python >= 3.10; для обучения на GPU — PyTorch со сборкой
-CUDA >= 12.8 (драйвер NVIDIA соответствующей версии).
+Требования: Python >= 3.10; для обучения на GPU — PyTorch со сборкой CUDA,
+поддерживающей архитектуру карт
 
 ```bash
-pip install 'torch>=2.7' 'torchvision>=0.22' --index-url https://download.pytorch.org/whl/cu128
-
 pip install -r requirements.txt
 pip install -e . --no-deps        # пакет src/ становится импортируемым
 # для тестов: pip install -e ".[dev]" --no-build-isolation
+
+# Новые cu128 (A100, RTX 30xx/40xx, H100)
+pip install --force-reinstall 'torch>=2.7' 'torchvision>=0.22' --index-url https://download.pytorch.org/whl/cu128
+# Старые cu126 (Tesla V100, compute capability 7.0)
+pip install --force-reinstall 'torch>=2.7' 'torchvision>=0.22' --index-url https://download.pytorch.org/whl/cu126
 ```
 
-На машине без GPU шаг с индексом cu128 пропускается — `requirements.txt`
-поставит обычную сборку, всё работает на CPU (смоуки, тесты). Проверить
-сборку: `python -c "import torch; print(torch.__version__, torch.version.cuda)"`.
+Проверки
+
+```bash
+python -c "import torch; print(torch.__version__); print(torch.cuda.get_arch_list())"
+python -c "import torch; x = torch.randn(1000, 1000).cuda(); print((x @ x).sum().item())"
+```
+
+Для V100 в списке обязан быть `sm_70`. 
+
 
 ## Быстрый старт
 
 ```bash
 # Бейзлайн 1: ванильная дистилляция Хинтона, ResNet-56 -> ResNet-20
-python scripts/train.py experiment=b1_vanilla_kd
+python scripts/train.py experiment=baseline/b1_vanilla_kd
 
 # Контроль к нему: тот же ученик с нуля, без учителя
 python scripts/train.py experiment=b1_scratch
@@ -41,6 +50,28 @@ python scripts/train.py data/dataset=fake_cifar10 '~model/teacher' loss=ce \
 # Оценка сохранённого чекпоинта
 python scripts/eval.py experiment=b2_feature_kd ckpt_path=outputs/<name>/<run>/best.pt
 ```
+
+## Аугментации и регуляризации
+
+По умолчанию включён только базовый набор (crop + flip + jitter), чтобы
+бейзлайны оставались сравнимыми. Всё остальное подключается конфигом:
+
+```bash
+# Mixup + CutMix (классификация) / CutMix (сегментация) — группа augment
+python scripts/train.py experiment=<...> augment=mixup_cutmix
+python scripts/train.py experiment=<...> augment=cutmix_segmentation
+
+# усиленный набор аугментаций одного примера
+python scripts/train.py experiment=<...> data/transform/train=cityscapes_seg_strong_transform
+python scripts/train.py experiment=<...> data/transform/train=imagenet_strong_transform
+
+# регуляризация внутри модели
+python scripts/train.py experiment=<...> model.student.drop_path_rate=0.2   # SegFormer / timm / ResNet
+python scripts/train.py experiment=<...> model.student.dropout=0.1          # U-Net
+```
+
+Что каждый рычаг делает, когда его включать и почему для сегментации нужен
+CutMix, а не Mixup — в [docs/augmentations.md](docs/augmentations.md).
 
 Артефакты каждого запуска — в `outputs/<name>/<дата_время>/`:
 `.hydra/config.yaml` (полный снапшот конфига), `train.log`, `history.csv`

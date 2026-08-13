@@ -1,0 +1,51 @@
+# Усиленный train-рецепт Cityscapes.
+#
+# Отличия от базового cityscapes_seg_transform и зачем каждое:
+#
+#   cat_max_ratio: 0.75  — приём mmsegmentation. Cityscapes снят с капота, и
+#     случайный кроп 512x1024 регулярно попадает в «одну дорогу» или «одно
+#     небо». Такой кроп почти не несёт сигнала, но забирает шаг оптимизатора.
+#     Кроп перевыбирается, если один класс занимает больше 75% размеченных
+#     пикселей. Самое дешёвое из здешних улучшений.
+#
+#   hue: 0.03 + color_jitter_p: 0.8 — оттенок трогается слабо (0.05 уже
+#     перекрашивает машины в несуществующие цвета), и часть кадров остаётся
+#     в исходных цветах: цветовая статистика датасета сама по себе полезна.
+#
+#   blur_p: 0.3 — все кадры сняты одной камерой и одинаково резкие, поэтому
+#     модель охотно цепляется за высокочастотную текстуру асфальта и листвы.
+#
+#   random_erasing_p: 0.3 — стирание прямоугольника (arXiv:1708.04896).
+#     Маска НЕ меняется: класс под пятном по-прежнему нужно предсказать,
+#     опираясь на контекст. Если такой штраф кажется избыточным, поставьте
+#     random_erasing_erases_labels: true — тогда стёртое выпадет из лосса.
+#     scale ограничен 0.15 (против 0.33 в классификации): в сегментации
+#     каждый пиксель — отдельный таргет, и стирать треть кадра слишком дорого.
+#
+# Mixup/CutMix сюда НЕ входят — они смешивают разные примеры и потому живут
+# отдельным конфигом: augment=cutmix_segmentation.
+_target_: src.data.transforms.build_segmentation_transform_train
+mean: ${data.dataset.normalize.mean}
+std: ${data.dataset.normalize.std}
+crop_size: ${data.dataset.crop_size}
+scale_range: ${data.dataset.scale_range}
+ignore_index: ${data.dataset.ignore_index}
+
+color_jitter: 0.4
+color_jitter_p: 0.8
+hue: 0.03
+hflip_p: 0.5
+
+cat_max_ratio: 0.75
+
+blur_p: 0.3
+blur_kernel_size: 5
+blur_sigma: [0.1, 2.0]
+
+random_erasing_p: 0.3
+random_erasing_scale: [0.02, 0.15]
+random_erasing_ratio: [0.3, 3.3]
+# Стирание идёт после Normalize, поэтому 0.0 — это средний цвет датасета.
+# "random" заполняет пятно гауссовым шумом.
+random_erasing_value: 0.0
+random_erasing_erases_labels: false

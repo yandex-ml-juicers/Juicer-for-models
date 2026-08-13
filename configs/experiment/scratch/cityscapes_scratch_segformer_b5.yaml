@@ -1,0 +1,58 @@
+# @package _global_
+# Сильный учитель дистилляции: SegFormer-B5 (~84.6M) на Cityscapes.
+defaults:
+  - override /data/dataset: cityscapes_seg
+  - override /data/transform/train: cityscapes_seg_transform
+  - override /data/transform/eval: cityscapes_seg_transform
+  - override /model/teacher: null
+  - override /model/student: segformer
+  - override /loss: ce
+  - override /optimizer: adamw
+  - override /scheduler: warmup_cosine
+  # Батч на карту мал, поэтому BatchNorm считаем глобально (см. конфиг группы).
+  - override /distributed: sync_bn
+
+name: cityscapes_scratch_segformer_b5
+device: cuda
+deterministic: false
+
+task_type: "segmentation"
+
+clearml:
+  enabled: True
+  tags: [cityscapes, teacher, scratch, segformer-b5, segmentation]
+  scalars: []
+  reuse_last_task_id: False
+  continue_last_task: False
+  output_uri: false
+
+trainer:
+  epochs: 100
+  amp: true
+  grad_clip_norm: 1.0
+
+loss:
+  ignore_index: ${data.dataset.ignore_index}
+  label_smoothing: 0.0
+
+optimizer:
+  lr: 6.0e-5
+  weight_decay: 1.0e-2
+
+scheduler:
+  warmup_epochs: 5
+  eta_min: 1.0e-6
+
+data:
+  loader:
+    # B5 втрое тяжелее B2 (40 блоков в третьей стадии) — батч урезан вдвое.
+    batch_size: 4
+    eval_batch_size: 2
+    num_workers: 8
+    pin_memory: true
+    persistent_workers: true
+
+model:
+  student:
+    variant: b5
+    pretrained: imagenet

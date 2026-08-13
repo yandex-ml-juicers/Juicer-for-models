@@ -1,0 +1,31 @@
+# Усиленный train-рецепт ImageNet: RandAugment + Random Erasing.
+#
+# Отличия от базового imagenet_transform:
+#
+#   rand_augment_num_ops: 2, magnitude: 9 — канонические значения RandAugment
+#     (arXiv:1909.13719); именно на них построены рецепты timm/DeiT.
+#
+#   random_erasing_p: 0.25 — значение из статьи Random Erasing и из timm.
+#     Стирание идёт ПОСЛЕ Normalize, поэтому value: random — это шум N(0, 1)
+#     в нормализованной шкале, а не «серый прямоугольник».
+#
+# Чего здесь нет: Mixup и CutMix. Они смешивают разные примеры батча, поэтому
+# задаются отдельной группой — augment=mixup_cutmix.
+#
+# Важно про расписание: этот набор рассчитан на длинное обучение. На 20-40
+# эпохах он систематически проигрывает базовому — модель просто не успевает
+# сойтись. Включать вместе с увеличением trainer.epochs.
+_target_: src.data.transforms.build_transform_train
+mean: ${data.dataset.normalize.mean}
+std: ${data.dataset.normalize.std}
+image_size: ${data.dataset.image_size}
+
+hflip_p: 0.5
+
+rand_augment_num_ops: 2
+rand_augment_magnitude: 9
+
+random_erasing_p: 0.25
+random_erasing_scale: [0.02, 0.33]
+random_erasing_ratio: [0.3, 3.3]
+random_erasing_value: random

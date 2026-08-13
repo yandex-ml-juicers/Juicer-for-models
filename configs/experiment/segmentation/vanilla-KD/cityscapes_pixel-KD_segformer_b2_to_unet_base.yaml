@@ -1,0 +1,70 @@
+# @package _global_
+# Ванильная KD Хинтона (arXiv:1503.02531) попиксельно: SegFormer-B2 -> U-Net-base.
+# Базовый метод сетки: сравнивает только распределения по классам в каждом
+# пикселе, никакой структуры сцены не использует.
+#
+# Бейзлайн для этого прогона — scratch/cityscapes_scratch_unet_base.
+defaults:
+  - override /data/dataset: cityscapes_seg
+  - override /data/transform/train: cityscapes_seg_strong_transform
+  - override /data/transform/eval: cityscapes_seg_transform
+  - override /model/teacher: segformer
+  - override /model/student: timm_unet
+  - override /loss: pixel_kd
+  - override /optimizer: adamw
+  - override /scheduler: warmup_cosine
+  # Батч на карту мал, поэтому BatchNorm считаем глобально (см. конфиг группы).
+  - override /distributed: sync_bn
+  - override /augment: cutmix_segmentation
+
+name: cityscapes_pixel-KD_segformer_b2_to_unet_base
+device: cuda
+deterministic: false
+
+task_type: "segmentation"
+
+clearml:
+  enabled: True
+  tags: [cityscapes, KD, pixel-KD, segformer-b2, unet-smal, segmentation]
+  scalars: ['KL_divergence', 'agreement_rate']
+  plots:
+    enabled: true
+    every_n_epochs: 20
+  reuse_last_task_id: True
+  continue_last_task: False
+  output_uri: false
+
+trainer:
+  epochs: 100
+  amp: true
+  grad_clip_norm: 1.0
+
+loss:
+  temperature: 4.0
+  alpha: 0.5
+
+optimizer:
+  lr: 3.25e-4
+  weight_decay: 3.0e-2
+
+scheduler:
+  warmup_epochs: 10
+  eta_min: 1.0e-6
+
+data:
+  loader:
+    batch_size: 8
+    eval_batch_size: 4
+    num_workers: 8
+    pin_memory: true
+    persistent_workers: true
+
+model:
+  student:
+    variant: efficientnet_b0
+    pretrained: true
+    dropout: 0.1
+  teacher:
+    variant: b2
+    pretrained: cityscapes
+    checkpoint_path: null

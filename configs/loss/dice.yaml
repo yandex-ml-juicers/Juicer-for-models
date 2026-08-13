@@ -1,0 +1,11 @@
+# CE + Dice для сегментации без дистилляции. Сочетается с model/teacher=null.
+#
+# dice_weight: 1.0 — паритет с CE, стандартная отправная точка. Чистый Dice
+# (ce_weight: 0) в начале обучения нестабилен, так использовать не стоит.
+_target_: src.losses.DiceLoss
+ce_weight: 1.0
+dice_weight: 1.0
+smooth: 1.0
+label_smoothing: 0.0
+# Для сегментации переопределять на data.dataset.ignore_index (255 у Cityscapes).
+ignore_index: 255

@@ -21,6 +21,11 @@ docs/ — документация по конкретным подсистем�
 
 [Докуменация по Hydra](hydra.md)
 
+# Аугментации и регуляризации
+
+[Документация по аугментациям](augmentations.md) — Mixup/CutMix, Random Erasing,
+stochastic depth, dropout и что из этого включено по умолчанию (ничего).
+
 # Lightning 
 
 # Основное

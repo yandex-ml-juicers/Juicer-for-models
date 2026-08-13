@@ -1,0 +1,67 @@
+# @package _global_
+# Бейзлайн для дистилляции: U-Net-base (~7.8M) с нуля, без учителя.
+#
+# Отдельный от cityscapes_scratch_unet конфиг нужен потому, что тот обучает
+# full (~31M). Прирост от дистилляции измеряется относительно ученика ТОГО ЖЕ
+# размера — иначе сравнивается не метод, а ёмкость модели.
+defaults:
+  - override /data/dataset: cityscapes_seg
+  - override /data/transform/train: cityscapes_seg_transform
+  - override /data/transform/eval: cityscapes_seg_transform
+  - override /model/teacher: null
+  - override /model/student: unet
+  - override /loss: ce
+  - override /optimizer: adamw
+  - override /scheduler: warmup_cosine
+  # Батч на карту мал, поэтому BatchNorm считаем глобально (см. конфиг группы).
+  - override /distributed: sync_bn
+
+name: cityscapes_scratch_unet
+device: cuda
+
+# ConvTranspose2d.backward, max_pool2d.backward и nll_loss2d на CUDA не имеют
+# детерминированных ядер — при deterministic=true запуск падает с RuntimeError.
+deterministic: false
+
+task_type: "segmentation"
+
+clearml:
+  enabled: True
+  tags: [cityscapes, student, scratch, unet-smal, segmentation]
+  scalars: ['KL_divergence', 'agreement_rate']
+  plots:
+    enabled: true
+    every_n_epochs: 20
+  reuse_last_task_id: True
+  continue_last_task: False
+  output_uri: false
+
+trainer:
+  epochs: 100
+  amp: true
+  grad_clip_norm: 1.0
+
+loss:
+  # Void-пиксели Cityscapes не должны попадать в лосс
+  ignore_index: ${data.dataset.ignore_index}
+  label_smoothing: 0.05
+
+optimizer:
+  lr: 7.5e-4
+  weight_decay: 4.0e-2
+
+scheduler:
+  warmup_epochs: 10
+  eta_min: 1.0e-6
+
+data:
+  loader:
+    batch_size: 8
+    eval_batch_size: 4
+    num_workers: 8
+    pin_memory: true
+    persistent_workers: true
+
+model:
+  student:
+    variant: small

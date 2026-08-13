@@ -1,3 +1,9 @@
 _target_: src.models.factory.timm_model_for_classification
 model_name: tiny_vit_5m_224
 num_classes: 100
+
+# Stochastic depth средствами самого timm. null — не передавать аргумент
+# вовсе, то есть оставить дефолт архитектуры (у TinyViT он ненулевой).
+# Затирать его нулём без причины не нужно: трансформеры на этой регуляризации
+# и рассчитаны. Осмысленные значения для дообучения — 0.1..0.3.
+drop_path_rate: null
