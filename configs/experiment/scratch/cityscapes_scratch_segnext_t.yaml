@@ -37,7 +37,15 @@ clearml:
 
 trainer:
   epochs: 150
-  amp: true
+  # amp: false — НЕ опечатка. Под AMP градиент SegNeXt (LightHamHead/Hamburger,
+  # src/models/segnext.py) обнуляется полностью за 2-3 эпохи (train_avg_grad_norm
+  # и max падают ровно в 0.0, eval mIoU/pixel_acc замирают побитово) — NMF2D
+  # уже сам отключает autocast внутри себя, но что-то ЕЩЁ в модели нестабильно
+  # в fp16. Проверено диагностическим прогоном: без AMP градиент здоровый
+  # (~130-140) и eval mIoU растёт нормально уже со 2 эпохи. Пока не нашли
+  # точное место и не завели узкий autocast(enabled=False) — AMP везде
+  # выключен для студента SegNeXt.
+  amp: false
   grad_clip_norm: 1.0
 
 loss:

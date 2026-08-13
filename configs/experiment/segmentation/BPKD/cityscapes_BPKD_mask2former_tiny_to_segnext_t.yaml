@@ -42,7 +42,11 @@ clearml:
 
 trainer:
   epochs: 100
-  amp: true
+  # amp: false — НЕ опечатка, см. scratch/cityscapes_scratch_segnext_t.yaml:
+  # под AMP градиент SegNeXt-студента обнуляется за 2-3 эпохи (проверено
+  # диагностикой на этом же студенте), выключен до тех пор, пока не найдено
+  # точное нестабильное место в src/models/segnext.py.
+  amp: false
   grad_clip_norm: 10.0
 
 loss:
@@ -87,7 +91,11 @@ scheduler:
 
 data:
   loader:
-    batch_size: 24
+    # batch_size снижен вдвое (24 -> 12): amp:false выше означает, что и
+    # учитель Mask2Former-tiny теперь считается в fp32, а не в fp16, как в
+    # версии, которая была смоук-тестирована при 24. Не перепроверял —
+    # если не влезет, убавляйте дальше.
+    batch_size: 12
     eval_batch_size: 10
     num_workers: 16
     pin_memory: true

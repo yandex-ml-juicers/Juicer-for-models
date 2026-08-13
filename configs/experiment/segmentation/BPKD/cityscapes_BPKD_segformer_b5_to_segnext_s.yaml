@@ -44,7 +44,11 @@ clearml:
 
 trainer:
   epochs: 100
-  amp: true
+  # amp: false — НЕ опечатка, см. scratch/cityscapes_scratch_segnext_t.yaml:
+  # под AMP градиент SegNeXt-студента обнуляется за 2-3 эпохи (проверено
+  # диагностикой), выключен до тех пор, пока не найдено точное нестабильное
+  # место в src/models/segnext.py.
+  amp: false
   grad_clip_norm: 10.0
 
 loss:
@@ -89,7 +93,14 @@ scheduler:
 
 data:
   loader:
-    batch_size: 16
+    # batch_size снижен вдвое (16 -> 8) относительно версии с AMP: amp:false
+    # выше означает, что и учитель SegFormer-B5 теперь считается в fp32
+    # (AMP — один флаг на трейнер, отдельного per-model контроля пока нет),
+    # а это заметно больше памяти, чем в fp16-версии, которая и была
+    # смоук-тестирована при batch=16. Не перепроверял этот батч отдельно —
+    # если не влезет, убавляйте дальше или добавляйте
+    # +model.teacher_micro_batch_size=N (src/models/chunked_teacher.py).
+    batch_size: 8
     eval_batch_size: 8
     num_workers: 16
     pin_memory: true

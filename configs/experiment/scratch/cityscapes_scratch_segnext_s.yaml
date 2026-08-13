@@ -35,7 +35,10 @@ clearml:
 
 trainer:
   epochs: 150
-  amp: true
+  # amp: false — НЕ опечатка, см. cityscapes_scratch_segnext_t.yaml: под AMP
+  # градиент SegNeXt обнуляется за 2-3 эпохи (проверено диагностикой),
+  # выключен до тех пор, пока не найдено точное нестабильное место.
+  amp: false
   grad_clip_norm: 1.0
 
 loss:
