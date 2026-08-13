@@ -15,7 +15,7 @@ from omegaconf import DictConfig, ListConfig, OmegaConf
 from torch import nn
 
 from src.data import base_loader
-from src.models import MultiScaleInference
+from src.models import ChunkedTeacher, MultiScaleInference, NativeResolutionTeacher
 from src.training import (
     DetectionTrainer,
     LossWeightScheduler,
@@ -228,6 +228,18 @@ def clearml_reporter(task):
             "eval_miou": ("segmentation_metrics", "eval_mIoU"),
             "train_pixel_acc": ("pixel_accuracy", "train"),
             "eval_pixel_acc": ("pixel_accuracy", "eval"),
+            # Диагностика дистилляции — собственное качество учителя, а не
+            # схожесть с ним. Два независимых флага в clearml.scalars:
+            # train_teacher_mIoU (флаг "teacher_miou") — по эпохам, учитель на
+            # тех же кропах/масштабе/аугментациях, что ПРЯМО СЕЙЧАС видит
+            # ученик; teacher_native_mIoU (отдельный флаг "teacher_native_miou")
+            # — плоская линия-ориентир, учитель на eval_loader (родное
+            # разрешение, без кропа) — не включена по умолчанию вместе с
+            # первой, т.к. не меняется по эпохам и обычно и так известна.
+            # Разница между ними — прямая проверка гипотезы про разрешение
+            # учителя при дистилляции.
+            "train_teacher_miou": ("segmentation_metrics", "train_teacher_mIoU"),
+            "teacher_native_miou": ("segmentation_metrics", "teacher_native_mIoU"),
         }
         for key, (title, series_name) in segmentation_metrics.items():
             if key in row:
@@ -347,12 +359,37 @@ def main(cfg: DictConfig) -> float:
             teacher = None
             if cfg.model.get("teacher") is not None:
                 teacher = instantiate(cfg.model.teacher).to(device)
+                # Учителя апсемплим до разрешения, на котором его мерили/
+                # дообучали (см. src/models/native_resolution_teacher.py) —
+                # ПЕРЕД мультимасштабным прогоном, если оба заданы: тогда
+                # каждый масштаб MultiScaleInference берётся уже от родного
+                # разрешения, а не от кропа студента.
+                teacher_native_resolution = _plain(cfg.model.get("teacher_native_resolution"))
+                if teacher_native_resolution:
+                    teacher = NativeResolutionTeacher(teacher, **teacher_native_resolution)
+                    log.info(
+                        "Учитель апсемплится до родного разрешения: %s", teacher_native_resolution
+                    )
                 # Мультимасштабный прогон учителя: несколько forward'ов вместо
                 # одного, зато таргет заметно чище (см. src/models/multi_scale.py).
                 teacher_inference = _plain(cfg.model.get("teacher_inference"))
                 if teacher_inference:
                     teacher = MultiScaleInference(teacher, **teacher_inference)
                     log.info("Учитель считает таргеты мультимасштабно: %s", teacher_inference)
+                # Режем батч учителя на куски ПОСЛЕДНИМ (снаружи всех
+                # обёрток выше) — учитель без градиентов, чанкинг ничего не
+                # меняет в результате (см. src/models/chunked_teacher.py),
+                # только развязывает batch_size, под который тюнились lr и
+                # расписание оптимизатора, от памяти/лимитов CUDA-ядер на
+                # ОДИН forward тяжёлого учителя (особенно актуально вместе с
+                # teacher_native_resolution — апсемпленный батч целиком легко
+                # не помещается).
+                teacher_micro_batch_size = cfg.model.get("teacher_micro_batch_size")
+                if teacher_micro_batch_size:
+                    teacher = ChunkedTeacher(teacher, micro_batch_size=teacher_micro_batch_size)
+                    log.info(
+                        "Учитель считается кусками батча по %s", teacher_micro_batch_size
+                    )
             criterion = instantiate(cfg.loss).to(device)
 
         # заменяем слои BatchNorm до сборки optimizer

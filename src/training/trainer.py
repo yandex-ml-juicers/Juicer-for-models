@@ -1025,6 +1025,7 @@ def segmentation_evaluate(
     ignore_index: int = 255,
     limit_batches: int | None = None,
     amp: bool = False,
+    micro_batch_size: int | None = None,
 ) -> tuple[float, IoUAccumulator]:
     """Возвращает (средний CE-лосс, аккумулятор IoU).
 
@@ -1049,6 +1050,15 @@ def segmentation_evaluate(
     mIoU при этом совпадает с однопроцессным прогоном точно — матрица
     аддитивна. Лосс может разойтись в последних знаках: он взвешен по
     картинкам батча, а границы батчей у шардов другие.
+
+    micro_batch_size: если задан, каждый батч из loader'а дополнительно
+        режется на форвард-под-батчи этого размера — без градиентов это не
+        влияет на результат (аккумулятор аддитивен), только на пиковую
+        память. Нужен, когда loader настроен под память ДРУГОЙ модели —
+        например, при разовой оценке учителя на eval_loader, собранном под
+        батч (заметно менее прожорливого) студента: тот же батч, что легко
+        входит для U-Net на 1024x2048, может не влезть для SegFormer-B5
+        целиком (см. SegmentationTrainer.fit(), teacher_native_miou).
     """
     was_training = model.training
     model.eval()
@@ -1063,13 +1073,18 @@ def segmentation_evaluate(
         images = images.to(device, non_blocking=True)
         masks = masks.to(device, non_blocking=True)
 
-        with torch.autocast(device.type, enabled=amp):
-            logits = model(images)
+        chunk_size = micro_batch_size or images.size(0)
+        for start in range(0, images.size(0), chunk_size):
+            images_chunk = images[start : start + chunk_size]
+            masks_chunk = masks[start : start + chunk_size]
 
-        loss = F.cross_entropy(logits.float(), masks, ignore_index=ignore_index)
+            with torch.autocast(device.type, enabled=amp):
+                logits = model(images_chunk)
 
-        loss_meter.update(loss.item(), images.size(0))
-        iou.update(logits.argmax(dim=1), masks)
+            loss = F.cross_entropy(logits.float(), masks_chunk, ignore_index=ignore_index)
+
+            loss_meter.update(loss.item(), images_chunk.size(0))
+            iou.update(logits.argmax(dim=1), masks_chunk)
 
     if was_training:
         model.train()
@@ -1174,6 +1189,13 @@ class SegmentationTrainer:
         self.probe_batches = int(plots.get("probe_batches", 20))
         self.debug_every_n_epochs = int(plots.get("debug_every_n_epochs", 10))
         self.debug_width = int(plots.get("debug_width", 512))
+        # Разовый прогон учителя на eval_loader (teacher_native_miou, см. fit())
+        # использует batch_size, подобранный под СТУДЕНТА — для тяжёлого
+        # учителя (SegFormer-B5 и т.п.) на родном разрешении 1024x2048 это
+        # легко даёт OOM. 4 — консервативный дефолт (столько же или меньше
+        # использовал ручной прогон scripts/eval.py eval_slot=teacher для
+        # SegFormer-B5, см. outputs/eval_teacher_b5); при нужде — переопределить.
+        self.teacher_native_eval_batch_size = int(plots.get("teacher_native_eval_batch_size", 4))
         self.palette = list(palette) if palette is not None else default_palette(self.num_classes)
         self.normalize = normalize
         # Картинки для Debug Samples берутся с равным шагом по валидации и
@@ -1196,6 +1218,34 @@ class SegmentationTrainer:
                 self.ignore_index,
                 pixels_per_batch=int(plots.get("probe_pixels", 8192)),
             )
+
+        # Собственное качество учителя (а не схожесть с ним) — диагностика
+        # для дистилляции: "видит ли учитель то, на чём сам хорошо предсказывает".
+        # Два НЕЗАВИСИМЫХ флага в clearml.scalars — специально не один, чтобы
+        # можно было взять дешёвую метрику без дорогой:
+        #   "teacher_miou"        -> train_teacher_miou, каждую эпоху, почти
+        #                            бесплатно (teacher_logits и так нужны
+        #                            каждый шаг ради KD-лосса, здесь только
+        #                            argmax+bincount по тем же кропам/масштабу/
+        #                            аугментациям, что видит ученик прямо
+        #                            сейчас — это и есть "насколько сильные
+        #                            таргеты учитель выдаёт ученику").
+        #   "teacher_native_miou" -> разовый прогон segmentation_evaluate по
+        #                            eval_loader (родное разрешение, без кропа
+        #                            и без аугментаций — тот же путь, что
+        #                            scripts/eval.py eval_slot=teacher), ~1-2
+        #                            минуты один раз в начале fit(). Число не
+        #                            меняется по эпохам (учитель заморожен) и
+        #                            обычно и так известно заранее — включайте,
+        #                            только если хотите готовую линию-ориентир
+        #                            на том же графике, а не считать самим.
+        self.teacher_iou: IoUAccumulator | None = None
+        if teacher is not None and "teacher_miou" in set(self.scalars):
+            self.teacher_iou = IoUAccumulator(self.num_classes, self.device, self.ignore_index)
+        self.teacher_native_miou_enabled = (
+            teacher is not None and "teacher_native_miou" in set(self.scalars)
+        )
+        self.teacher_native_miou: float | None = None
 
         self.amp_enabled = amp and self.device.type == "cuda"
         self.scaler = GradScaler(self.device.type, enabled=self.amp_enabled)
@@ -1249,6 +1299,42 @@ class SegmentationTrainer:
         if self.plots_enabled and self.debug_indices:
             self.metrics_callback_plots(self._debug_samples(), 0)
 
+        # Разовый прогон учителя по eval_loader (родное разрешение, без кропа —
+        # тот же путь, что scripts/eval.py eval_slot=teacher). Учитель заморожен,
+        # число не меняется по эпохам, поэтому считаем один раз ДО цикла и потом
+        # просто повторяем в каждой строке лога — как плоскую линию-ориентир
+        # рядом с train_teacher_miou (тот считается на кропах, которые учитель
+        # реально видит при дистилляции). Отдельный флаг (teacher_native_miou_enabled,
+        # см. __init__) — эта метрика не меняется по эпохам и часто уже известна
+        # заранее, поэтому не включена по умолчанию вместе с train_teacher_miou.
+        # Коллективная операция (synchronize внутри segmentation_evaluate) —
+        # вызывается на всех ранках одинаково, т.к. self.scalars одинаков на
+        # всех ранках.
+        if self.teacher_native_miou_enabled:
+            _, native_iou = segmentation_evaluate(
+                model=self.teacher,
+                loader=self.eval_loader,
+                device=self.device,
+                num_classes=self.num_classes,
+                ignore_index=self.ignore_index,
+                limit_batches=self.limit_eval_batches,
+                amp=self.amp_enabled,
+                micro_batch_size=self.teacher_native_eval_batch_size,
+            )
+            self.teacher_native_miou = native_iou.compute()["miou"]
+            log.info(
+                "Учитель на eval-разрешении (родное, без кропа): mIoU=%.4f — "
+                "сравни с train_teacher_miou (кропы, которые он видит при дистилляции)",
+                self.teacher_native_miou,
+            )
+            # Без этого PyTorch держит закэшированными блоки под форму
+            # 1024x2048/micro_batch_size — а основной цикл сразу просит
+            # крупный батч 512x1024, форма другая, кэш ему не подходит.
+            # Итог — OOM на первом же шаге обучения при формально свободной
+            # памяти (проверено: SegFormer-B5 + batch=80 падал без этой строки).
+            if self.device.type == "cuda":
+                torch.cuda.empty_cache()
+
         try:
             for epoch in range(1, self.epochs + 1):
                 start = time.time()
@@ -1288,6 +1374,12 @@ class SegmentationTrainer:
                     **loss_weights,
                     **{f"train_loss_{key}": value for key, value in train_loss_components.items()},
                     **{f"train_{key}": value for key, value in other_train_metrics.items()},
+                    # Плоская линия-ориентир, пересылается без пересчёта (см. выше).
+                    **(
+                        {"teacher_native_miou": self.teacher_native_miou}
+                        if self.teacher_native_miou is not None
+                        else {}
+                    ),
                 }
 
                 if history is not None:
@@ -1343,6 +1435,8 @@ class SegmentationTrainer:
         self.train_iou.reset()
         if self.similarity is not None:
             self.similarity.reset()
+        if self.teacher_iou is not None:
+            self.teacher_iou.reset()
         # Сравнение с учителем считается не на каждом шаге: за эпоху достаточно
         # probe_batches замеров, чтобы среднее устоялось, а гистограмма набрала
         # форму. Шаги берутся с равным интервалом по эпохе — иначе метрика
@@ -1433,6 +1527,10 @@ class SegmentationTrainer:
                 # вместе с пикселями), поэтому train mIoU остаётся честным;
                 # для Mixup он превращается в оценку снизу.
                 self.train_iou.update(student_logits.detach().argmax(dim=1), masks)
+                # Собственное качество учителя на тех же кропах — без лишнего
+                # forward'а, teacher_logits уже посчитаны выше ради KD-лосса.
+                if self.teacher_iou is not None and teacher_logits is not None:
+                    self.teacher_iou.update(teacher_logits.detach().argmax(dim=1), masks)
 
             iterator.set_postfix({"loss": f"{losses['total'].item():.3f}"})
 
@@ -1445,11 +1543,16 @@ class SegmentationTrainer:
         norms.synchronize(self.device)
         if self.similarity is not None:
             self.similarity.synchronize()
+        if self.teacher_iou is not None:
+            self.teacher_iou.synchronize()
 
         train_loss_components = {key: meter.avg for key, meter in meters_avg_loss.items()}
 
         meters_other.update(self.train_iou.compute())  # miou, pixel_acc
         meters_other.update(norms.results())
+        if self.teacher_iou is not None:
+            # Своё имя, а не "miou": иначе затрёт miou студента при merge ниже.
+            meters_other["teacher_miou"] = self.teacher_iou.compute()["miou"]
         if self.similarity is not None:
             meters_other.update(self.similarity.compute())  # KL_divergence, agreement_rate
 
