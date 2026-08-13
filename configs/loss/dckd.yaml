@@ -2,8 +2,8 @@ _target_: src.losses.DCKDLoss
 
 num_classes: 8
 
-student_feature_key: neck
-teacher_feature_key: projected_feature
+student_feature_key: model.21
+teacher_feature_key: model.backbone.projector
 
 student_channels: 256
 teacher_channels: 256

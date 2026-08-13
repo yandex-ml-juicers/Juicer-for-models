@@ -6,6 +6,7 @@ import torch.nn.functional as F
 from scipy.optimize import linear_sum_assignment
 from torchvision.ops import box_iou, generalized_box_iou
 from src.losses.base import DistillationLoss
+from src.losses.yolov8n_loss import YOLOv8Loss
 
 class DCKDLoss(DistillationLoss):
     """DCKD loss for LW-DETR teacher -> YOLOv8 student.
@@ -33,8 +34,14 @@ class DCKDLoss(DistillationLoss):
 
     Features for HoKFD
     ------------------
-    student_features[student_feature_key]: [B, Cs, Hs, Ws]
-    teacher_features[teacher_feature_key]: [B, Ct, Ht, Wt]
+    student_features[student_feature_key] (from Trainer hooks, если заданы) или,
+    по умолчанию, YOLO's own outputs["feats"] (последний по глубине уровень,
+    подобранный по числу каналов): [B, Cs, Hs, Ws].
+    teacher_features[teacher_feature_key] (от Trainer hooks) или, по умолчанию,
+    teacher_outputs.projected_feature — LW-DETR оборачивается в
+    _LwDetrWithProjectedFeature (src/models/factory.py), который снимает выход
+    projector-слоя backbone и прикладывает его к выходу как обычное поле:
+    [B, Ct, Ht, Wt].
 
     The feature adapter is trainable. Therefore criterion.parameters() must be
     included in the optimizer when lambda_hokfd > 0 and Cs != Ct.
@@ -66,9 +73,15 @@ class DCKDLoss(DistillationLoss):
         match_cls_weight: float=1.0, 
         match_l1_weight: float=5.0, 
         match_giou_weight: float=2.0, 
-        local_iou_threshold: float=0.5, 
-        quality_gamma: float=0.5, 
-        attention_temperature: float=0.1, 
+        local_iou_threshold: float=0.5,
+        local_gt_floor: float=1.0,
+        quality_gamma: float=0.5,
+        attention_temperature: float=0.1,
+        det_strides: tuple[int, ...]=(8, 16, 32),
+        det_reg_max: int=16,
+        det_box_gain: float=7.5,
+        det_cls_gain: float=0.5,
+        det_dfl_gain: float=1.5,
         eps: float=1e-06
     ) -> None:
         super().__init__()
@@ -82,6 +95,8 @@ class DCKDLoss(DistillationLoss):
             raise ValueError('teacher_score_threshold должен быть в [0, 1]')
         if not 0.0 <= local_iou_threshold <= 1.0:
             raise ValueError('local_iou_threshold должен быть в [0, 1]')
+        if local_gt_floor < 0.0:
+            raise ValueError('local_gt_floor должен быть >= 0')
         if not 0.0 <= quality_gamma <= 1.0:
             raise ValueError('quality_gamma должен быть в [0, 1]')
 
@@ -102,9 +117,23 @@ class DCKDLoss(DistillationLoss):
         self.match_l1_weight = match_l1_weight
         self.match_giou_weight = match_giou_weight
         self.local_iou_threshold = local_iou_threshold
+        self.local_gt_floor = local_gt_floor
         self.quality_gamma = quality_gamma
         self.attention_temperature = attention_temperature
         self.eps = eps
+        # det больше не самописный Hungarian-лосс: студент — dense anchor-based
+        # YOLOv8, ему нужен родной TAL-assigner + DFL, а не one-to-one
+        # DETR-style мэтчинг. YOLOv8Loss — та же обёртка, на которой учится
+        # baseline (cityscapes_finetune_yolov8n), так что GT-часть DCKD и
+        # baseline теперь сравнимы.
+        self.task_loss = YOLOv8Loss(
+            num_classes=num_classes,
+            strides=det_strides,
+            reg_max=det_reg_max,
+            box_gain=det_box_gain,
+            cls_gain=det_cls_gain,
+            dfl_gain=det_dfl_gain,
+        )
         self.feature_adapter = nn.Identity() if student_channels == teacher_channels else nn.Conv2d(student_channels, teacher_channels, kernel_size=1, bias=False)
 
     def forward(
@@ -116,13 +145,18 @@ class DCKDLoss(DistillationLoss):
         teacher_features: dict[str, torch.Tensor] | None = None
     ) -> dict[str, torch.Tensor]:
         s_logits, s_boxes = self._student_predictions(student_outputs)
+        raw_labels = labels
         labels = self._prepare_labels(labels, batch_size=s_logits.shape[0])
 
         if isinstance(student_outputs, dict):
             student_outputs["kd_logits"] = s_logits
             student_outputs["kd_boxes"] = s_boxes
 
-        det = self._detector_loss(s_logits=s_logits, s_boxes=s_boxes, labels=labels)
+        # student_outputs ещё не тронут (kd_logits/kd_boxes — новые ключи, не
+        # замена старых), raw_labels — исходный ultralytics-формат
+        # (batch_idx/cls/bboxes), поэтому YOLOv8Loss получает ровно то же,
+        # что получил бы при обычном YOLO-обучении без дистилляции.
+        det = self.task_loss(student_outputs, teacher_outputs=None, labels=raw_labels)["total"]
 
         if teacher_outputs is None:
             zero = det.new_zeros(())
@@ -142,7 +176,8 @@ class DCKDLoss(DistillationLoss):
             t_queries = self._read_any(teacher_outputs, ("query_features", "decoder_hidden_state", "last_hidden_state")).detach()
             hokfd = self._homogeneous_feature_distillation(
                 student_outputs=student_outputs,
-                s_logits=s_logits, 
+                teacher_outputs=teacher_outputs,
+                s_logits=s_logits,
                 s_boxes=s_boxes, 
                 t_logits=t_logits, 
                 t_boxes=t_boxes, 
@@ -328,6 +363,12 @@ class DCKDLoss(DistillationLoss):
 
         losses: list[torch.Tensor] = []
         for b in range(s_logits.shape[0]):
+            # temperature=1.0 здесь намеренно, а не self.temperature: для
+            # выбора пар (кто с кем матчится) нужны острые, неразмытые
+            # вероятности учителя — иначе Hungarian-мэтчинг начинает путать
+            # похожие по мягкому распределению классы. self.temperature
+            # применяется только в _matched_logit_loss, на самом лоссе —
+            # там и должна работать классическая Hinton-температура.
             t_probs = self._teacher_foreground_probs(t_logits[b], temperature=1.0)
             s_probs = torch.sigmoid(s_logits[b])
             t_scores = t_probs.max(dim=-1).values
@@ -373,6 +414,10 @@ class DCKDLoss(DistillationLoss):
         s_probs: torch.Tensor, 
         s_boxes: torch.Tensor
     ) -> torch.Tensor:
+        # Не классический DETR-cost (-p(target_class)): у учителя нет одной
+        # "правильной" метки — logits дают мягкое multi-label распределение
+        # по всем классам, поэтому cost — симметричная BCE между двумя
+        # распределениями (учитель как soft-target), а не индекс в hard label.
         t = t_probs[:, None, :]
         s = s_probs[None, :, :].clamp(self.eps, 1.0 - self.eps)
         cls_cost = -(t * torch.log(s) + (1.0 - t) * torch.log(1.0 - s)).mean(dim=-1)
@@ -391,6 +436,7 @@ class DCKDLoss(DistillationLoss):
         self,
         *,
         student_outputs: Any,
+        teacher_outputs: Any,
         s_logits: torch.Tensor,
         s_boxes: torch.Tensor,
         t_logits: torch.Tensor,
@@ -450,8 +496,17 @@ class DCKDLoss(DistillationLoss):
 
         gt_boxes = [self._target_kd_boxes(target).to(device=s_boxes.device, dtype=s_boxes.dtype) for target in labels]
 
+        # Приоритет — Trainer-хуки (student_features/teacher_features), если
+        # они когда-нибудь будут заведены для этой пары моделей; по умолчанию
+        # teacher_outputs.projected_feature — обычное поле выхода учителя,
+        # его прикладывает _LwDetrWithProjectedFeature (src/models/factory.py).
         if teacher_features is not None and self.teacher_feature_key in teacher_features:
-            ft = self._unwrap_feature(teacher_features[self.teacher_feature_key], name="teacher feature").detach()
+            ft_raw = teacher_features[self.teacher_feature_key]
+        else:
+            ft_raw = self._read_optional(teacher_outputs, self.teacher_feature_key)
+
+        if ft_raw is not None:
+            ft = self._unwrap_feature(ft_raw, name="teacher feature").detach()
             if ft.ndim != 4:
                 raise ValueError(f"Teacher feature должен иметь [B, C, H, W], получено {tuple(ft.shape)}")
             if fs.shape[-2:] != ft.shape[-2:]:
@@ -579,6 +634,18 @@ class DCKDLoss(DistillationLoss):
             if gt_boxes[b].numel() == 0:
                 masks.append(mask)
                 continue
+
+            # Floor по каждому GT-боксу: local_mask не должна занулиться там,
+            # где студент ещё не научился уверенно детектировать объект — а
+            # именно туда feature-дистилляция должна давить сильнее всего.
+            # torch.maximum ниже (по student-боксам) может её только поднять,
+            # никогда не опустить.
+            if self.local_gt_floor > 0.0:
+                for gt_box in gt_boxes[b]:
+                    x1, y1, x2, y2 = self._box_pixel_bounds(gt_box, width, height)
+                    if x2 > x1 and y2 > y1:
+                        mask[:, y1:y2, x1:x2] = self.local_gt_floor
+
             k = min(self.student_topk, scores[b].numel())
             if k == 0:
                 masks.append(mask)
@@ -591,11 +658,7 @@ class DCKDLoss(DistillationLoss):
             keep = iou.max(dim=-1).values >= self.local_iou_threshold
 
             for box, score in zip(boxes[keep], box_scores[keep]):
-                cx, cy, bw, bh = box
-                x1 = int(torch.floor((cx - bw / 2) * width).clamp(0, width - 1).item())
-                y1 = int(torch.floor((cy - bh / 2) * height).clamp(0, height - 1).item())
-                x2 = int(torch.ceil((cx + bw / 2) * width).clamp(1, width).item())
-                y2 = int(torch.ceil((cy + bh / 2) * height).clamp(1, height).item())
+                x1, y1, x2, y2 = self._box_pixel_bounds(box, width, height)
 
                 if x2 > x1 and y2 > y1:
                     current = mask[:, y1:y2, x1:x2]
@@ -604,73 +667,6 @@ class DCKDLoss(DistillationLoss):
             masks.append(mask)
 
         return torch.stack(masks, dim=0)
-
-    def _detector_loss(
-        self, 
-        *, 
-        s_logits: torch.Tensor, 
-        s_boxes: torch.Tensor, 
-        labels: list[dict[str, torch.Tensor]]
-    ) -> torch.Tensor:
-        cls_losses: list[torch.Tensor] = []
-        l1_losses: list[torch.Tensor] = []
-        giou_losses: list[torch.Tensor] = []
-
-        for b in range(s_logits.shape[0]):
-            logits = s_logits[b]
-            boxes = s_boxes[b]
-
-            gt_boxes = self._target_kd_boxes(labels[b]).to(device=boxes.device, dtype=boxes.dtype)
-            gt_labels = self._target_labels(labels[b]).to(device=logits.device, dtype=torch.long)
-
-            if gt_labels.numel() != gt_boxes.shape[0]:
-                raise ValueError(f"Количество labels и kd_boxes не совпадает: labels={gt_labels.numel()}, boxes={gt_boxes.shape[0]}")
-
-            targets = torch.zeros_like(logits)
-
-            if gt_boxes.numel() == 0:
-                cls_losses.append(F.binary_cross_entropy_with_logits(logits, targets, reduction="mean"))
-                continue
-
-            scores = torch.sigmoid(logits).max(dim=-1).values
-            candidate_idx = torch.topk(scores, k=min(self.student_topk, scores.numel()), sorted=False).indices
-
-            candidate_logits = logits[candidate_idx]
-            candidate_boxes = boxes[candidate_idx]
-
-            class_prob = torch.sigmoid(candidate_logits[:, gt_labels]).transpose(0, 1).clamp_min(self.eps)
-            cls_cost = -torch.log(class_prob)
-
-            l1_cost = torch.cdist(gt_boxes, candidate_boxes, p=1)
-            giou_matrix = generalized_box_iou(self._cxcywh_to_xyxy(gt_boxes), self._cxcywh_to_xyxy(candidate_boxes))
-
-            cost = self.match_cls_weight * cls_cost + self.match_l1_weight * l1_cost - self.match_giou_weight * giou_matrix
-
-            gt_idx, student_idx = linear_sum_assignment(cost.detach().float().cpu().numpy())
-
-            gt_idx = torch.as_tensor(gt_idx, device=logits.device, dtype=torch.long)
-            student_idx = torch.as_tensor(student_idx, device=logits.device, dtype=torch.long)
-
-            matched_idx = candidate_idx[student_idx]
-            matched_labels = gt_labels[gt_idx]
-
-            matched_gt_boxes = gt_boxes[gt_idx]
-            matched_student_boxes = boxes[matched_idx]
-
-            matched_giou = generalized_box_iou(self._cxcywh_to_xyxy(matched_gt_boxes), self._cxcywh_to_xyxy(matched_student_boxes)).diag()
-
-            quality = matched_giou.detach().clamp(min=0.0, max=1.0).to(device=targets.device, dtype=targets.dtype)
-            targets[matched_idx, matched_labels] = quality
-
-            cls_losses.append(F.binary_cross_entropy_with_logits(logits, targets, reduction="mean"))
-            l1_losses.append(F.l1_loss(matched_student_boxes, matched_gt_boxes, reduction="mean"))
-            giou_losses.append((1.0 - matched_giou).mean())
-
-        cls_loss = torch.stack(cls_losses).mean() if cls_losses else s_logits.sum() * 0.0
-        l1_loss = torch.stack(l1_losses).mean() if l1_losses else s_boxes.sum() * 0.0
-        giou_loss = torch.stack(giou_losses).mean() if giou_losses else s_boxes.sum() * 0.0
-
-        return self.match_cls_weight * cls_loss + self.match_l1_weight * l1_loss + self.match_giou_weight * giou_loss
 
     @staticmethod
     def _as_loss_tensor(value: Any) -> torch.Tensor | None:
@@ -765,24 +761,6 @@ class DCKDLoss(DistillationLoss):
 
         return boxes
 
-    def _target_labels(
-        self,
-        target: dict[str, torch.Tensor]
-    ) -> torch.Tensor:
-        if "labels" in target:
-            labels = target["labels"]
-
-        elif "class_labels" in target:
-            labels = target["class_labels"]
-
-        elif "cls" in target:
-            labels = target["cls"]
-
-        else:
-            raise KeyError(f"В target не найдены labels. Доступные ключи: {list(target.keys())}")
-
-        return labels.flatten()
-
     def _prepare_labels(
         self,
         labels: list[dict[str, torch.Tensor]] | dict[str, torch.Tensor],
@@ -864,6 +842,19 @@ class DCKDLoss(DistillationLoss):
     def _cxcywh_to_xyxy(boxes: torch.Tensor) -> torch.Tensor:
         cx, cy, w, h = boxes.unbind(-1)
         return torch.stack((cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2), dim=-1)
+
+    @staticmethod
+    def _box_pixel_bounds(box: torch.Tensor, width: int, height: int) -> tuple[int, int, int, int]:
+        """cxcywh (нормализованный, [0, 1]) -> целочисленные границы пикселей
+        карты признаков размера (height, width). Общий хелпер для всех мест
+        _local_mask, где box нужно растрировать на сетку.
+        """
+        cx, cy, bw, bh = box
+        x1 = int(torch.floor((cx - bw / 2) * width).clamp(0, width - 1).item())
+        y1 = int(torch.floor((cy - bh / 2) * height).clamp(0, height - 1).item())
+        x2 = int(torch.ceil((cx + bw / 2) * width).clamp(1, width).item())
+        y2 = int(torch.ceil((cy + bh / 2) * height).clamp(1, height).item())
+        return x1, y1, x2, y2
 
     @staticmethod
     def _normalize_mask(mask: torch.Tensor) -> torch.Tensor:
