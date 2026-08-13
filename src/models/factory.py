@@ -373,19 +373,27 @@ def yolov8n(
         pretrained_model = YOLO(str(weights_path)).model
         model.load(pretrained_model, verbose=True)
 
+    # Dropout2d(p=0) — не бесплатный no-op: это лишний Sequential и лишний
+    # CUDA-кернел на каждый C2f/SPPF/Detect-branch, на каждом шаге forward и
+    # backward. При дообучении дропауты часто выключены (p=0), поэтому слои
+    # оборачиваются только когда дропаут реально используется.
     for layer in model.model:
         if isinstance(layer, C2f):
             dropout = (backbone_dropout if layer.i < 10 else neck_dropout)
-            layer.cv2 = nn.Sequential(layer.cv2, nn.Dropout2d(p=dropout))
+            if dropout > 0:
+                layer.cv2 = nn.Sequential(layer.cv2, nn.Dropout2d(p=dropout))
 
         elif isinstance(layer, SPPF):
-            layer.cv2 = nn.Sequential(layer.cv2, nn.Dropout2d(p=backbone_dropout))
+            if backbone_dropout > 0:
+                layer.cv2 = nn.Sequential(layer.cv2, nn.Dropout2d(p=backbone_dropout))
 
         elif isinstance(layer, Detect):
-            for branch in layer.cv2:
-                branch.insert(len(branch) - 1, nn.Dropout2d(p=bbox_dropout))
+            if bbox_dropout > 0:
+                for branch in layer.cv2:
+                    branch.insert(len(branch) - 1, nn.Dropout2d(p=bbox_dropout))
 
-            for branch in layer.cv3:
-                branch.insert(len(branch) - 1, nn.Dropout2d(p=cls_dropout))
+            if cls_dropout > 0:
+                for branch in layer.cv3:
+                    branch.insert(len(branch) - 1, nn.Dropout2d(p=cls_dropout))
 
     return model

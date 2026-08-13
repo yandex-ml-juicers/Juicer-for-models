@@ -600,9 +600,11 @@ def detection_evaluate(
     limit_batches: int | None = None,
     targers_mode: str | None = None,
     class_names: dict[int, str] | None = None,
+    amp: bool = False,
 ) -> tuple[float, float]:
     was_model_training = model.training
     was_criterion_training = criterion.training
+    amp_enabled = amp and device.type == "cuda"
 
     model.eval()
     criterion.eval()
@@ -629,17 +631,20 @@ def detection_evaluate(
         if limit_batches is not None and step >= limit_batches:
             break
 
-        images = [image.to(device, non_blocking=True) for image in images]
-        if isinstance(images, (list, tuple)):
-            images = torch.stack(images, dim=0)
+        # Одна склейка на CPU + один H2D-перенос вместо переноса каждой
+        # картинки батча по отдельности (см. тот же приём в _train_epoch).
+        images = torch.stack(images, dim=0).to(device, non_blocking=True)
 
         targets_device = prepare_targets(targets, device, targers_mode, label_offset)
 
-        if targers_mode == "lw-detr-small":
-            outputs = model(pixel_values=images, labels=targets_device)
-        else:
-            outputs = model(images)
-        losses = criterion(outputs, teacher_outputs=None, labels=targets_device)
+        # Train-шаг уже считался в autocast при amp=true — eval гонялся в fp32
+        # и терял ускорение на тензорных ядрах для той же модели.
+        with torch.autocast(device.type, enabled=amp_enabled):
+            if targers_mode == "lw-detr-small":
+                outputs = model(pixel_values=images, labels=targets_device)
+            else:
+                outputs = model(images)
+            losses = criterion(outputs, teacher_outputs=None, labels=targets_device)
 
         batch_size = len(images)
         loss_meter.update(losses["total"].item(), batch_size)
@@ -822,11 +827,18 @@ class DetectionTrainer:
 
         self.student_extractor: FeatureExtractor | None = None
         self.teacher_extractor: FeatureExtractor | None = None
-        if criterion.required_features:
-            layers = list(criterion.required_features)
-            self.student_extractor = FeatureExtractor(self.student, layers)
-            if self.teacher is not None:
-                self.teacher_extractor = FeatureExtractor(self.teacher, layers)
+        # Большинство лоссов снимают одноимённые слои у ученика и учителя
+        # (required_features). DCKD — исключение: у ученика и учителя разные
+        # архитектуры и разные имена слоёв, поэтому у него есть
+        # student_required_features/teacher_required_features. getattr с
+        # фоллбэком на required_features не меняет поведение остальных
+        # лоссов (FitNets, FeatureKD, MGD, SP) — у них имена общие.
+        student_layers = list(getattr(criterion, "student_required_features", criterion.required_features))
+        teacher_layers = list(getattr(criterion, "teacher_required_features", criterion.required_features))
+        if student_layers:
+            self.student_extractor = FeatureExtractor(self.student, student_layers)
+        if teacher_layers and self.teacher is not None:
+            self.teacher_extractor = FeatureExtractor(self.teacher, teacher_layers)
 
     def fit(self) -> dict:
         history = MetricsHistory(self.output_dir / "history.csv")
@@ -850,6 +862,7 @@ class DetectionTrainer:
                     limit_batches=self.limit_eval_batches,
                     targers_mode=self.targers_mode,
                     class_names=self.class_names,
+                    amp=self.amp_enabled,
                 )
 
                 self._report_detection_samples(epoch)
@@ -942,18 +955,21 @@ class DetectionTrainer:
 
             targets_for_meters_map = targets
 
-            images = [image.to(self.device, non_blocking=True) for image in images]
+            # Одна склейка на CPU + один H2D-перенос вместо переноса каждой
+            # картинки батча по отдельности. torch.stack и раньше требовал
+            # одинакового размера всех картинок батча — трансформы всех
+            # детекционных экспериментов ресайзят к фиксированному
+            # data.dataset.image_size, так что условие не меняется, меняется
+            # только порядок операций (стек -> перенос, а не перенос -> стек).
+            images = torch.stack(images, dim=0).to(self.device, non_blocking=True)
             targets = prepare_targets(targets, self.device, self.targers_mode, self.label_offset)
-            batch_size = len(images)
+            batch_size = images.size(0)
 
             self.optimizer.zero_grad(set_to_none=True)
             if self.student_extractor is not None:
                 self.student_extractor.clear()
             if self.teacher_extractor is not None:
                 self.teacher_extractor.clear()
-
-            if isinstance(images, (list, tuple)):
-                images = torch.stack(images, dim=0)
 
             teacher_outputs = None
             if self.teacher is not None:
@@ -1006,10 +1022,16 @@ class DetectionTrainer:
                 agreement_correct += correct
                 agreement_total += total
 
-            for key, value in losses.items():
-                meters_avg_loss[key].update(value.item(), batch_size)
+            # Один .tolist() на все компоненты лосса вместо отдельного .item()
+            # на каждую (total/bbox/cls/dfl) — каждый .item() это отдельная
+            # синхронизация с GPU, а на train-шаге они дороже, чем на eval.
+            loss_keys = list(losses.keys())
+            loss_values = torch.stack([losses[key] for key in loss_keys]).tolist()
+            loss_values_by_key = dict(zip(loss_keys, loss_values))
+            for key, value in loss_values_by_key.items():
+                meters_avg_loss[key].update(value, batch_size)
 
-            iterator.set_postfix({"loss": f"{losses['total'].item():.3f}"})
+            iterator.set_postfix({"loss": f"{loss_values_by_key['total']:.3f}"})
 
         train_loss_components = {key: meter.avg for key, meter in meters_avg_loss.items()}
         meters_other.update(norms.results())
@@ -1191,7 +1213,7 @@ class DetectionTrainer:
         images_cpu = [image for image, _ in samples]
         targets = [target for _, target in samples]
 
-        images = torch.stack([image.to(self.device) for image in images_cpu])
+        images = torch.stack(images_cpu, dim=0).to(self.device)
 
         was_training = self.student.training
         self.student.eval()
