@@ -1,4 +1,4 @@
-_target_: src.losses.YOLOv8Loss
+_target_: src.losses.YOLO
 
 num_classes: 8
 strides: [8, 16, 32]

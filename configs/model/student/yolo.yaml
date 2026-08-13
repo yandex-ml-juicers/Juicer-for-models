@@ -1,4 +1,5 @@
-_target_: src.models.factory.yolov8n
+_target_: src.models.factory.yolo
+model_name: yolov8n
 num_classes: 8
 
 # Стартовые веса: локальная копия COCO-претрейна. Раньше значение жило только

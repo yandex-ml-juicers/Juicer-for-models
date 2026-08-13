@@ -36,7 +36,7 @@ class _YOLOModelProxy(nn.Module):
         self.model = nn.ModuleList([detect_head])
 
 
-class YOLOv8Loss(DistillationLoss):
+class YOLO(DistillationLoss):
     requires_teacher = False
     required_features: tuple[str, ...] = ()
 
@@ -74,7 +74,7 @@ class YOLOv8Loss(DistillationLoss):
     ) -> dict[str, torch.Tensor]:
 
         if labels is None:
-            raise ValueError("YOLOv8Loss requires labels.")
+            raise ValueError("YOLO requires labels.")
 
         if self.loss_fn is None:
             if isinstance(student_outputs, dict):
