@@ -1,0 +1,112 @@
+# @package _global_
+# BPKD (arXiv:2306.08075, WACV 2024): SegFormer-B5 -> timm-U-Net(efficientnet_b0).
+# Единственный метод сетки, который разделяет кадр на ГРАНИЦЫ и ТЕЛА объектов
+# и дистиллирует их разными лоссами: на границе — попиксельная KL по классам
+# (там ученик путает соседние классы), в теле — канальная KL, как в CWD
+# (там важна форма). Граница берётся морфологической разностью по разметке.
+#
+# Прямой конкурент — cityscapes_CWD_segformer_b5_to_unet_small: телесный
+# член BPKD это и есть CWD, только с выброшенной границей. Разница между
+# прогонами и есть ответ на вопрос, даёт ли что-то отдельная обработка краёв.
+# Всё остальное (оптимизатор, расписание, батч, эпохи) с ним совпадает.
+defaults:
+  - override /data/dataset: cityscapes_seg
+  - override /data/transform/train: cityscapes_seg_strong_transform_for_segmentation
+  - override /data/transform/eval: cityscapes_seg_transform
+  - override /model/teacher: segformer
+  - override /model/student: timm_unet
+  - override /loss: composite_base
+  - override /optimizer: adamw
+  - override /scheduler: warmup_cosine
+  - override /augment: cutmix_segmentation
+
+name: cityscapes_BPKD_segformer_b5_to_unet_small_CE_dice_lovasz_fast
+device: cuda
+deterministic: false
+
+task_type: "segmentation"
+
+clearml:
+  enabled: True
+  tags: [cityscapes, KD, BPKD, segformer-b5, unet-small, segmentation]
+  # Схожесть ученика с учителем по пикселям: KL и доля совпавших argmax'ов.
+  scalars: ['KL_divergence', 'agreement_rate']
+  plots:
+    enabled: False
+    every_n_epochs: 10
+  reuse_last_task_id: False
+  continue_last_task: False
+  output_uri: false
+
+trainer:
+  epochs: 100
+  amp: true
+  grad_clip_norm: 10.0
+
+loss:
+  losses:
+    bpkd:
+      _target_: src.losses.BPKDLoss
+      temperature: 2.0
+      ce_weight: 0.0
+      # edge в 2.5 раза тяжелее body — то же соотношение, что в статье
+      # (там 50 против 20). При паритете 1:1 замер показал 30/70 в пользу
+      # body, а body — это буквально CWD, и прогон дублировал бы соседний
+      # эксперимент вместо того, чтобы мерить вклад границ.
+      edge_weight: 1.3
+      body_weight: 0.5
+      edge_width: 7
+      spatial_stride: 2
+    dice:
+      _target_: src.losses.DiceLoss
+      ce_weight: 1.5
+      dice_weight: 2.5
+    lovasz:
+      _target_: src.losses.LovaszSoftmax
+      ce_weight: 0.0
+      lovasz_weight: 3.5
+      pixel_stride: 2
+      label_smoothing: 0.05
+      ignore_index: ${data.dataset.ignore_index}
+
+  weights:
+    bpkd: 1.0
+    dice: 1.0
+    lovasz: 0.5
+
+loss_schedule:
+  weights.bpkd: {schedule: cosine, start: 1.0, end: 0.50, start_epoch: 90}
+  weights.dice: {schedule: cosine, start: 1.0, end: 0.50, start_epoch: 90}
+  weights.lovasz: {schedule: cosine, start: 0.5, end: 1.00, start_epoch: 80}
+
+
+optimizer:
+  #lr: 1.0e-3
+  lr: 2.5e-3
+  weight_decay: 3.0e-2
+
+scheduler:
+  warmup_epochs: 10
+  #eta_min: 1.0e-4
+  eta_min: 2.0e-6
+
+data:
+  loader:
+    batch_size: 80
+    eval_batch_size: 14
+    num_workers: 7
+    pin_memory: true
+    persistent_workers: true
+
+model:
+  student:
+    variant: efficientnet_b0
+    pretrained: true
+    dropout: 0.1
+  teacher:
+    variant: b5
+    pretrained: cityscapes
+    checkpoint_path: null
+#  teacher_inference:
+#    scales: [1.0, 1.25]
+#    flip: true
