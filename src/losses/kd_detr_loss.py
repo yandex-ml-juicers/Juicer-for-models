@@ -3,7 +3,7 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 from src.losses.base import DistillationLoss
-from src.losses.yolov8n_loss import YOLOv8Loss
+from src.losses.yolo_loss import YOLO
 
 
 class KDDETRLoss(DistillationLoss):
@@ -88,10 +88,10 @@ class KDDETRLoss(DistillationLoss):
         self.det_strides = det_strides
         self.eps = eps
 
-        # Task loss студента не зависит от статьи: тот же YOLOv8Loss, что у
+        # Task loss студента не зависит от статьи: тот же YOLO, что у
         # baseline (cityscapes_finetune_yolov8n) и у DCKD — GT-часть у всех
         # трёх экспериментов одинакова, сравнение честное.
-        self.task_loss = YOLOv8Loss(
+        self.task_loss = YOLO(
             num_classes=num_classes,
             strides=det_strides,
             reg_max=det_reg_max,
