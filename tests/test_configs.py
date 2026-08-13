@@ -58,6 +58,15 @@ SEGMENTATION_EXPERIMENTS = [
     "segmentation/BPKD/cityscapes_BPKD_mask2former_small_to_unet_small",
     "scratch/cityscapes_scratch_timm_unet_mobilenetv3_small_aug_lovasz",
     "segmentation/BPKD/cityscapes_BPKD_segformer_b5_to_timm_unet_mobilenetv3_small",
+    "segmentation/BPKD/cityscapes_BPKD_mask2former_tiny_to_segnext_t",
+    "segmentation/DIST/cityscapes_DIST_mask2former_tiny_to_segnext_t",
+    # Абляции capacity gap (см. outputs/claude-analis/analysis.md, §"Что бы
+    # я проверил дальше"): чистая KD без GT-членов, учитель поменьше/побольше
+    # студент, оба сразу поменьше, студент побольше.
+    "segmentation/diagnostics/cityscapes_BPKD_pure_segformer_b5_to_unet_small",
+    "segmentation/diagnostics/cityscapes_BPKD_segformer_b2_to_unet_small",
+    "segmentation/diagnostics/cityscapes_BPKD_segformer_b1_to_unet_tiny",
+    "segmentation/diagnostics/cityscapes_BPKD_segformer_b5_to_unet_base",
 ]
 
 
