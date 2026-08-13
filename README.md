@@ -82,6 +82,26 @@ CutMix, а не Mixup — в [docs/augmentations.md](docs/augmentations.md).
 python scripts/probe_teacher_augmentations.py experiment=<...> +probe.samples=50
 ```
 
+## Группы параметров оптимизатора
+
+Предобученный энкодер и случайно инициализированный декодер не должны
+учиться одним и тем же шагом, а weight decay не должен применяться к
+BatchNorm и bias. По умолчанию выключено (одна группа на всё):
+
+```yaml
+optimizer:
+  lr: 1.0e-3
+  weight_decay: 3.0e-2
+
+param_groups:
+  encoder_lr_mult: 0.1              # энкодеру 1.0e-4 вместо 1.0e-3
+  no_decay_on_norm_and_bias: true
+```
+
+Таблица групп печатается в `train.log`, а в ClearML на графике `lr`
+появляются отдельные серии `encoder` / `decoder`. Подробности и подводные
+камни (в первую очередь `eta_min`) — в [docs/param_groups.md](docs/param_groups.md).
+
 ## Лоссы
 
 ```bash
