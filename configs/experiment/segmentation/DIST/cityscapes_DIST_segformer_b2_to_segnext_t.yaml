@@ -51,8 +51,8 @@ loss:
       _target_: src.losses.DISTLoss
       temperature: 1.0
       ce_weight: 0.0
-      beta: 1.0
-      gamma: 1.0
+      beta: 2.3
+      gamma: 1.5
       spatial_stride: 2
       ignore_index: ${data.dataset.ignore_index}
     dice:
@@ -68,12 +68,12 @@ loss:
       ignore_index: ${data.dataset.ignore_index}
 
   weights:
-    dist: 1.0
+    dist: 2.0
     dice: 1.0
     lovasz: 0.5
 
 loss_schedule:
-  weights.dist: {schedule: cosine, start: 1.0, end: 0.50, start_epoch: 75}
+  weights.dist: {schedule: cosine, start: 2.0, end: 1.00, start_epoch: 75}
   weights.dice: {schedule: cosine, start: 1.0, end: 0.50, start_epoch: 75}
   weights.lovasz: {schedule: cosine, start: 0.5, end: 1.25, start_epoch: 75}
 

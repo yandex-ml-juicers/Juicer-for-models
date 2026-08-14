@@ -243,8 +243,12 @@ class CityscapesSegmentation(Dataset):
     ) -> None:
         if isinstance(splits, str):
             splits = [splits]
-        # test-разметка в Cityscapes — заглушка, поэтому сплита test здесь нет.
-        allowed_splits = {"train", "val", "train_extra"}
+        # test-разметка в Cityscapes — заглушка (все пиксели уходят в
+        # ignore_index, см. label_id_to_train_id ниже): использовать test как
+        # обычный labeled-сплит нельзя, но для чистой дистилляции без разметки
+        # (configs/experiment/segmentation/pretrain/) она и не нужна —
+        # изображения там настоящие, только вместо gt никто не читает.
+        allowed_splits = {"train", "val", "train_extra", "test"}
         unknown = set(splits) - allowed_splits
         if unknown:
             raise ValueError(f"splits принимает только {sorted(allowed_splits)}, получено {sorted(unknown)}")

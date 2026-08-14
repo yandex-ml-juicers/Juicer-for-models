@@ -1,0 +1,89 @@
+# @package _global_
+# Этап 1/2: прогрев nano-ученика (timm_unet/mobilenetv3_small, 1.25M) чистой
+# дистилляцией на test-сплите Cityscapes (1525 кадров, разметки нет и не
+# нужно — loss=distillation_only её не читает, см. src/losses/distillation_only.py
+# и configs/data/dataset/cityscapes_seg_test_only.yaml). Ученик успевает
+# выучить распределение учителя ДО того, как увидит размеченные данные и
+# конкурирующие GT-лоссы — тот же принцип, что у предобучения на train_extra
+# в docs/CityScapes.md, только без всякой (даже грубой) разметки вовсе.
+#
+# Учитель — SegFormer-B0 (3.8M, eval mIoU~0.7444, см. outputs/eval_teacher_b0) —
+# самый маленький и слабый ViT-сегментатор из уже интегрированных в проект,
+# ближе всего к потолку "слабый/маленький учитель для nano" (искал более
+# слабые ViT с готовыми чекпоинтами — ничего компактнее и ближе по формату
+# (transformers, drop-in) не нашлось, см. ответ в чате).
+#
+# Дальше — этап 2: обычное обучение nano (например
+# segmentation/BPKD/cityscapes_BPKD_segformer_b0_to_unet_nano.yaml) с
+# model.student.checkpoint_path=<outputs .../best.pt этого прогона>.
+#
+# eval_miou тут ЗНАЧИМ (валидация как всегда, на размеченном val) — а вот
+# train_miou/train_pixel_acc будут ровно 0.0 весь прогон (IoUAccumulator
+# получает только ignore_index и корректно возвращает 0.0 на пустой
+# матрице, см. src/utils/metrics.py) — это ожидаемо, не баг.
+defaults:
+  - override /data/dataset: cityscapes_seg_test_only
+  - override /data/transform/train: cityscapes_seg_strong_transform_for_segmentation
+  - override /data/transform/eval: cityscapes_seg_transform
+  - override /model/teacher: segformer
+  - override /model/student: timm_unet
+  - override /loss: distillation_only
+  - override /optimizer: adamw
+  - override /scheduler: warmup_cosine
+  - override /augment: cutmix_segmentation
+
+name: cityscapes_pretrain_segformer_b0_to_unet_nano
+device: cuda
+deterministic: false
+
+task_type: "segmentation"
+
+clearml:
+  enabled: True
+  tags: [cityscapes, KD, pretrain, distillation-only, segformer-b0, unet-nano, segmentation]
+  scalars: []
+  plots:
+    enabled: False
+  reuse_last_task_id: False
+  continue_last_task: False
+  output_uri: false
+
+trainer:
+  # ~1/3 обычных 100 эпох — тот же принцип, что у предобучения на train_extra
+  # (docs/CityScapes.md): это разогрев, а не основной прогон.
+  epochs: 33
+  amp: true
+  grad_clip_norm: 5.0
+
+loss:
+  temperature: 4.0
+
+optimizer:
+  lr: 2.0e-3
+  weight_decay: 3.0e-2
+
+param_groups:
+  encoder_lr_mult: 0.35
+  no_decay_on_norm_and_bias: false
+
+scheduler:
+  warmup_epochs: 3
+  eta_min: 2.0e-6
+
+data:
+  loader:
+    batch_size: 20
+    eval_batch_size: 12
+    num_workers: 20
+    pin_memory: true
+    persistent_workers: true
+
+model:
+  student:
+    variant: mobilenetv3_small
+    pretrained: true
+    dropout: 0.1
+  teacher:
+    variant: b0
+    pretrained: cityscapes
+    checkpoint_path: null

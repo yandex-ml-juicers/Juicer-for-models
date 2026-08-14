@@ -12,6 +12,7 @@ from src.losses.lwdetr_small_loss import LWDETRLoss
 from src.losses.bpkd import BPKDLoss
 from src.losses.cwd import ChannelWiseKD
 from src.losses.dist import DISTLoss
+from src.losses.distillation_only import DistillationOnlyLoss
 from src.losses.fitnets import FitNetsKD
 from src.losses.heteroakd import HeteroAKDLoss
 from src.losses.pixel_kd import PixelWiseKD
@@ -36,6 +37,7 @@ __all__ = [
     "ChannelWiseKD",
     "DISTLoss",
     "DiceLoss",
+    "DistillationOnlyLoss",
     "FitNetsKD",
     "FocalLoss",
     "HeteroAKDLoss",

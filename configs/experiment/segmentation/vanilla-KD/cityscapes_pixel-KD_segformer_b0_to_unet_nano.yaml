@@ -66,12 +66,12 @@ loss:
       ignore_index: ${data.dataset.ignore_index}
 
   weights:
-    pixel_kd: 1.0
+    pixel_kd: 1.25
     dice: 1.0
     lovasz: 0.5
 
 loss_schedule:
-  weights.pixel_kd: {schedule: cosine, start: 1.0, end: 0.50, start_epoch: 75}
+  weights.pixel_kd: {schedule: cosine, start: 1.25, end: 0.65, start_epoch: 75}
   weights.dice: {schedule: cosine, start: 1.0, end: 0.50, start_epoch: 75}
   weights.lovasz: {schedule: cosine, start: 0.5, end: 1.25, start_epoch: 75}
 
