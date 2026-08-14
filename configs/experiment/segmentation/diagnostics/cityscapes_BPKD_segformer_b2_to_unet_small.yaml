@@ -46,7 +46,7 @@ clearml:
 trainer:
   epochs: 100
   amp: true
-  grad_clip_norm: 10.0
+  grad_clip_norm: 5.0
 
 loss:
   losses:
@@ -76,23 +76,30 @@ loss:
     lovasz: 0.5
 
 loss_schedule:
-  weights.bpkd: {schedule: cosine, start: 1.0, end: 0.50, start_epoch: 90}
-  weights.dice: {schedule: cosine, start: 1.0, end: 0.50, start_epoch: 90}
-  weights.lovasz: {schedule: cosine, start: 0.5, end: 1.00, start_epoch: 80}
+  weights.bpkd: {schedule: cosine, start: 1.0, end: 0.50, start_epoch: 75}
+  weights.dice: {schedule: cosine, start: 1.0, end: 0.50, start_epoch: 75}
+  weights.lovasz: {schedule: cosine, start: 0.5, end: 1.25, start_epoch: 75}
 
 optimizer:
-  lr: 2.5e-3
+  lr: 1.5e-3
   weight_decay: 3.0e-2
+
+# Раздельный lr энкодер/декодер (docs/param_groups.md): энкодер предобучен,
+# декодер/голова — с нуля, общий lr бил бы по предобучению в первые эпохи.
+# encoder_lr_mult=0.2 -> энкодеру впятеро ниже optimizer.lr.
+param_groups:
+  encoder_lr_mult: 0.2
+  no_decay_on_norm_and_bias: true
 
 scheduler:
   warmup_epochs: 10
-  eta_min: 2.0e-6
+  eta_min: 1.5e-4
 
 data:
   loader:
-    batch_size: 24
-    eval_batch_size: 14
-    num_workers: 7
+    batch_size: 20
+    eval_batch_size: 12
+    num_workers: 20
     pin_memory: true
     persistent_workers: true
 

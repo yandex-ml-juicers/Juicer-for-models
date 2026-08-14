@@ -81,6 +81,13 @@ optimizer:
   lr: 2.5e-3
   weight_decay: 3.0e-2
 
+# Раздельный lr энкодер/декодер (docs/param_groups.md): энкодер предобучен,
+# декодер/голова — с нуля, общий lr бил бы по предобучению в первые эпохи.
+# encoder_lr_mult=0.2 -> энкодеру впятеро ниже optimizer.lr.
+param_groups:
+  encoder_lr_mult: 0.2
+  no_decay_on_norm_and_bias: true
+
 scheduler:
   warmup_epochs: 10
   eta_min: 2.0e-6

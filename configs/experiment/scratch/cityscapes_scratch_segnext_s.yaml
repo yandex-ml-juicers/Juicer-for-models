@@ -39,7 +39,7 @@ trainer:
   # градиент SegNeXt обнуляется за 2-3 эпохи (проверено диагностикой),
   # выключен до тех пор, пока не найдено точное нестабильное место.
   amp: false
-  grad_clip_norm: 1.0
+  grad_clip_norm: 10.0
 
 loss:
   ignore_index: ${data.dataset.ignore_index}
@@ -48,6 +48,13 @@ loss:
 optimizer:
   lr: 6.0e-5
   weight_decay: 1.0e-2
+
+# Раздельный lr энкодер/декодер (docs/param_groups.md): энкодер предобучен,
+# декодер/голова — с нуля, общий lr бил бы по предобучению в первые эпохи.
+# encoder_lr_mult=0.2 -> энкодеру впятеро ниже optimizer.lr.
+param_groups:
+  encoder_lr_mult: 0.2
+  no_decay_on_norm_and_bias: true
 
 scheduler:
   warmup_epochs: 10
