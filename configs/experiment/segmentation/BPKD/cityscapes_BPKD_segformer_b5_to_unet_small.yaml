@@ -107,7 +107,7 @@ optimizer:
 # а в ClearML на графике "lr" появляются отдельные серии encoder/decoder.
 param_groups:
   encoder_lr_mult: 0.1              # энкодеру 1.0e-4 вместо 1.0e-3
-  no_decay_on_norm_and_bias: true
+  no_decay_on_norm_and_bias: false
   # Прочие рычаги (значения по умолчанию, оставлены явно для наглядности):
   # encoder_weight_decay: null      # null — тот же wd, что у декодера
   # criterion_lr_mult: 1.0          # lr обучаемых частей лосса

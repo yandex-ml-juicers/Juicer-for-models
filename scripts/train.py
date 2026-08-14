@@ -21,6 +21,8 @@ from src.training import (
     LossWeightScheduler,
     SegmentationTrainer,
     Trainer,
+    build_param_groups,
+    describe_param_groups,
 )
 from src.utils import distributed, seed_everything, prediction_postprocessor
 from src.utils.distributed import DistInfo
@@ -52,6 +54,29 @@ def _normalize_stats(dataset_cfg: DictConfig):
     if normalize is None:
         return None
     return list(normalize.mean), list(normalize.std)
+
+
+def build_optimizer_params(cfg: DictConfig, student: nn.Module, criterion: nn.Module):
+    """Параметры для optimizer: плоский список (по умолчанию) или группы
+    с раздельным lr/weight_decay (cfg.param_groups, см. docs/param_groups.md).
+
+    Обучаемые параметры лосса (адаптеры FitNets, проекторы HeteroAKD) идут
+    вместе со студентом в обоих случаях — SegmentationTrainer/Trainer в
+    конструкторе проверяют, что КАЖДЫЙ параметр criterion попал в optimizer,
+    и падают, если нет (иначе адаптер тихо не обучался бы).
+    """
+    if not cfg.get("param_groups"):
+        return list(student.parameters()) + list(criterion.parameters())
+
+    groups = build_param_groups(
+        student,
+        criterion,
+        lr=cfg.optimizer.lr,
+        weight_decay=cfg.optimizer.get("weight_decay", 0.0),
+        **_plain(cfg.param_groups),
+    )
+    log.info("Группы параметров оптимизатора:\n%s", describe_param_groups(groups))
+    return groups
 
 
 def configure_rank_logging(dist: DistInfo) -> None:
@@ -397,13 +422,7 @@ def main(cfg: DictConfig) -> float:
             student = nn.SyncBatchNorm.convert_sync_batchnorm(student)
             log.info("BatchNorm заменён на SyncBatchNorm")
 
-        # заменяем слои BatchNorm до сборки optimizer
-        if cfg.distributed.sync_bn and dist.is_distributed:
-            student = nn.SyncBatchNorm.convert_sync_batchnorm(student)
-            log.info("BatchNorm заменён на SyncBatchNorm")
-
-        # Обучаемые параметры лосса (адаптеры feature-KD) оптимизируются вместе с учеником.
-        params = list(student.parameters()) + list(criterion.parameters())
+        params = build_optimizer_params(cfg, student, criterion)
         optimizer = instantiate(cfg.optimizer)(params)
         scheduler = instantiate(cfg.scheduler)(optimizer) if cfg.get("scheduler") is not None else None
 

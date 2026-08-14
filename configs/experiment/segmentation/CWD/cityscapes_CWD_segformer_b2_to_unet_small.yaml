@@ -49,7 +49,7 @@ loss:
       _target_: src.losses.ChannelWiseKD
       temperature: 4.0
       ce_weight: 0.0
-      cwd_weight: 3.0
+      cwd_weight: 1.8
     dice:
       _target_: src.losses.DiceLoss
       ce_weight: 1.5
@@ -73,15 +73,16 @@ loss_schedule:
   weights.lovasz: {schedule: cosine, start: 0.5, end: 1.25, start_epoch: 75}
 
 optimizer:
-  lr: 1.5e-3
+  lr: 2.0e-3
   weight_decay: 3.0e-2
 
 # Раздельный lr энкодер/декодер (docs/param_groups.md): энкодер предобучен,
 # декодер/голова — с нуля, общий lr бил бы по предобучению в первые эпохи.
-# encoder_lr_mult=0.2 -> энкодеру впятеро ниже optimizer.lr.
+# encoder_lr_mult=0.35 -> энкодеру lr в ~2.86 раза ниже optimizer.lr
+# (энкодер — большая доля весов модели, 0.2 было слишком консервативно).
 param_groups:
-  encoder_lr_mult: 0.2
-  no_decay_on_norm_and_bias: true
+  encoder_lr_mult: 0.35
+  no_decay_on_norm_and_bias: false
 
 scheduler:
   warmup_epochs: 10

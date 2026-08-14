@@ -51,14 +51,14 @@ loss:
       student_channels: 320
       teacher_channels: 512
       num_classes: ${data.dataset.num_classes}
-      temperature: 1.0
+      temperature: 2.0
       ce_weight: 0.0
       # kd_weight/hakd_weight/proj_weight — из уже отлаженного
       # segmentation/HeteroAKD/cityscapes_HeteroAKD_segformer_b5_to_unet_small.yaml
       # (их же собственный тюнинг: hakd — взвешенное среднее по пикселям,
       # без большого множителя даёт ~2% от своего слагаемого).
       kd_weight: 1.20
-      hakd_weight: 20.0
+      hakd_weight: 23.0
       proj_weight: 1.30
       ignore_index: ${data.dataset.ignore_index}
     dice:
@@ -84,15 +84,16 @@ loss_schedule:
   weights.lovasz: {schedule: cosine, start: 0.5, end: 1.25, start_epoch: 75}
 
 optimizer:
-  lr: 1.5e-3
+  lr: 2.0e-3
   weight_decay: 3.0e-2
 
 # Раздельный lr энкодер/декодер (docs/param_groups.md): энкодер предобучен,
 # декодер/голова — с нуля, общий lr бил бы по предобучению в первые эпохи.
-# encoder_lr_mult=0.2 -> энкодеру впятеро ниже optimizer.lr.
+# encoder_lr_mult=0.35 -> энкодеру lr в ~2.86 раза ниже optimizer.lr
+# (энкодер — большая доля весов модели, 0.2 было слишком консервативно).
 param_groups:
-  encoder_lr_mult: 0.2
-  no_decay_on_norm_and_bias: true
+  encoder_lr_mult: 0.35
+  no_decay_on_norm_and_bias: false
 
 scheduler:
   warmup_epochs: 10

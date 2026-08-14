@@ -232,6 +232,48 @@ def test_loss_schedule_paths_exist_in_the_loss():
         )
 
 
+# Экспериметы, у которых cfg.param_groups реально задан (не null) — среди
+# SEGMENTATION_EXPERIMENTS, вычисляется один раз при импорте модуля.
+def _experiments_with_param_groups():
+    found = []
+    for experiment in SEGMENTATION_EXPERIMENTS:
+        cfg = compose_config([f"experiment={experiment}"])
+        if cfg.get("param_groups"):
+            found.append(experiment)
+    return found
+
+
+PARAM_GROUPS_EXPERIMENTS = _experiments_with_param_groups()
+
+
+@pytest.mark.parametrize("experiment", PARAM_GROUPS_EXPERIMENTS)
+def test_param_groups_actually_reach_the_optimizer(experiment):
+    """Регрессия: build_param_groups (src/training/param_groups.py) был
+    реализован, задокументирован (docs/param_groups.md) и юнит-тестирован
+    (tests/test_param_groups.py) — но scripts/train.py его не вызывал,
+    cfg.param_groups тихо игнорировался, и весь энкодер/декодер lr всегда
+    был одной группой с общим lr (см. outputs/claude-analis/analysis.md).
+    Здесь — не чистая функция, а конфиг -> реальные модели ->
+    scripts.train.build_optimizer_params -> реальный optimizer, чтобы в
+    следующий раз разрыв между "функция работает" и "функция вызывается"
+    ловился тут, а не сравнением графиков через сто эпох обучения.
+    """
+    from scripts.train import build_optimizer_params
+
+    cfg = compose_config([f"experiment={experiment}"])
+    student = instantiate(cfg.model.student)
+    criterion = instantiate(cfg.loss)
+
+    params = build_optimizer_params(cfg, student, criterion)
+    optimizer = instantiate(cfg.optimizer)(params)
+
+    assert len(optimizer.param_groups) >= 2, (
+        "param_groups задан в конфиге, но до optimizer дошла одна группа"
+    )
+    lrs = {group["lr"] for group in optimizer.param_groups}
+    assert len(lrs) >= 2, f"все группы optimizer получили один и тот же lr: {lrs}"
+
+
 def test_composite_counts_cross_entropy_once():
     """CE есть почти в каждом лоссе проекта, и в композиции её легко
     посчитать дважды с непонятным итоговым весом. Здесь попиксельную
