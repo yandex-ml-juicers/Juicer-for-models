@@ -103,20 +103,32 @@ class YOLO(DistillationLoss):
 
             self.loss_fn = v8DetectionLoss(proxy_model)
 
-        total, raw_losses = self.loss_fn(student_outputs, labels)
+        # self.loss_fn(student_outputs, labels) (= v8DetectionLoss.__call__)
+        # отдаёт total суммой по box/cls/dfl и ОТДЕЛЬНО detach()-нутый dict
+        # исключительно для логов — внутри get_assigned_targets_and_loss
+        # ultralytics прямо возвращает "loss, dict(zip(names, loss.detach()))",
+        # т.е. разбивку по компонентам даёт только оторванной от графа.
+        # Для градиентных зондов (GradientContributionTracker) это не годится:
+        # torch.autograd.grad на detach()-нутом тензоре падает с "does not
+        # require grad". Поэтому box/cls/dfl берём сами через тот же
+        # internal-метод, которым пользуется сама библиотека —
+        # get_assigned_targets_and_loss отдаёт [box, cls, dfl] ДО суммирования
+        # и БЕЗ detach, то есть то же вычисление, но с живым графом.
+        parsed = self.loss_fn.parse_output(student_outputs)
+        batch_size = parsed["boxes"].shape[0]
+        _, loss_vec, _ = self.loss_fn.get_assigned_targets_and_loss(parsed, labels)
+        scaled = loss_vec * batch_size
+        by_name = dict(zip(self.loss_fn.loss_names, scaled))
 
         losses = {
-            "total": total.sum(),
-            "bbox": raw_losses.get("box_loss", 0.0),
-            "cls": raw_losses.get("cls_loss", 0.0),
-            "dfl": raw_losses.get("dfl_loss", 0.0),
+            "total": scaled.sum(),
+            "bbox": by_name.get("box_loss", scaled.new_zeros(())),
+            "cls": by_name.get("cls_loss", scaled.new_zeros(())),
+            "dfl": by_name.get("dfl_loss", scaled.new_zeros(())),
         }
 
         if self.return_all_components:
-            for name, value in raw_losses.items():
-                if not torch.is_tensor(value):
-                    continue
-
+            for name, value in by_name.items():
                 if name not in losses:
                     losses[name] = value
 

@@ -136,6 +136,11 @@ class DCKDLoss(DistillationLoss):
         )
         self.feature_adapter = nn.Identity() if student_channels == teacher_channels else nn.Conv2d(student_channels, teacher_channels, kernel_size=1, bias=False)
 
+    @property
+    def gradient_probe_weights(self) -> dict[str, float]:
+        # total = lambda_det*det + lambda_hekld*hekld + lambda_hokfd*hokfd
+        return {"det": self.lambda_det, "hekld": self.lambda_hekld, "hokfd": self.lambda_hokfd}
+
     def forward(
         self, 
         student_outputs: Any, 

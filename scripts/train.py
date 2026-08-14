@@ -192,6 +192,17 @@ def clearml_reporter(task):
                 series_name = key.removeprefix("train_loss_")
                 _safe_report("loss_components", series_name, value)
 
+        # 7a. Вклад компонентов лосса в градиент (только detection, только если
+        # включён clearml.plots.grad_contrib_every_n_steps — см.
+        # GradientContributionTracker). gradnorm — абсолютная норма ‖∂L_i/∂θ‖
+        # компонента ДО умножения на λ (сравнима 1-в-1 с loss_components выше),
+        # gradshare — её доля среди всех компонентов в %, сумма долей = 100.
+        for key, value in row.items():
+            if key.startswith("train_gradnorm_"):
+                _safe_report("grad_contribution", key.removeprefix("train_gradnorm_"), value)
+            elif key.startswith("train_gradshare_"):
+                _safe_report("grad_contribution_share_pct", key.removeprefix("train_gradshare_"), value)
+
         # 8. Метрики детекции
         detection_metrics = {
             "train_map": ("mAP", "train"),

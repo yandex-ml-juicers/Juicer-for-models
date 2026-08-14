@@ -54,6 +54,10 @@ class KDDETRLoss(DistillationLoss):
 
     requires_teacher = True
     required_features: tuple[str, ...] = ()
+    # total = det + lambda_distill * distill — только эти два ключа реально
+    # независимые слагаемые total. cls/l1/giou — раскладка distill для логов
+    # (см. DistillationLoss.gradient_probe_keys), не отдельные слагаемые.
+    gradient_probe_keys: tuple[str, ...] = ("det", "distill")
 
     def __init__(
         self,
@@ -99,6 +103,11 @@ class KDDETRLoss(DistillationLoss):
             cls_gain=det_cls_gain,
             dfl_gain=det_dfl_gain,
         )
+
+    @property
+    def gradient_probe_weights(self) -> dict[str, float]:
+        # total = det + lambda_distill*distill — у det веса нет (де-факто 1.0).
+        return {"det": 1.0, "distill": self.lambda_distill}
 
     def forward(
         self,

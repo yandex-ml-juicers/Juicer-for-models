@@ -143,6 +143,11 @@ class CLoCKDistillLoss(DistillationLoss):
         self.content_embed = nn.Embedding(num_classes, d_model)
         self.content_embed.weight.requires_grad_(False)
 
+    @property
+    def gradient_probe_weights(self) -> dict[str, float]:
+        # total = lambda_det*det + lambda_lcmd*lcmd + lambda_tcld*tcld
+        return {"det": self.lambda_det, "lcmd": self.lambda_lcmd, "tcld": self.lambda_tcld}
+
     def forward(
         self,
         student_outputs: Any,

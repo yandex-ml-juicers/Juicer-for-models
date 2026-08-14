@@ -38,7 +38,7 @@ from src.models.feature_extractor import FeatureExtractor
 from src.utils.distributed import DistInfo, unwrap, all_reduce_sum_, all_reduce_max_
 from src.utils.logger import MetricsHistory, get_logger
 
-from src.utils.metrics import AverageMeter, accuracy, ConfusionMatrixAccumulator, IoUAccumulator, TeacherSimilarity, count_parameters, build_param_table, sync_meters
+from src.utils.metrics import AverageMeter, accuracy, ConfusionMatrixAccumulator, GradientContributionTracker, IoUAccumulator, TeacherSimilarity, count_parameters, build_param_table, sync_meters
 from src.utils.plots import Plot, bar_plot, distribution_plot, image_plot, matrix_plot
 from src.utils.visualization import default_palette, prediction_panel
 from src.utils.prepare_targets import prepare_targets
@@ -773,6 +773,13 @@ class DetectionTrainer:
         self.debug_every_n_epochs = int(plots.get("debug_every_n_epochs", 10))
         self.debug_indices = pick_debug_indices(eval_loader.dataset, int(plots.get("debug_samples", 4)))
 
+        # Зонд вклада каждого компонента лосса в градиент (см.
+        # GradientContributionTracker): 0 — не считать совсем, N>0 — раз в N
+        # шагов внутри эпохи. Каждый зонд — это K лишних backward-проходов
+        # (K = число именованных компонентов лосса), поэтому по умолчанию
+        # выключено.
+        self.grad_contrib_every_n_steps = int(plots.get("grad_contrib_every_n_steps", 0))
+
         self.student = student
         self.teacher = teacher
         self.criterion = criterion
@@ -932,6 +939,7 @@ class DetectionTrainer:
         self.criterion.train()
 
         norms = NormTracker()
+        grad_contrib = GradientContributionTracker()
 
         agreement_correct = 0
         agreement_total = 0
@@ -997,11 +1005,31 @@ class DetectionTrainer:
                     ),
                 )
 
+            params = [p for group in self.optimizer.param_groups for p in group["params"]]
+
+            # Зонд вклада компонентов лосса в градиент — ДО настоящего
+            # backward'а: probe() держит граф живым через retain_graph=True,
+            # чтобы backward() ниже мог пройти по нему как обычно.
+            if self.grad_contrib_every_n_steps and step % self.grad_contrib_every_n_steps == 0:
+                # gradient_probe_keys сужает набор до реально независимых
+                # слагаемых total, если словарь лосса вперемешку содержит и
+                # их, и детальную раскладку одного из них для логов (см.
+                # DistillationLoss.gradient_probe_keys, KDDETRLoss).
+                probe_keys = getattr(self.criterion, "gradient_probe_keys", None)
+                losses_for_probe = (
+                    losses if probe_keys is None
+                    else {key: losses[key] for key in probe_keys if key in losses}
+                )
+                grad_contrib.probe(
+                    losses_for_probe, params,
+                    grad_scale=self.scaler.get_scale() if self.amp_enabled else 1.0,
+                    weights=getattr(self.criterion, "gradient_probe_weights", None),
+                )
+
             self.scaler.scale(losses["total"]).backward()
             self.scaler.unscale_(self.optimizer)
 
-            params = [p for group in self.optimizer.param_groups for p in group["params"]]
-            clip_threshold = self.grad_clip_norm if self.grad_clip_norm is not None else float("inf") 
+            clip_threshold = self.grad_clip_norm if self.grad_clip_norm is not None else float("inf")
             grad_norm = torch.nn.utils.clip_grad_norm_(params, clip_threshold)
 
             self.scaler.step(self.optimizer)
@@ -1035,6 +1063,7 @@ class DetectionTrainer:
 
         train_loss_components = {key: meter.avg for key, meter in meters_avg_loss.items()}
         meters_other.update(norms.results())
+        meters_other.update(grad_contrib.results())
 
         if self.teacher is not None:
             agreement_rate = agreement_correct / max(agreement_total, 1)
