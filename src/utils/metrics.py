@@ -4,6 +4,7 @@
 готовые средние).
 """
 
+import logging
 import math
 from collections import defaultdict
 from collections.abc import Mapping
@@ -17,6 +18,8 @@ import torch.nn.functional as F
 from src.utils.distributed import all_reduce_sum_
 
 from src.utils.distributed import all_reduce_sum_
+
+log = logging.getLogger(__name__)
 
 def accuracy(logits: torch.Tensor, targets: torch.Tensor) -> float:
     """Доля правильных ответов по argmax логитов, в [0, 1]."""
@@ -115,6 +118,7 @@ class GradientContributionTracker:
 
     def __init__(self) -> None:
         self.norms: dict[str, AverageMeter] = defaultdict(AverageMeter)
+        self.non_finite: set[str] = set()
 
     def probe(
         self,
@@ -163,16 +167,35 @@ class GradientContributionTracker:
         weights = weights or {}
 
         for key, value in components:
-            scaled = value * grad_scale if grad_scale != 1.0 else value
+            # λ домножается ДО autograd.grad, а не после: под AMP компонент
+            # должен пройти backward ровно с тем множителем, с каким он входит
+            # в scaler.scale(total).backward(), то есть λ_i · grad_scale. Иначе
+            # компонент с λ<1 (det с lambda_det=0.1 у DCKD) зондируется с
+            # множителем в 1/λ раз большим, чем выдерживает настоящий backward,
+            # fp16-градиенты переполняются в inf, и isfinite ниже молча
+            # выбрасывает его из статистики. На результат порядок не влияет:
+            # ‖λ·S·∇L‖ / S = |λ|·‖∇L‖.
+            probe_scale = grad_scale * abs(weights.get(key, 1.0))
+            scaled = value * probe_scale if probe_scale != 1.0 else value
             grads = torch.autograd.grad(scaled, trainable_params, retain_graph=True, allow_unused=True)
             per_param_norms = [g.detach().norm() for g in grads if g is not None]
             if not per_param_norms:
                 continue
 
             norm_value = float(torch.stack(per_param_norms).norm()) / grad_scale
-            norm_value *= abs(weights.get(key, 1.0))
             if math.isfinite(norm_value):
                 self.norms[key].update(norm_value)
+            elif key not in self.non_finite:
+                # Не-конечная норма = переполнение fp16 в backward'е зонда.
+                # Компонент выпадает из averages, а доли остальных ренормируются
+                # до 100%, поэтому на графике это выглядит не как ошибка, а как
+                # «компонента просто нет». Предупреждаем один раз за эпоху.
+                self.non_finite.add(key)
+                log.warning(
+                    "Градиентный зонд: норма компонента '%s' не конечна (grad_scale=%g); "
+                    "компонент исключён из grad_contribution за эту эпоху.",
+                    key, grad_scale,
+                )
 
     def results(self) -> dict[str, float]:
         """gradnorm_<key> — средняя норма компонента за эпоху; gradshare_<key>
