@@ -51,7 +51,7 @@ data:
       label_offset: 0
   loader:
     batch_size: 32
-    num_workers: 8
+    num_workers: 4
     persistent_workers: true
     pin_memory: true
 
@@ -72,7 +72,7 @@ model:
 loss:
   num_classes: 8
 
-  lambda_distill: 1.0
+  lambda_distill: 10.0
 
   lambda_cls: 1.0
   lambda_l1: 5.0

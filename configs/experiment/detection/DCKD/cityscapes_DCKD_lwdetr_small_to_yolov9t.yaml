@@ -51,7 +51,7 @@ data:
       label_offset: 0
   loader:
     batch_size: 32
-    num_workers: 8
+    num_workers: 4
     persistent_workers: true
     pin_memory: true
 
@@ -83,7 +83,7 @@ loss:
   student_channels: 128
   teacher_channels: 256
 
-  lambda_det: 1.0
+  lambda_det: 0.1
   lambda_hekld: 1.0
   lambda_hokfd: 1.0
 
