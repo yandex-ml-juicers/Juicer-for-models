@@ -30,7 +30,7 @@ def main(cfg: DictConfig) -> float:
     seed_everything(cfg.seed, deterministic=cfg.deterministic, warn_only=cfg.deterministic_warn_only)
     device = resolve_device(cfg.device)
 
-    _, eval_loader = base_loader(cfg.data, seed=cfg.seed)
+    _, eval_loader = base_loader(cfg.data, cfg.task_type, seed=cfg.seed)
 
     student = instantiate(cfg.model.student).to(device)
     checkpoint = torch.load(to_absolute_path(cfg.ckpt_path), map_location=device, weights_only=True)
