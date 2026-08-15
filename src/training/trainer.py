@@ -791,6 +791,10 @@ class DetectionTrainer:
         self.device = device
         self.output_dir = Path(output_dir)
         self.epochs = epochs
+        # Стартовая эпоха и лучший результат "с нуля"; load_checkpoint() их перезатрёт.
+        self.start_epoch = 1
+        self.best_map = -1.0
+        self.best_epoch = 0
         self.grad_clip_norm = grad_clip_norm
         self.limit_train_batches = limit_train_batches
         self.limit_eval_batches = limit_eval_batches
@@ -848,13 +852,23 @@ class DetectionTrainer:
             self.teacher_extractor = FeatureExtractor(self.teacher, teacher_layers)
 
     def fit(self) -> dict:
-        history = MetricsHistory(self.output_dir / "history.csv")
+        history = MetricsHistory(self.output_dir / "history.csv", resume=self.start_epoch > 1)
         # -1.0, а не 0.0: при коллапсе модели mAP ровно 0.0 и условие `>` никогда
         # не сработало бы — best.pt не создавался вовсе.
-        best_map, best_epoch = -1.0, 0
+        best_map, best_epoch = self.best_map, self.best_epoch
+
+        if history.rows and self.metrics_callback_scalar is not None:
+            # history.csv пишется синхронно и пережил крэш целиком, а отчёт в
+            # ClearML асинхронный — часть уже посчитанных эпох могла не успеть
+            # долететь до сервера. Реплеим все локально сохранённые эпохи
+            # заново: те же title/series/iteration в ClearML — это перезапись
+            # той же точки графика, а не дубль, так что безопасно послать и то,
+            # что уже долетело.
+            for row in history.rows:
+                self.metrics_callback_scalar(row)
 
         try:
-            for epoch in range(1, self.epochs + 1):
+            for epoch in range(self.start_epoch, self.epochs + 1):
                 start = time.time()
                 lr = self.optimizer.param_groups[0]["lr"]
 
@@ -905,9 +919,9 @@ class DetectionTrainer:
                     best_map = eval_metrics["map"]
                     best_epoch = epoch
                     if self.save_best:
-                        self._save_checkpoint("best.pt", epoch, best_map)
+                        self._save_checkpoint("best.pt", epoch, best_map, best_epoch)
                 if self.save_last:
-                    self._save_checkpoint("last.pt", epoch, best_map)
+                    self._save_checkpoint("last.pt", epoch, best_map, best_epoch)
 
                 log.info(
                     "Эпоха %02d/%d | lr=%.6f | "
@@ -1274,17 +1288,37 @@ class DetectionTrainer:
         if was_training:
             self.student.train()
 
+    def load_checkpoint(self, path: Path) -> None:
+        """Восстанавливает student/criterion/optimizer/scheduler/scaler из
+        чекпоинта и выставляет эпоху и лучший mAP, с которых продолжать fit().
+        """
+        checkpoint = torch.load(path, map_location=self.device, weights_only=True)
+        unwrap(self.student).load_state_dict(checkpoint["student_state"])
+        unwrap(self.criterion).load_state_dict(checkpoint["criterion_state"])
+        self.optimizer.load_state_dict(checkpoint["optimizer_state"])
+        if self.scheduler is not None and checkpoint.get("scheduler_state") is not None:
+            self.scheduler.load_state_dict(checkpoint["scheduler_state"])
+        self.scaler.load_state_dict(checkpoint["scaler_state"])
+        self.start_epoch = checkpoint["epoch"] + 1
+        self.best_map = checkpoint["best_map"]
+        self.best_epoch = checkpoint.get("best_epoch", checkpoint["epoch"])
+
     def _save_checkpoint(
         self,
         filename: str,
         epoch: int,
         best_map: float,
+        best_epoch: int,
     ) -> None:
         checkpoint = {
             "epoch": epoch,
             "best_map": best_map,
-            "student_state": self.student.state_dict(),
-            "criterion_state": self.criterion.state_dict(),
+            "best_epoch": best_epoch,
+            # unwrap: под DDP ключи иначе ушли бы с префиксом "module." (сейчас
+            # для detection DDP запрещён выше по стеку, так что unwrap() здесь
+            # no-op, но так чекпоинт останется совместим, если это снимут).
+            "student_state": unwrap(self.student).state_dict(),
+            "criterion_state": unwrap(self.criterion).state_dict(),
             "optimizer_state": self.optimizer.state_dict(),
             "scheduler_state": (
                 self.scheduler.state_dict()

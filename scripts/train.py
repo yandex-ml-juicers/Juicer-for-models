@@ -100,13 +100,20 @@ def init_clearml(cfg: DictConfig, dist: DistInfo):
         return None
     from clearml import Task
 
+    # resume=true (пока — только detection, см. DetectionTrainer.load_checkpoint):
+    # без continue_last_task=True ClearML завёл бы новый таск, и график в UI
+    # разъехался бы на "до крэша" и "после" вместо одной линии.
+    continue_last_task = (
+        True if (cfg.resume and cfg.task_type == "detection") else cfg.clearml.continue_last_task
+    )
+
     task = Task.init(
         project_name=cfg.clearml.project,                      # проект
         task_name=f"{cfg.name}",                               # имя таски
         task_type=Task.TaskTypes.training,                     # тип таски
         tags=_plain(cfg.clearml.tags),                         # теги
         reuse_last_task_id = cfg.clearml.reuse_last_task_id,   # перезаписывать ли таску с таким же именем
-        continue_last_task=cfg.clearml.continue_last_task,     # Подхватит предыдущий ID и продолжит логирование
+        continue_last_task=continue_last_task,                 # Подхватит предыдущий ID и продолжит логирование
         output_uri=cfg.clearml.output_uri,                     # складывать ли артефакты/модели и если куда-то базово, то url
         auto_connect_frameworks=_plain(cfg.clearml.auto_connect_frameworks), # авто-перехват фреймворков
         auto_connect_arg_parser=cfg.clearml.auto_connect_arg_parser, # авто-перехват аргументов из argparse
@@ -454,6 +461,16 @@ def main(cfg: DictConfig) -> float:
                 plots=_plain(cfg.clearml.get("plots")),
                 **cfg.trainer,
             )
+            if cfg.resume:
+                checkpoint_path = output_dir / "last.pt"
+                if checkpoint_path.exists():
+                    trainer.load_checkpoint(checkpoint_path)
+                    log.info(
+                        "Продолжаем с чекпоинта %s: эпоха %d, лучший mAP=%.4f",
+                        checkpoint_path, trainer.start_epoch - 1, trainer.best_map,
+                    )
+                else:
+                    log.warning("resume=true, но %s не найден — стартуем с нуля.", checkpoint_path)
         elif cfg.task_type == "segmentation":
             trainer = SegmentationTrainer(
                 student=student,
