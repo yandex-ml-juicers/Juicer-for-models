@@ -12,7 +12,7 @@
 # рецепт обучения заодно.
 defaults:
   - override /data/dataset: cityscapes_seg
-  - override /data/transform/train: cityscapes_seg_strong_transform
+  - override /data/transform/train: cityscapes_seg_strong_transform_for_segmentation
   - override /data/transform/eval: cityscapes_seg_transform
   - override /model/teacher: null
   - override /model/student: timm_unet
@@ -20,7 +20,7 @@ defaults:
   - override /optimizer: adamw
   - override /scheduler: warmup_cosine
   - override /augment: cutmix_segmentation
-  - override /distributed: sync_bn
+
 
 name: cityscapes_scratch_timm_unet_mobilenetv3_small_aug_lovasz
 device: cuda
@@ -33,7 +33,7 @@ clearml:
   tags: [cityscapes, student, scratch, timm_unet, nano, segmentation, aug, lovasz]
   scalars: []
   plots:
-    enabled: true
+    enabled: false
     every_n_epochs: 20
   reuse_last_task_id: False
   continue_last_task: False
@@ -46,13 +46,25 @@ trainer:
 
 loss:
   losses:
+    dice:
+      _target_: src.losses.DiceLoss
+      ce_weight: 1.5
+      dice_weight: 2.5
     lovasz:
       _target_: src.losses.LovaszSoftmax
-      ce_weight: 1.0
+      ce_weight: 0.0
       lovasz_weight: 3.5
       pixel_stride: 2
       label_smoothing: 0.05
       ignore_index: ${data.dataset.ignore_index}
+
+  weights:
+    dice: 1.0
+    lovasz: 0.5
+
+loss_schedule:
+  weights.dice: {schedule: cosine, start: 1.0, end: 0.50, start_epoch: 75}
+  weights.lovasz: {schedule: cosine, start: 0.5, end: 1.25, start_epoch: 75}
 
 optimizer:
   lr: 2.0e-3
@@ -72,9 +84,9 @@ scheduler:
 
 data:
   loader:
-    batch_size: 16
-    eval_batch_size: 10
-    num_workers: 16
+    batch_size: 20
+    eval_batch_size: 12
+    num_workers: 20
     pin_memory: true
     persistent_workers: true
 

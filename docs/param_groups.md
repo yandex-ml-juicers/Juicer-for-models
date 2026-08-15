@@ -69,6 +69,8 @@ python scripts/train.py experiment=<...> ~param_groups     # выключить
 | `TimmUNet` | `encoder.` |
 | `UNet` | `encoders.`, `bottleneck.` |
 | `SegNeXt` | `encoder.` |
+| `ESPNetV2` | `encoder.` |
+| `ESPNetV2Native` | `encoder.` |
 | `SegFormer` | `model.segformer.` |
 
 У `UNet` боттлнек отнесён к энкодеру: он завершает нисходящий путь, а в
