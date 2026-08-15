@@ -1,0 +1,96 @@
+# @package _global_
+# Этап 1/2: прогрев nano-ученика (espnetv2_native/s150 — декодер ИЗ
+# ОРИГИНАЛЬНОЙ статьи EESPNet_Seg, а не наш UNetDoubleConv, см.
+# src/models/espnetv2.py и configs/model/student/espnetv2_native.yaml;
+# 0.72M целиком) чистой дистилляцией на test-сплите Cityscapes (1525
+# кадров, разметки нет и не нужно — loss=distillation_only её не читает,
+# см. src/losses/distillation_only.py и
+# configs/data/dataset/cityscapes_seg_test_only.yaml). Ученик успевает
+# выучить распределение учителя ДО того, как увидит размеченные данные и
+# конкурирующие GT-лоссы — тот же принцип, что у
+# cityscapes_pretrain_segformer_b0_to_unet_nano.yaml, только student другой.
+#
+# Почему loss=distillation_only, а не BPKD (лучший метод из основной сетки):
+# BPKD строит маску границ из НАСТОЯЩЕЙ разметки (boundary_mask(labels,...)
+# в src/losses/bpkd.py) — на test-сплите разметки нет, только заглушка
+# ignore_index, и маска получилась бы бессмысленной (граница фиктивных
+# псевдо-регионов, а не объектов на кадре), а не просто более шумной. Хуже
+# того, BPKDLoss.forward считает F.cross_entropy(student, labels) БЕЗУСЛОВНО,
+# даже при ce_weight=0.0 — на батче из одних ignore_index это NaN (0*NaN=NaN
+# травит total), тот же баг класса, что у PixelWiseKD/HintonKD. Ради этого
+# DistillationOnlyLoss и создан отдельно: единственный лосс в проекте,
+# который вообще не обращается к labels.
+#
+# Дальше — этап 2: обычное обучение (например
+# segmentation/BPKD/cityscapes_BPKD_segformer_b0_to_espnetv2_native_s150.yaml)
+# с model.student.checkpoint_path=<outputs .../best.pt этого прогона>.
+#
+# eval_miou тут ЗНАЧИМ (валидация как всегда, на размеченном val) — а вот
+# train_miou/train_pixel_acc будут ровно 0.0 весь прогон (IoUAccumulator
+# получает только ignore_index и корректно возвращает 0.0 на пустой
+# матрице, см. src/utils/metrics.py) — это ожидаемо, не баг.
+defaults:
+  - override /data/dataset: cityscapes_seg_test_only
+  - override /data/transform/train: cityscapes_seg_strong_transform_for_segmentation
+  - override /data/transform/eval: cityscapes_seg_transform
+  - override /model/teacher: segformer
+  - override /model/student: espnetv2_native
+  - override /loss: distillation_only
+  - override /optimizer: adamw
+  - override /scheduler: warmup_cosine
+  - override /augment: cutmix_segmentation
+
+name: cityscapes_pretrain_segformer_b0_to_espnetv2_native_s150
+device: cuda
+deterministic: false
+
+task_type: "segmentation"
+
+clearml:
+  enabled: True
+  tags: [cityscapes, KD, pretrain, distillation-only, segformer-b0, espnetv2-native-s150, segmentation]
+  scalars: []
+  plots:
+    enabled: False
+  reuse_last_task_id: False
+  continue_last_task: False
+  output_uri: false
+
+trainer:
+  # ~1/3 обычных 100 эпох — тот же принцип, что у cityscapes_pretrain_segformer_b0_to_unet_nano.yaml.
+  epochs: 33
+  amp: true
+  grad_clip_norm: 5.0
+
+loss:
+  temperature: 4.0
+
+optimizer:
+  lr: 2.0e-3
+  weight_decay: 3.0e-2
+
+param_groups:
+  encoder_lr_mult: 0.35
+  no_decay_on_norm_and_bias: false
+
+scheduler:
+  warmup_epochs: 3
+  eta_min: 2.0e-6
+
+data:
+  loader:
+    batch_size: 20
+    eval_batch_size: 12
+    num_workers: 20
+    pin_memory: true
+    persistent_workers: true
+
+model:
+  student:
+    variant: s150
+    pretrained: imagenet
+    dropout: 0.2
+  teacher:
+    variant: b0
+    pretrained: cityscapes
+    checkpoint_path: null
