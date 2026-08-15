@@ -95,6 +95,20 @@ SEGMENTATION_EXPERIMENTS = [
     "segmentation/vanilla-KD/cityscapes_pixel-KD_segformer_b2_to_segnext_t",
     "segmentation/DIST/cityscapes_DIST_segformer_b2_to_segnext_t",
     "segmentation/HeteroAKD/cityscapes_HeteroAKD_segformer_b2_to_segnext_t",
+    # Претрейн (чистая дистилляция на test-сплите, см.
+    # src/losses/distillation_only.py) — этап 1/2 для nano-класса.
+    "segmentation/pretrain/cityscapes_pretrain_segformer_b0_to_unet_nano",
+    "segmentation/pretrain/cityscapes_pretrain_segformer_b0_to_espnetv2_native_s150",
+    # espnetv2_native/s150 — пятая пара nano-класса, декодер ИЗ ОРИГИНАЛЬНОЙ
+    # статьи EESPNet_Seg, не наш UNetDoubleConv (см. src/models/espnetv2.py):
+    # та же сетка 6 методов, что и unet_nano. taps.stage4 не существует —
+    # FitNets/HeteroAKD берут stage2/stage3 вместо stage3/stage4.
+    "segmentation/BPKD/cityscapes_BPKD_segformer_b0_to_espnetv2_native_s150",
+    "segmentation/CWD/cityscapes_CWD_segformer_b0_to_espnetv2_native_s150",
+    "segmentation/FitNets/cityscapes_FitNets_segformer_b0_to_espnetv2_native_s150",
+    "segmentation/vanilla-KD/cityscapes_pixel-KD_segformer_b0_to_espnetv2_native_s150",
+    "segmentation/DIST/cityscapes_DIST_segformer_b0_to_espnetv2_native_s150",
+    "segmentation/HeteroAKD/cityscapes_HeteroAKD_segformer_b0_to_espnetv2_native_s150",
 ]
 
 
@@ -401,6 +415,7 @@ FITNETS_EXPERIMENTS = [
     "segmentation/FitNets/cityscapes_FitNets_segformer_b1_to_unet_tiny",
     "segmentation/FitNets/cityscapes_FitNets_segformer_b0_to_unet_nano",
     "segmentation/FitNets/cityscapes_FitNets_segformer_b2_to_segnext_t",
+    "segmentation/FitNets/cityscapes_FitNets_segformer_b0_to_espnetv2_native_s150",
 ]
 
 
@@ -425,12 +440,28 @@ def build_student(cfg):
     """Свежесобранный студент — чтобы свериться с его РЕАЛЬНЫМИ tap_channels,
     а не с таблицей (у timm-моделей ширины стадий целиком определяются
     энкодером и не хранятся отдельно нигде, кроме самой модели)."""
-    from src.models import SEGNEXT_VARIANTS, TIMM_UNET_VARIANTS, SegNeXt, TimmUNet
+    from src.models import (
+        ESPNETV2_VARIANTS,
+        SEGNEXT_VARIANTS,
+        TIMM_UNET_VARIANTS,
+        ESPNetV2,
+        ESPNetV2Native,
+        SegNeXt,
+        TimmUNet,
+    )
 
     target = cfg.model.student._target_
     if target.endswith("segnext_for_segmentation"):
         assert cfg.model.student.variant in SEGNEXT_VARIANTS
         return SegNeXt(variant=cfg.model.student.variant, num_classes=19)
+
+    if target.endswith("espnetv2_native_for_segmentation"):
+        assert cfg.model.student.variant in ESPNETV2_VARIANTS
+        return ESPNetV2Native(variant=cfg.model.student.variant, num_classes=19)
+
+    if target.endswith("espnetv2_for_segmentation"):
+        assert cfg.model.student.variant in ESPNETV2_VARIANTS
+        return ESPNetV2(variant=cfg.model.student.variant, num_classes=19)
 
     return TimmUNet(
         encoder_name=TIMM_UNET_VARIANTS[cfg.model.student.variant]["encoder_name"],
