@@ -15,6 +15,7 @@ defaults:
   # то, что смешивает РАЗНЫЕ примеры батча.
   - augment: null
   - distributed: default
+  - quantize: null
   - experiment: null
 
 name: default # имя таски
