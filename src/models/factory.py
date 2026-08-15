@@ -18,6 +18,8 @@ from torchvision.models import get_model
 
 from transformers import LwDetrConfig, LwDetrForObjectDetection
 
+from src.models.espnetv2 import ESPNETV2_VARIANTS, ESPNetV2, ESPNetV2Native, convert_espnetv2_state_dict
+from src.models.espnetv2 import IMAGENET_WEIGHTS as ESPNETV2_IMAGENET_WEIGHTS
 from src.models.mask2former import Mask2Former
 from src.models.segformer import SegFormer
 from src.models.segnext import IMAGENET_WEIGHTS, SegNeXt, convert_mmseg_state_dict
@@ -338,6 +340,114 @@ def segnext_for_segmentation(
         str(weights_path),
         convert_mmseg_state_dict,
         f"MSCAN-{variant.upper()} (ImageNet)",
+        strict=False,
+        expected_prefix="encoder.",
+    )
+
+
+def espnetv2_for_segmentation(
+    variant: str = "s050",
+    num_classes: int = 19,
+    in_channels: int = 3,
+    pretrained: str | None = "imagenet",
+    checkpoint_path: str | None = None,
+    weights_dir: str | None = None,
+    dropout: float = 0.1,
+    align_corners: bool = False,
+) -> nn.Module:
+    """ESPNetv2 (EESP-энкодер) + наш UNet-декодер для семантической сегментации.
+
+    Args:
+        pretrained: None | "imagenet" — энкодер EESPNet, предобученный на
+            ImageNet классификатором (официальный чекпоинт sacmehta/ESPNetv2,
+            качается автоматически). Декодер при этом случайный.
+            Игнорируется, если задан checkpoint_path.
+        checkpoint_path: чекпоинт нашего тренера (ключ student_state) —
+            модель, уже обученная в этом проекте.
+    """
+    model = ESPNetV2(
+        variant=variant,
+        num_classes=num_classes,
+        in_channels=in_channels,
+        dropout=dropout,
+        align_corners=align_corners,
+    )
+
+    if checkpoint_path is not None:
+        return load_checkpoint_into(model, checkpoint_path, f"ESPNetv2-{variant}")
+
+    if pretrained is None:
+        return model
+
+    if pretrained != "imagenet":
+        raise ValueError(
+            f"pretrained должен быть None | 'imagenet', получено {pretrained!r}. "
+            f"У ESPNetv2 нет собственных Cityscapes-весов в проекте."
+        )
+
+    url = ESPNETV2_IMAGENET_WEIGHTS[variant]
+    weights_path = download_file(
+        url, resolve_weights_dir(weights_dir) / "espnetv2" / url.rsplit("/", 1)[-1]
+    )
+    # strict=False: в файле только энкодер, декодер остаётся случайным.
+    return load_converted_checkpoint(
+        model,
+        str(weights_path),
+        convert_espnetv2_state_dict,
+        f"EESPNet-{variant} (ImageNet)",
+        strict=False,
+        expected_prefix="encoder.",
+    )
+
+
+def espnetv2_native_for_segmentation(
+    variant: str = "s050",
+    num_classes: int = 19,
+    in_channels: int = 3,
+    pretrained: str | None = "imagenet",
+    checkpoint_path: str | None = None,
+    weights_dir: str | None = None,
+    dropout: float = 0.2,
+    align_corners: bool = True,
+) -> nn.Module:
+    """ESPNetv2 с декодером ИЗ ОРИГИНАЛЬНОЙ статьи (EESPNet_Seg), а не наш
+    UNetDoubleConv — см. ESPNetV2Native. На порядок меньше espnetv2_for_segmentation
+    при том же variant (декодер работает в num_classes-мерном пространстве,
+    а не в широких каналах энкодера).
+
+    Args: те же, что у espnetv2_for_segmentation — энкодер ImageNet-чекпоинт
+    тот же файл (level5/level5_0 в нём есть, но этой модели не нужны —
+    лишние ключи молча отбрасываются, strict=False).
+    """
+    model = ESPNetV2Native(
+        variant=variant,
+        num_classes=num_classes,
+        in_channels=in_channels,
+        dropout=dropout,
+        align_corners=align_corners,
+    )
+
+    if checkpoint_path is not None:
+        return load_checkpoint_into(model, checkpoint_path, f"ESPNetv2Native-{variant}")
+
+    if pretrained is None:
+        return model
+
+    if pretrained != "imagenet":
+        raise ValueError(
+            f"pretrained должен быть None | 'imagenet', получено {pretrained!r}. "
+            f"У ESPNetv2 нет собственных Cityscapes-весов в проекте."
+        )
+
+    url = ESPNETV2_IMAGENET_WEIGHTS[variant]
+    weights_path = download_file(
+        url, resolve_weights_dir(weights_dir) / "espnetv2" / url.rsplit("/", 1)[-1]
+    )
+    return load_converted_checkpoint(
+        model,
+        str(weights_path),
+        convert_espnetv2_state_dict,
+        f"EESPNet-{variant} (ImageNet)",
         strict=False,
         expected_prefix="encoder.",
     )

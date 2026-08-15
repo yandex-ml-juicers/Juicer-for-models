@@ -2,6 +2,8 @@ from src.models.adapters import ChannelAdapters
 from src.models.chunked_teacher import ChunkedTeacher
 from src.models.factory import (
     cifar_resnet18,
+    espnetv2_for_segmentation,
+    espnetv2_native_for_segmentation,
     from_detectors,
     from_torch_hub,
     mask2former_for_segmentation,
@@ -10,6 +12,7 @@ from src.models.factory import (
     timm_unet_for_segmentation,
     unet_for_segmentation,
 )
+from src.models.espnetv2 import ESPNETV2_VARIANTS, ESPNetV2, ESPNetV2Native
 from src.models.feature_extractor import FeatureExtractor, unwrap_model
 from src.models.feature_taps import STAGE_TAP_STRIDES, STAGE_TAPS, FeatureTaps
 from src.models.mask2former import MASK2FORMER_VARIANTS, Mask2Former
@@ -28,6 +31,9 @@ from src.models.unet import UNET_VARIANTS, UNet
 __all__ = [
     "ChannelAdapters",
     "ChunkedTeacher",
+    "ESPNetV2",
+    "ESPNetV2Native",
+    "ESPNETV2_VARIANTS",
     "FeatureExtractor",
     "FeatureTaps",
     "Mask2Former",
@@ -48,6 +54,8 @@ __all__ = [
     "apply_stochastic_depth",
     "cifar_resnet18",
     "linear_drop_path_rates",
+    "espnetv2_for_segmentation",
+    "espnetv2_native_for_segmentation",
     "from_detectors",
     "from_torch_hub",
     "mask2former_for_segmentation",

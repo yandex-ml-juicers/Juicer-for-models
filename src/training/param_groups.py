@@ -46,6 +46,8 @@ ENCODER_PREFIXES: dict[str, tuple[str, ...]] = {
     "TimmUNet": ("encoder.",),
     "UNet": ("encoders.", "bottleneck."),
     "SegNeXt": ("encoder.",),
+    "ESPNetV2": ("encoder.",),
+    "ESPNetV2Native": ("encoder.",),
     # transformers прячет энкодер MiT внутри SegformerForSemanticSegmentation:
     # model.segformer.* — энкодер, model.decode_head.* — голова.
     "SegFormer": ("model.segformer.",),

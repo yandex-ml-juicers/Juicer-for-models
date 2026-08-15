@@ -1,0 +1,26 @@
+# ESPNetv2 — ученик семантической сегментации (EESP-энкодер + наш UNet-декодер).
+#
+# Размеры (энкодер / итого с декодером), замерены тестом:
+#   s050   0.15M / 0.92M   <- наносайз, пара к timm_unet/mobilenetv3_small (1.25M)
+#   s100   0.51M / 3.60M
+#
+# pretrained: imagenet качает EESPNet-энкодер (официальный чекпоинт
+# sacmehta/ESPNetv2, классификатор на ImageNet) и оставляет декодер
+# случайным. Собственных весов на Cityscapes в проекте нет — они здесь и
+# не нужны: ученик должен пройти через наш KD-рецепт с нуля, а не
+# стартовать с чужого сегментационного чекпоинта.
+_target_: src.models.factory.espnetv2_for_segmentation
+variant: s050
+num_classes: ${data.dataset.num_classes}
+in_channels: 3
+
+pretrained: imagenet
+align_corners: false
+
+# Dropout2d перед головой декодера.
+dropout: 0.1
+
+# Чекпоинт нашего тренера (ключ student_state). Если задан, pretrained
+# игнорируется.
+checkpoint_path: null
+weights_dir: data/weights

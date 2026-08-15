@@ -166,6 +166,30 @@ python scripts/train.py experiment=<...> model/teacher=segnext \
 `.hydra/config.yaml` (полный снапшот конфига), `train.log`, `history.csv`
 (метрики и все компоненты лосса по эпохам), `best.pt` / `last.pt`.
 
+## ESPNetv2
+
+Энкодер EESP (arXiv:1811.11431) — только ученик. В отличие от большинства
+lightweight-сеток этого класса, у EESP есть собственные ImageNet-веса
+классификатора (а не только чужая сборка целиком на Cityscapes) — декодер
+всё равно случайный, ученик проходит весь KD-рецепт проекта с нуля. Два
+варианта декодера поверх ОДНОГО и того же энкодера:
+
+```bash
+# наш UNetDoubleConv — декодер держится постоянным между всеми студентами
+# TimmUNet/ESPNetv2 проекта (чистая абляция "что даёт энкодер"); s050 — 0.92M
+python scripts/train.py experiment=<...> model/student=espnetv2 model.student.variant=s050
+
+# декодер из оригинальной статьи (EESPNet_Seg) — работает в num_classes-мерном
+# пространстве, поэтому на порядок легче: s200 — 1.25M, тот же бюджет, что
+# и espnetv2/s050 сверху, но БЕЗ страйда 32 (taps.stage4 не существует —
+# FitNets/HeteroAKD с ним только на stage1-3)
+python scripts/train.py experiment=<...> model/student=espnetv2_native model.student.variant=s200
+```
+
+Доступные варианты — `s050`/`s100`/`s125`/`s150`/`s200` (масштаб `s` из
+статьи, общий для обоих декодеров; веса качаются автоматически, см.
+`src/models/espnetv2.py`).
+
 ## Очередь экспериментов
 
 `scripts/exp_queue.py` запускает пачку экспериментов сразу, раскидывая их
