@@ -12,6 +12,9 @@ dynamic = ["dependencies"]
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "pre-commit"]
 
+# Квантизация: pip install -e ".[deploy]"
+deploy = ["onnx>=1.16", "onnxruntime>=1.18"]
+
 [tool.setuptools.dynamic]
 dependencies = { file = ["requirements.txt"] }
 

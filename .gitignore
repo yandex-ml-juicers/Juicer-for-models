@@ -17,6 +17,11 @@ __pycache__/
 !/data/processed/.gitkeep
 !/data/weights/.gitkeep
 
+/data/deploy/*
+!/data/deploy/.gitkeep
+/onnx_inference/*
+!/onnx_inference/.gitkeep
+
 # Local configurations
 configs/*_local.yaml
 
