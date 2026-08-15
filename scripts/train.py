@@ -138,6 +138,7 @@ def init_clearml(cfg: DictConfig, dist: DistInfo):
         output_uri=cfg.clearml.output_uri,                     # складывать ли артефакты/модели и если куда-то базово, то url
         auto_connect_frameworks=_plain(cfg.clearml.auto_connect_frameworks), # авто-перехват фреймворков
         auto_connect_arg_parser=cfg.clearml.auto_connect_arg_parser, # авто-перехват аргументов из argparse
+        auto_resource_monitoring=cfg.clearml.auto_resource_monitoring, # графики :monitor:gpu/:monitor:machine
     )
 
     # Полный разрешённый конфиг — в Configuration objects задачи.

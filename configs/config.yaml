@@ -131,6 +131,15 @@ clearml:
   output_uri: True # складывать ли артефакты/модели и если не куда-то базово, то url
   auto_connect_frameworks: {"pytorch": False,} # авто-перехват фреймворков
   auto_connect_arg_parser: False # авто-перехват аргументов из argparse
+  # Фоновый поток ClearML, который сам (без report_scalar от нас) шлёт
+  # графики :monitor:gpu/:monitor:machine (загрузка GPU/CPU/память/диск/сеть).
+  # Мы это не используем и не смотрим, а на старте он ждёт первую метрику,
+  # чтобы понять, что считать "итерацией", не находит (report_scalar у нас —
+  # раз в эпоху, не каждый шаг) и падает в "seconds-from-start" с задержкой
+  # ("ClearML Monitor: Could not detect iteration reporting..."). false —
+  # выключает монитор целиком (CPU-графики тоже, отдельного тумблера
+  # "только GPU" в ClearML нет).
+  auto_resource_monitoring: False
 
 # Настройка самой Hydra (подробнее описано в документации)
 hydra:
