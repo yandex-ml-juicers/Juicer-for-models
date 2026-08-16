@@ -206,6 +206,31 @@ def _parse_onnx(trt: Any, network: Any, logger: Any, onnx_path: Path) -> None:
     )
 
 
+def layer_precision(layer: dict) -> str:
+    """В какой точности собран слой, по отчёту EngineInspector.
+
+    Поля `Precision` у слоя нет — в отчёте TensorRT 10 точность видна по типу
+    весов (`Weights.Type`: Half / Float / Int8). Это и есть прямой ответ на
+    вопрос стадии fp16: какие слои реально считаются в половинной точности.
+
+    Форматы тензоров (`Format/Datatype`) годятся только для статических форм —
+    при динамическом батче там честное "N/A due to dynamic shapes".
+
+    Слои без весов (Reformat, Pooling, Concat) точности не имеют вовсе:
+    у них она определяется соседями, и считать их вместе со свёртками нельзя.
+    """
+    weights = layer.get("Weights")
+    if isinstance(weights, dict) and weights.get("Type"):
+        return str(weights["Type"])
+
+    for output in layer.get("Outputs", []):
+        fmt = str(output.get("Format/Datatype", ""))
+        if fmt and "N/A" not in fmt:
+            return fmt
+
+    return f"без весов ({layer.get('LayerType', '?')})"
+
+
 def _layer_precision_summary(trt: Any, engine: Any, output_path: Path) -> dict | None:
     """Сколько слоёв реально собралось в fp16, а сколько осталось в fp32"""
     try:
@@ -227,8 +252,8 @@ def _layer_precision_summary(trt: Any, engine: Any, output_path: Path) -> dict |
     for layer in layers:
         if not isinstance(layer, dict):
             continue
-        precision = layer.get("Precision") or layer.get("precision") or "unknown"
-        summary[str(precision)] = summary.get(str(precision), 0) + 1
+        precision = layer_precision(layer)
+        summary[precision] = summary.get(precision, 0) + 1
 
     if not summary:
         log.warning(

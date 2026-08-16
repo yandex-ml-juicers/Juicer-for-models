@@ -247,6 +247,45 @@ def test_strongly_typed_tensorrt_accepts_fp16_graph():
     assert _network_flags(_FakeTensorRT(has_fp16_flag=True), "fp16") == 1 << 0
 
 
+def test_layer_precision_reads_weight_type():
+    """Схема EngineInspector в TRT 10: точность видна по типу весов слоя."""
+    from src.quantization.build_engine import layer_precision
+
+    conv = {
+        "Name": "node_Conv_292 + node_relu",
+        "LayerType": "CaskConvolution",
+        "Weights": {"Type": "Half", "Count": 9408},
+        "Outputs": [{"Format/Datatype": "N/A due to dynamic shapes"}],
+    }
+    assert layer_precision(conv) == "Half"
+
+    # У Reformat весов нет — считать его вместе со свёртками нельзя.
+    reformat = {"LayerType": "Reformat", "Outputs": [{"Format/Datatype": "N/A due to dynamic shapes"}]}
+    assert layer_precision(reformat) == "без весов (Reformat)"
+
+    # Статические формы: формат тензора известен и годится как запасной источник.
+    pooling = {"LayerType": "Pooling", "Outputs": [{"Format/Datatype": "Half(64,1:8,...)"}]}
+    assert layer_precision(pooling).startswith("Half")
+
+
+def test_batch_outside_engine_profile_is_caught_before_the_dataset(tmp_path):
+    """Батч лоадера приходит из конфига обучения и легко не влезает в профиль."""
+    from scripts.quantize import check_batch_fits_profile
+
+    with initialize(version_base="1.3", config_path="../configs"):
+        cfg = compose(
+            config_name="config",
+            overrides=["quantize=trt_fp16", "data/dataset=fake_cifar10"],
+        )
+
+    cfg.data.loader.eval_batch_size = 256          # профиль по умолчанию 1..64
+    with pytest.raises(ValueError, match="вне профиля движка"):
+        check_batch_fits_profile(cfg)
+
+    cfg.data.loader.eval_batch_size = 64
+    assert check_batch_fits_profile(cfg) is None
+
+
 def test_report_survives_non_ascii_payload(tmp_path):
     """Отчёт содержит русский текст (причины пропуска стадий) — он обязан писаться."""
     from src.quantization.report import QuantizationReport

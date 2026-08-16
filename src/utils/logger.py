@@ -36,7 +36,7 @@ class MetricsHistory:
             for key in row:
                 if key not in fieldnames:
                     fieldnames.append(key)
-        with self.path.open("w", newline="") as f:
+        with self.path.open("w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
             writer.writerows(self.rows)

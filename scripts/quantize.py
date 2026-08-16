@@ -123,6 +123,38 @@ def get_dynamic_axes(cfg: DictConfig) -> dict[int, tuple[str, int, int]]:
     }
 
 
+def check_batch_fits_profile(cfg: DictConfig) -> None:
+    """Влезает ли батч валидации в профиль движка.
+
+    Профиль — деплойное решение (под какие размеры подбирать тактики), а
+    batch_size лоадера приходит из конфига обучения, где он совсем про другое.
+    Разъезжаются они регулярно, поэтому сверяем по конфигу — до того, как
+    поднимется датасет: иначе о несовпадении узнаёшь через полминуты загрузки.
+    """
+    if cfg.quantize.backend != "tensorrt":
+        return
+
+    axes = get_dynamic_axes(cfg)
+    if 0 not in axes:
+        return
+
+    loader = cfg.data.loader
+    batch = int(loader.eval_batch_size or loader.batch_size)
+    _, low, high = axes[0]
+    if low <= batch <= high:
+        return
+
+    raise ValueError(
+        f"Батч валидации {batch} вне профиля движка [{low}, {high}]. Либо уменьши батч:\n"
+        f"  data.loader.eval_batch_size={high}\n"
+        f"либо расширь профиль (и пересобери движок):\n"
+        f"  'quantize.export.dynamic_axes=[{{axis:0,name:batch,min:{low},max:{batch}}}]' "
+        f"quantize.reuse=false\n"
+        f"Первое обычно правильнее: профиль описывает то, как модель поедет в прод, "
+        f"а батч лоадера — как удобнее считать метрику."
+    )
+
+
 def write_source_manifest(path: Path, cfg: DictConfig, checkpoint: Path) -> dict:
     manifest = {
         "name": cfg.name,
@@ -319,6 +351,8 @@ def main(cfg: DictConfig) -> float:
         raise ValueError(f"Неизвестные стадии {sorted(unknown)}; доступны {STAGES}.")
 
     check_single_process()
+    if {"validate", "benchmark"} & set(cfg.quantize.stages):
+        check_batch_fits_profile(cfg)
     seed_everything(cfg.seed, deterministic=cfg.deterministic, warn_only=cfg.deterministic_warn_only)
     device = resolve_device(cfg.device)
 
