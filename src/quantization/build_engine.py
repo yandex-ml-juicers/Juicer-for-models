@@ -11,11 +11,10 @@ from typing import Any
 import onnx
 import torch
 
+from src.quantization.backends.tensorrt_backend import require_tensorrt
 from src.quantization.export import DynamicAxisSpec, sha256_file
 
 log = logging.getLogger(__name__)
-
-MIN_TRT_VERSION = (8, 5)
 
 DEFAULT_WORKSPACE_BYTES = 2 * 1024**3
 
@@ -73,17 +72,7 @@ def profile_shapes(
     dynamic_axes: DynamicAxisSpec | None,
     opt_shape: Sequence[int] | None = None,
 ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
-    """(min, opt, max) для профиля оптимизации TensorRT.
-
-    Профиль обязателен, как только в графе есть хоть одна динамическая ось:
-    без него билдер не знает, под какие размеры подбирать тактики, и просто
-    откажется собирать.
-
-    `opt` — не середина диапазона, а размер, под который TensorRT оптимизирует
-    в первую очередь. По умолчанию берём максимум: на инференсе пропускная
-    способность обычно важнее задержки на батче 1. Явный `opt_shape`
-    (в пайплайне — форма образца экспорта) перебивает это.
-    """
+    """(min, opt, max) для профиля оптимизации TensorRT"""
     spec = dict(dynamic_axes or {})
 
     unresolved = [i for i, dim in enumerate(dims) if dim is None and i not in spec]
@@ -131,29 +120,7 @@ def profile_shapes(
     return tuple(minimum), tuple(optimum), tuple(maximum)
 
 
-def _require_tensorrt():
-    """Ленивый импорт TensorRT с диагностикой"""
-    try:
-        import tensorrt as trt
-    except ModuleNotFoundError as error:
-        raise ModuleNotFoundError(
-            "Для стадии build нужен tensorrt, а он не установлен. Собирать движок "
-            "имеет смысл только на целевой машине с GPU (у нас — сервер с V100). "
-            "Локально доступны стадии export/validate/benchmark на бэкендах "
-            "torch и onnxruntime."
-        ) from error
-
-    version = tuple(int(part) for part in trt.__version__.split(".")[:2])
-    if version < MIN_TRT_VERSION:
-        raise RuntimeError(
-            f"TensorRT {trt.__version__} слишком старый: нужен "
-            f">= {'.'.join(map(str, MIN_TRT_VERSION))} (адресация тензоров по имени "
-            f"и set_memory_pool_limit появились в 8.5)."
-        )
-    return trt
-
-
-def _make_logger(trt, verbose: bool):
+def _make_logger(trt: Any, verbose: bool) -> Any:
     """Мост из логгера TensorRT в стандартный logging"""
     levels = {
         trt.Logger.INTERNAL_ERROR: logging.ERROR,
@@ -173,7 +140,53 @@ def _make_logger(trt, verbose: bool):
     return _BridgeLogger()
 
 
-def _parse_onnx(trt, network, logger, onnx_path: Path) -> None:
+def graph_precisions(network: Any) -> set[str]:
+    """Какие типы реально встречаются на выходах слоёв разобранного графа"""
+    found = set()
+    for index in range(network.num_layers):
+        layer = network.get_layer(index)
+        for output in range(layer.num_outputs):
+            found.add(layer.get_output(output).dtype.name)
+    return found
+
+
+def _network_flags(trt: Any, precision: str) -> int:
+    flags = 0
+    explicit_batch = getattr(trt.NetworkDefinitionCreationFlag, "EXPLICIT_BATCH", None)
+    if explicit_batch is not None:
+        flags |= 1 << int(explicit_batch)
+
+    if precision == "fp16" and not hasattr(trt.BuilderFlag, "FP16"):
+        strongly_typed = getattr(trt.NetworkDefinitionCreationFlag, "STRONGLY_TYPED", None)
+        if strongly_typed is not None:
+            flags |= 1 << int(strongly_typed)
+    return flags
+
+
+def _apply_precision(trt: Any, builder: Any, config: Any, network: Any, precision: str) -> str:
+    if precision == "fp32":
+        return "fp32"
+
+    flag = getattr(trt.BuilderFlag, "FP16", None)
+    if flag is not None:
+        if not getattr(builder, "platform_has_fast_fp16", True):
+            log.warning("У карты нет быстрого fp16: движок соберётся, но ускорения не будет.")
+        config.set_flag(flag)
+        return "BuilderFlag.FP16"
+
+    precisions = graph_precisions(network)
+    if "HALF" not in precisions:
+        raise RuntimeError(
+            f"TensorRT {trt.__version__} не умеет слабо типизированные сети: в BuilderFlag "
+            f"нет FP16, и точность берётся из типов графа. А в графе типы "
+            f"{sorted(precisions)} — fp16 там нет, движок вышел бы обычным fp32.\n"
+            f"Значит понижать точность нужно на стадии экспорта (fp16-граф ONNX), "
+            f"а не на сборке."
+        )
+    return "типы графа (strongly typed)"
+
+
+def _parse_onnx(trt: Any, network: Any, logger: Any, onnx_path: Path) -> None:
     parser = trt.OnnxParser(network, logger)
     if parser.parse_from_file(str(onnx_path)):
         return
@@ -184,7 +197,7 @@ def _parse_onnx(trt, network, logger, onnx_path: Path) -> None:
     )
 
 
-def _layer_precision_summary(trt, engine, output_path: Path) -> dict | None:
+def _layer_precision_summary(trt: Any, engine: Any, output_path: Path) -> dict | None:
     """Сколько слоёв реально собралось в fp16, а сколько осталось в fp32"""
     try:
         inspector = engine.create_engine_inspector()
@@ -225,7 +238,7 @@ def build_engine(
 ) -> BuildResult:
     """Собирает `.engine` из `.onnx` и пишет рядом паспорт сборки"""
 
-    trt: Any = _require_tensorrt()
+    trt: Any = require_tensorrt()
 
     onnx_path = Path(onnx_path)
     output_path = Path(output_path)
@@ -249,24 +262,13 @@ def build_engine(
 
     logger = _make_logger(trt, verbose)
     builder = trt.Builder(logger)
-
-    flags = 0
-    if int(trt.__version__.split(".")[0]) < 10:
-        flags = 1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
-    network = builder.create_network(flags)
+    network = builder.create_network(_network_flags(trt, precision))
 
     _parse_onnx(trt, network, logger, onnx_path)
 
     config = builder.create_builder_config()
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, workspace_bytes)
-
-    if precision == "fp16":
-        if not builder.platform_has_fast_fp16:
-            log.warning(
-                "У карты нет быстрого fp16 — движок соберётся, но ускорения не будет. "
-                "Проверь, на той ли карте идёт сборка."
-            )
-        config.set_flag(trt.BuilderFlag.FP16)
+    precision_route = _apply_precision(trt, builder, config, network, precision)
 
     profile = builder.create_optimization_profile()
     profile.set_shape(input_name, shape_min, shape_opt, shape_max)
@@ -316,6 +318,8 @@ def build_engine(
         "size_bytes": output_path.stat().st_size,
         "sha256": sha256_file(output_path),
         "precision": precision,
+        "precision_route": precision_route,
+        "graph_precisions": sorted(graph_precisions(network)),
         "source_onnx": str(onnx_path),
         "source_onnx_sha256": sha256_file(onnx_path),
         "hardware_tag": hardware_tag(),
@@ -330,7 +334,9 @@ def build_engine(
         "workspace_bytes": workspace_bytes,
         "timing_cache": str(timing_cache_path) if timing_cache_path else None,
         "build_seconds": round(build_seconds, 1),
-        "device_memory_bytes": getattr(engine, "device_memory_size", None),
+        "device_memory_bytes": getattr(
+            engine, "device_memory_size_v2", getattr(engine, "device_memory_size", None)
+        ),
         "layer_precisions": _layer_precision_summary(trt, engine, output_path),
     }
 
