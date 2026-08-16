@@ -182,7 +182,11 @@ class GradientContributionTracker:
             if not per_param_norms:
                 continue
 
-            norm_value = float(torch.stack(per_param_norms).norm()) / grad_scale
+            # grad_scale сам может укатиться в 0.0 (float32 underflow при затяжном
+            # расхождении: scaler без остановки ловит overflow и делит scale
+            # пополам). Обычное деление на 0.0 не даёт inf, как у torch/numpy,
+            # а валит ZeroDivisionError — заворачиваем в ту же ветку "не конечно".
+            norm_value = float(torch.stack(per_param_norms).norm()) / grad_scale if grad_scale else math.inf
             if math.isfinite(norm_value):
                 self.norms[key].update(norm_value)
             elif key not in self.non_finite:
