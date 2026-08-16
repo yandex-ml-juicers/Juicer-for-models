@@ -29,7 +29,8 @@ deterministic_warn_only: false # лучше держать false
 device: auto  # auto | cuda | cuda:N | cpu
 
 ckpt_path: null
-task_type: 'classification' # Доступны опции ['classification', 'detection', 'segmentation'] 
+resume: false  # true — продолжить с output_dir/last.pt текущего запуска (см. JUICER_RUN_ID). Пока поддержано только для task_type=detection.
+task_type: 'classification' # Доступны опции ['classification', 'detection', 'segmentation']
 
 # Трекинг в ClearML
 # Выключен по умолчанию, чтобы тесты работали оффлайн

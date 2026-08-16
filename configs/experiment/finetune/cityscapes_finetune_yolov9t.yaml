@@ -34,7 +34,7 @@ trainer:
   # Как и для yolov8n: YOLO-лосс умножает лосс на batch_size, поэтому
   # реальная норма градиента - десятки-сотни, а не единицы. Клиппинг
   # 1.0 нормировал бы каждый шаг и эффективно гасил lr сильнее косинуса.
-  grad_clip_norm: null
+  grad_clip_norm: 10.0
   track_train_map: true
 
 optimizer:
