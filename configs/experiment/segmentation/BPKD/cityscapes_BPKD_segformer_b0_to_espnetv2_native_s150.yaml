@@ -47,9 +47,9 @@ clearml:
   output_uri: false
 
 trainer:
-  epochs: 100
+  epochs: 150
   amp: true
-  grad_clip_norm: 3.0
+  grad_clip_norm: 5.0
 
 loss:
   losses:
@@ -79,24 +79,20 @@ loss:
     lovasz: 0.5
 
 loss_schedule:
-  weights.bpkd: {schedule: cosine, start: 1.0, end: 0.50, start_epoch: 75}
-  weights.dice: {schedule: cosine, start: 1.0, end: 0.50, start_epoch: 75}
-  weights.lovasz: {schedule: cosine, start: 0.5, end: 1.25, start_epoch: 75}
+  weights.bpkd: {schedule: cosine, start: 1.0, end: 0.50, start_epoch: 110}
+  weights.dice: {schedule: cosine, start: 1.0, end: 0.50, start_epoch: 110}
+  weights.lovasz: {schedule: cosine, start: 0.5, end: 1.25, start_epoch: 110}
 
 optimizer:
   lr: 2.0e-3
   weight_decay: 3.0e-2
 
-# Раздельный lr энкодер/декодер (docs/param_groups.md): энкодер предобучен,
-# декодер/голова — с нуля, общий lr бил бы по предобучению в первые эпохи.
-# encoder_lr_mult=0.35 -> энкодеру lr в ~2.86 раза ниже optimizer.lr
-# (энкодер — большая доля весов модели, 0.2 было слишком консервативно).
 param_groups:
   encoder_lr_mult: 0.35
   no_decay_on_norm_and_bias: false
 
 scheduler:
-  warmup_epochs: 10
+  warmup_epochs: 15
   eta_min: 1.5e-4
 
 data:

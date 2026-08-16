@@ -43,9 +43,9 @@ clearml:
   output_uri: false
 
 trainer:
-  epochs: 100
+  epochs: 150
   amp: true
-  grad_clip_norm: 2.5
+  grad_clip_norm: 5.0
 
 loss:
   losses:
@@ -66,8 +66,8 @@ loss:
     lovasz: 0.5
 
 loss_schedule:
-  weights.dice: {schedule: cosine, start: 1.0, end: 0.50, start_epoch: 75}
-  weights.lovasz: {schedule: cosine, start: 0.5, end: 1.25, start_epoch: 75}
+  weights.dice: {schedule: cosine, start: 1.0, end: 0.50, start_epoch: 110}
+  weights.lovasz: {schedule: cosine, start: 0.5, end: 1.25, start_epoch: 110}
 
 optimizer:
   lr: 2.0e-3
@@ -81,7 +81,7 @@ param_groups:
   no_decay_on_norm_and_bias: false
 
 scheduler:
-  warmup_epochs: 20
+  warmup_epochs: 15
   eta_min: 1.5e-4
 
 data:
