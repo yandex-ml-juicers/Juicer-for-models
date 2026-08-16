@@ -128,6 +128,36 @@ def benchmark_runner(
     return rows
 
 
+def log_speedup_summary(rows: Sequence[dict], baseline: str) -> None:
+    """Сводка «во сколько раз быстрее» одной таблицей в конце замера.
+
+    Построчный лог по ходу нужен, чтобы видеть прогресс на долгом прогоне, но
+    ответ на главный вопрос по нему собирать глазами: строки идут группами по
+    раннерам, и p50 базы отстоит от p50 кандидата на десяток строк. Сводка
+    печатается уже после того, как известны обе.
+    """
+    grouped: dict[tuple[str, int], dict[str, float]] = {}
+    for row in rows:
+        grouped.setdefault((row["mode"], row["batch_size"]), {})[row["runner"]] = row["p50_ms"]
+
+    others = [name for name in {row["runner"] for row in rows} if name != baseline]
+    if not others or not grouped:
+        return
+
+    log.info("Ускорение к %s (p50):", baseline)
+    log.info("  %-8s %-6s %12s %12s %10s", "режим", "batch", baseline, others[0], "ускорение")
+    for (mode, batch), timings in sorted(grouped.items(), key=lambda item: (item[0][0], item[0][1])):
+        base = timings.get(baseline)
+        for name in others:
+            candidate = timings.get(name)
+            if base is None or candidate is None:
+                continue
+            log.info(
+                "  %-8s %-6d %10.2f мс %10.2f мс %9.2fx",
+                mode, batch, base, candidate, base / candidate,
+            )
+
+
 def speedup_table(rows: Sequence[dict], baseline: str) -> list[dict]:
     """Добавляет к строкам ускорение относительно базового раннера"""
     reference = {

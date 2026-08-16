@@ -15,7 +15,7 @@ from torch.utils.data import DataLoader
 
 from src.data import base_loader
 from src.quantization.backends.base import make_runner
-from src.quantization.benchmark import benchmark_runner, speedup_table
+from src.quantization.benchmark import benchmark_runner, log_speedup_summary, speedup_table
 from src.quantization.export import export_onnx, sha256_file
 from src.quantization.numerics import compare_runners, evaluate_runner
 from src.quantization.report import QuantizationReport, check_acceptance
@@ -323,7 +323,8 @@ def make_candidate_runner(cfg, student, onnx_path, artifacts, device):
     precision = cfg.quantize.precision
 
     if backend == "torch":
-        return make_runner("torch", model=copy.deepcopy(student), precision=precision, device=device)
+        return make_runner("torch", model=copy.deepcopy(student), precision=precision,
+                           device=device, channels_last=bool(cfg.quantize.get("channels_last")))
 
     if backend == "onnxruntime":
         providers = OmegaConf.to_container(cfg.quantize.providers) if cfg.quantize.providers else None
@@ -445,6 +446,7 @@ def stage_benchmark(cfg, reference, candidate, sample_shape, device, report) -> 
     }
 
     rows = benchmark_runner(reference, **common) + benchmark_runner(candidate, **common)
+    log_speedup_summary(rows, baseline=str(settings.baseline))
     rows = speedup_table(rows, baseline=str(settings.baseline))
 
     report.table("benchmark.csv", rows)
@@ -501,6 +503,9 @@ def main(cfg: DictConfig) -> float:
         backend=cfg.quantize.backend,
         precision=cfg.quantize.precision,
         device=str(device),
+        # В отчёт: без этого два прогона с разной раскладкой различаются только
+        # временами, и через неделю не вспомнить, какой из них какой.
+        channels_last=bool(cfg.quantize.get("channels_last")),
         artifacts_dir=str(artifacts),
         source=manifest,
     )
@@ -517,7 +522,19 @@ def main(cfg: DictConfig) -> float:
         log.info("Отчёт: %s", report.path)
         return 0.0
 
-    reference = make_runner("torch", model=student, precision="fp32", device=device)
+    # Раскладка эталона обязана совпадать с кандидатом, иначе сравнение
+    # смешает эффект точности с эффектом раскладки.
+    channels_last = bool(cfg.quantize.get("channels_last"))
+    if channels_last and cfg.quantize.backend != "torch":
+        log.warning(
+            "channels_last=true при backend=%s: раскладка применится только к "
+            "torch-эталону, у движка она своя. Ускорение к такой базе будет "
+            "означать другое — сверяйтесь с этим при чтении таблицы.",
+            cfg.quantize.backend,
+        )
+
+    reference = make_runner("torch", model=student, precision="fp32", device=device,
+                            channels_last=channels_last)
     candidate = make_candidate_runner(cfg, student, onnx_path, artifacts, device)
 
     verdict = None

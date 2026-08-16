@@ -160,6 +160,34 @@ class _NoisyNet(TinyNet):
         return super().forward(batch) + torch.rand(batch.shape[0], 4) * 0.5
 
 
+def test_channels_last_keeps_the_same_answers(model, loader):
+    """NHWC — про скорость, не про математику: ответы обязаны совпасть."""
+    from src.quantization.backends.torch_backend import TorchRunner
+
+    nchw = TorchRunner(model, precision="fp32", device="cpu")
+    nhwc = TorchRunner(model, precision="fp32", device="cpu", channels_last=True)
+
+    assert nhwc.channels_last and not nchw.channels_last
+    result = compare_runners(nchw, nhwc, loader, device=torch.device("cpu"))
+    assert result["max_abs"] == pytest.approx(0.0, abs=1e-5)
+
+
+def test_speedup_summary_reports_the_ratio(caplog):
+    """В логе должно быть «во сколько раз», а не только миллисекунды."""
+    import logging
+
+    from src.quantization.benchmark import log_speedup_summary
+
+    rows = [
+        {"runner": "torch_fp32", "mode": "compute", "batch_size": 1, "p50_ms": 36.5},
+        {"runner": "torch_fp16", "mode": "compute", "batch_size": 1, "p50_ms": 30.9},
+    ]
+    with caplog.at_level(logging.INFO):
+        log_speedup_summary(rows, baseline="torch_fp32")
+
+    assert "1.18x" in caplog.text
+
+
 def test_noise_floor_separates_model_randomness_from_precision(loader):
     """Раннер, сравнённый сам с собой, и есть собственный шум модели."""
     torch.manual_seed(0)
