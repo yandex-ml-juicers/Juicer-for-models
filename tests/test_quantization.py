@@ -153,6 +153,26 @@ def test_runner_module_works_with_trainer_evaluate(model, loader):
     assert wrapped_loss == pytest.approx(direct_loss, rel=1e-6)
 
 
+class _NoisyNet(TinyNet):
+    """Модель со случайностью внутри forward — как NMF-разложение в SegNeXt."""
+
+    def forward(self, batch: torch.Tensor) -> torch.Tensor:
+        return super().forward(batch) + torch.rand(batch.shape[0], 4) * 0.5
+
+
+def test_noise_floor_separates_model_randomness_from_precision(loader):
+    """Раннер, сравнённый сам с собой, и есть собственный шум модели."""
+    torch.manual_seed(0)
+    runner = make_runner("torch", model=_NoisyNet().eval(), precision="fp32", device="cpu")
+
+    noise = compare_runners(runner, runner, loader, device=torch.device("cpu"))
+    assert noise["max_abs"] > 0.1, "случайная модель обязана расходиться сама с собой"
+
+    deterministic = make_runner("torch", model=TinyNet().eval(), precision="fp32", device="cpu")
+    assert compare_runners(deterministic, deterministic, loader,
+                           device=torch.device("cpu"))["max_abs"] == 0.0
+
+
 def test_compare_runners_on_identical_models_is_exact(model, loader):
     reference = make_runner("torch", model=model, precision="fp32", device="cpu")
     candidate = make_runner("torch", model=model, precision="fp32", device="cpu")
@@ -310,6 +330,42 @@ def test_batch_outside_engine_profile_is_caught_before_the_dataset(tmp_path):
 
     cfg.data.loader.eval_batch_size = 64
     assert check_batch_fits_profile(cfg) is None
+
+
+def test_sample_shape_comes_from_onnx_not_from_the_dataset(model, tmp_path):
+    """Замер считает на случайных тензорах — датасет ему не нужен вовсе."""
+    from scripts.quantize import resolve_sample_shape
+
+    onnx_path = tmp_path / "model.onnx"
+    export_onnx(model, torch.randn(2, 3, 8, 8), onnx_path,
+                dynamic_axes={0: ("batch", 1, 8)}, verify=False)
+
+    def explode():
+        raise AssertionError("лоадер не должен строиться, если форма известна из .onnx")
+
+    with initialize(version_base="1.3", config_path="../configs"):
+        cfg = compose(config_name="config", overrides=["quantize=trt_fp16"])
+
+    assert resolve_sample_shape(cfg, onnx_path, explode) == [3, 8, 8]
+    # Без .onnx форма берётся из конфига датасета — тоже без обращения к данным.
+    cfg.data.dataset.image_size = 224
+    assert resolve_sample_shape(cfg, tmp_path / "нет.onnx", explode) == [3, 224, 224]
+
+
+def test_benchmark_batches_are_checked_against_the_profile():
+    """Замер без датасета не должен требовать согласования батча валидации."""
+    from scripts.quantize import check_batch_fits_profile
+
+    with initialize(version_base="1.3", config_path="../configs"):
+        cfg = compose(config_name="config", overrides=["quantize=trt_fp16"])
+
+    cfg.quantize.stages = ["benchmark"]
+    cfg.data.loader.eval_batch_size = 256          # валидации нет — не важно
+    assert check_batch_fits_profile(cfg) is None
+
+    cfg.quantize.benchmark.batch_sizes = [1, 128]  # а вот это вне профиля 1..64
+    with pytest.raises(ValueError, match="батчей замера"):
+        check_batch_fits_profile(cfg)
 
 
 def test_static_input_requires_exact_batch():

@@ -177,12 +177,28 @@ def check_batch_fits_profile(cfg: DictConfig) -> None:
         # нормальный режим, и промахнуться тут даже легче, чем с профилем.
         low = high = int(cfg.quantize.export.batch_size)
 
+    allowed = f"[{low}, {high}]" if low != high else f"ровно {low} (вход статический)"
+    stages = set(cfg.quantize.stages)
+
+    # Замер сам задаёт размеры батчей и в лоадер не ходит вовсе, поэтому его
+    # проверяем отдельно: иначе прогон без датасета требовал бы согласовывать
+    # батч валидации, который ему не нужен.
+    if "benchmark" in stages:
+        outside = [size for size in cfg.quantize.benchmark.batch_sizes if not low <= size <= high]
+        if outside:
+            raise ValueError(
+                f"Размеры батчей замера {outside} не подходят движку: он принимает "
+                f"{allowed}. Правь quantize.benchmark.batch_sizes."
+            )
+
+    if "validate" not in stages:
+        return
+
     loader = cfg.data.loader
     batch = int(loader.eval_batch_size or loader.batch_size)
     if low <= batch <= high:
         return
 
-    allowed = f"[{low}, {high}]" if low != high else f"ровно {low} (вход статический)"
     raise ValueError(
         f"Батч валидации {batch} не подходит движку: он принимает {allowed}. "
         f"Либо приведи батч в соответствие:\n"
@@ -325,10 +341,36 @@ def stage_validate(cfg, reference, candidate, loader, device, report) -> dict:
     task_type = cfg.get("task_type", "classification")
     dataset = cfg.data.dataset
 
+    batches = int(settings.compare_batches)
+
+    # Собственный шум модели: тот же fp32-раннер сравнивается САМ С СОБОЙ на
+    # тех же батчах. Для детерминированной модели это ровно ноль, и строка в
+    # отчёте лишний раз это подтверждает. А вот если внутри есть случайность
+    # (SegNeXt инициализирует базисы NMF через torch.rand на каждом forward),
+    # без этой величины расхождение fp16 не с чем сопоставить: можно принять
+    # за эффект точности то, что модель творит сама с собой.
+    noise_floor = None
+    if bool(settings.get("measure_noise_floor", True)):
+        noise_floor = compare_runners(
+            reference, reference, loader, device=device, limit_batches=batches
+        )
+        log.info(
+            "Собственный шум модели (fp32 против себя же): max_abs=%.3g | совпадение=%.4f",
+            noise_floor["max_abs"], noise_floor["argmax_agreement"],
+        )
+
     comparison = compare_runners(
-        reference, candidate, loader, device=device,
-        limit_batches=int(settings.compare_batches),
+        reference, candidate, loader, device=device, limit_batches=batches,
     )
+
+    if noise_floor is not None and comparison["max_abs"] <= noise_floor["max_abs"]:
+        log.warning(
+            "Расхождение %s (%.3g) не превышает собственный шум модели (%.3g). "
+            "Вердикт приёмки ниже относится к сумме двух эффектов и об эффекте "
+            "точности сам по себе не говорит ничего — сначала убирайте случайность "
+            "из модели.",
+            candidate.name, comparison["max_abs"], noise_floor["max_abs"],
+        )
 
     limit = settings.limit_eval_batches
     limit = int(limit) if limit is not None else None
@@ -350,13 +392,44 @@ def stage_validate(cfg, reference, candidate, loader, device, report) -> dict:
 
     payload = {
         "comparison": comparison,
+        "noise_floor": noise_floor,
         "baseline": baseline_metrics,
         "candidate": candidate_metrics,
         "verdict": verdict,
     }
     report.stage("validate", payload, status="ok" if verdict["passed"] else "failed")
-    report.table("numerics.csv", [comparison, baseline_metrics, candidate_metrics])
+
+    rows = [comparison, baseline_metrics, candidate_metrics]
+    if noise_floor is not None:
+        rows.insert(0, {**noise_floor, "candidate": f"{reference.name} (шум модели)"})
+    report.table("numerics.csv", rows)
     return payload
+
+
+def resolve_sample_shape(cfg: DictConfig, onnx_path: Path, get_loader) -> list[int]:
+    """Форма одного примера (C, H, W) для замера.
+
+    Порядок источников — от точного к запасному:
+    1. сам `.onnx` — там записано ровно то, подо что собран движок;
+    2. `data.dataset.image_size` — если экспорт в этом запуске не делался;
+    3. лоадер — последний вариант, потому что он тянет за собой датасет,
+       а замеру данные не нужны вовсе: он считает на случайных тензорах.
+    """
+    if onnx_path.is_file():
+        from src.quantization.build_engine import onnx_inputs
+
+        (_, dims), = onnx_inputs(onnx_path)
+        spatial = dims[1:]
+        if all(dim is not None for dim in spatial):
+            return [int(dim) for dim in spatial if dim is not None]
+
+    size = cfg.data.dataset.get("image_size")
+    if size is not None:
+        height, width = (size, size) if isinstance(size, int) else tuple(size)
+        return [3, int(height), int(width)]
+
+    log.info("Форма входа неизвестна из конфига — беру её из лоадера.")
+    return list(next(iter(get_loader()))[0].shape[1:])
 
 
 def stage_benchmark(cfg, reference, candidate, sample_shape, device, report) -> list[dict]:
@@ -453,7 +526,7 @@ def main(cfg: DictConfig) -> float:
             payload = stage_validate(cfg, reference, candidate, get_loader(), device, report)
             verdict = payload["verdict"]
         if "benchmark" in stages:
-            sample_shape = list(next(iter(get_loader()))[0].shape[1:])
+            sample_shape = resolve_sample_shape(cfg, onnx_path, get_loader)
             stage_benchmark(cfg, reference, candidate, sample_shape, device, report)
     finally:
         candidate.close()

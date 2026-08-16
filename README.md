@@ -17,7 +17,13 @@ pip install --force-reinstall 'torch>=2.7' 'torchvision>=0.22' --index-url https
 pip install --force-reinstall 'torch>=2.7' 'torchvision>=0.22' --index-url https://download.pytorch.org/whl/cu126
 
 # если хотим запускать квантизацию:
-pip install tensorrt
+pip install -e ".[deploy]"          # onnx + onnxscript + onnxruntime
+
+# TensorRT — ТОЛЬКО с суффиксом CUDA и не старше 10.x, иначе не заработает:
+#   без суффикса ставится сборка под CUDA 13 (cudaError 35 на драйвере под 12);
+#   в 10.16+ и 11.x удалена поддержка Volta, то есть V100.
+python -c "import torch; print(torch.version.cuda)"   # -> 12.6
+pip install 'tensorrt-cu12==10.3.0'
 ```
 
 Проверки
