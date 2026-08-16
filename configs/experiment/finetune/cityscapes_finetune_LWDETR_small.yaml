@@ -1,0 +1,76 @@
+# @package _global_
+defaults:
+  - override /data/dataset: cityscapes
+  - override /data/transform/train: base_cityscapes_transform
+  - override /data/transform/eval: base_cityscapes_transform
+  - override /model/teacher: null
+  - override /model/student: lwdetr
+  - override /loss: lwdetr_small_loss
+  - override /optimizer: lwdetr_adamw
+  - override /scheduler: warmup_cosine
+  - override /prediction_postprocessors: lwdetr
+
+name: cityscapes_finetune_LWDETR_small
+device: cuda
+deterministic: false
+
+task_type: "detection"
+
+clearml:
+  enabled: True
+  tags: [cityscapes, teacher, finetune, LW-DETR-small]
+  output_uri: false
+  plots:
+    # 0 — Debug Samples не отправляются вовсе.
+    debug_samples: 0
+    # 0/не указано — зонд вклада компонентов лосса в градиент выключен;
+    # N>0 — считается раз в N шагов внутри эпохи (график grad_contribution
+    # в ClearML). См. GradientContributionTracker в src/utils/metrics.py.
+    grad_contrib_every_n_steps: 50
+
+trainer:
+  epochs: 40
+  amp: true
+  # DETR-семейство штатно обучают с клиппингом градиентов.
+  grad_clip_norm: 0.1
+  # В train-режиме LwDetr отдаёт num_queries * group_detr = 3900 запросов,
+  # то есть каждый объект попадает в train-mAP тринадцатью копиями.
+  track_train_map: true
+
+optimizer:
+  lr: 1.0e-4
+  lr_encoder: 1.5e-4
+  weight_decay: 1.0e-4
+  fused: true
+
+scheduler:
+  warmup_epochs: 5
+  start_factor: 0.01
+  end_factor: 1.0
+  # Пол косинуса держим на два порядка ниже базового lr: при eta_min = lr
+  # отжигать было нечего.
+  eta_min: 1.0e-6
+
+data:
+  dataset:
+    image_size: [512, 1024]
+    targets_format_mode: "lw-detr-small"
+    build:
+      label_offset: 0
+  transform:
+    train:
+      horizontal_flip: 0.5
+  loader:
+    batch_size: 16
+    num_workers: 8
+    persistent_workers: true
+    pin_memory: true
+
+model:
+  student:
+    dropout: 0.0
+    attention_dropout: 0.0
+    activation_dropout: 0.0
+    backbone_dropout: 0.0
+    # null — старт с COCO-весов; путь к .pt — дообучение своего чекпоинта.
+    checkpoint_path: null

@@ -13,6 +13,10 @@ from src.losses.cwd import ChannelWiseKD
 from src.losses.dist import DISTLoss
 from src.losses.fitnets import FitNetsKD
 from src.losses.pixel_kd import PixelWiseKD
+from src.losses.yolo_loss import YOLO
+from src.losses.dckd_loss import DCKDLoss
+from src.losses.kd_detr_loss import KDDETRLoss
+from src.losses.clockdistill_loss import CLoCKDistillLoss
 
 __all__ = [
     "CrossEntropy",
@@ -28,4 +32,8 @@ __all__ = [
     "DISTLoss",
     "FitNetsKD",
     "PixelWiseKD",
+    "YOLO",
+    "DCKDLoss",
+    "KDDETRLoss",
+    "CLoCKDistillLoss",
 ]

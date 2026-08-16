@@ -8,6 +8,8 @@ import logging
 import math
 from pathlib import Path
 
+import torch
+
 import hydra
 from hydra.core.hydra_config import HydraConfig
 from hydra.utils import instantiate
@@ -18,6 +20,7 @@ from src.data import base_loader
 from src.training import Trainer, DetectionTrainer, SegmentationTrainer
 from src.utils import distributed, seed_everything, prediction_postprocessor
 from src.utils.distributed import DistInfo
+from src.utils import resolve_device, seed_everything
 
 log = logging.getLogger(__name__)
 
@@ -97,13 +100,20 @@ def init_clearml(cfg: DictConfig, dist: DistInfo):
         return None
     from clearml import Task
 
+    # resume=true (пока — только detection, см. DetectionTrainer.load_checkpoint):
+    # без continue_last_task=True ClearML завёл бы новый таск, и график в UI
+    # разъехался бы на "до крэша" и "после" вместо одной линии.
+    continue_last_task = (
+        True if (cfg.resume and cfg.task_type == "detection") else cfg.clearml.continue_last_task
+    )
+
     task = Task.init(
         project_name=cfg.clearml.project,                      # проект
         task_name=f"{cfg.name}",                               # имя таски
         task_type=Task.TaskTypes.training,                     # тип таски
         tags=_plain(cfg.clearml.tags),                         # теги
         reuse_last_task_id = cfg.clearml.reuse_last_task_id,   # перезаписывать ли таску с таким же именем
-        continue_last_task=cfg.clearml.continue_last_task,     # Подхватит предыдущий ID и продолжит логирование
+        continue_last_task=continue_last_task,                 # Подхватит предыдущий ID и продолжит логирование
         output_uri=cfg.clearml.output_uri,                     # складывать ли артефакты/модели и если куда-то базово, то url
         auto_connect_frameworks=_plain(cfg.clearml.auto_connect_frameworks), # авто-перехват фреймворков
         auto_connect_arg_parser=cfg.clearml.auto_connect_arg_parser, # авто-перехват аргументов из argparse
@@ -168,6 +178,7 @@ def clearml_reporter(task):
         # 5. Дистилляция / KL
         if "train_KL_divergence" in row:
             _safe_report("KL", "train_KL", row["train_KL_divergence"])
+        if "train_agreement_rate" in row.keys():
             _safe_report("agreement_rate", "train_agreement_rate", row["train_agreement_rate"])
 
         # 6. Нормы градиентов и весов
@@ -188,16 +199,54 @@ def clearml_reporter(task):
                 series_name = key.removeprefix("train_loss_")
                 _safe_report("loss_components", series_name, value)
 
+        # 7a. Вклад компонентов лосса в градиент (только detection, только если
+        # включён clearml.plots.grad_contrib_every_n_steps — см.
+        # GradientContributionTracker). gradnorm — абсолютная норма ‖∂L_i/∂θ‖
+        # компонента ДО умножения на λ (сравнима 1-в-1 с loss_components выше),
+        # gradshare — её доля среди всех компонентов в %, сумма долей = 100.
+        for key, value in row.items():
+            if key.startswith("train_gradnorm_"):
+                _safe_report("grad_contribution", key.removeprefix("train_gradnorm_"), value)
+            elif key.startswith("train_gradshare_"):
+                _safe_report("grad_contribution_share_pct", key.removeprefix("train_gradshare_"), value)
+
         # 8. Метрики детекции
         detection_metrics = {
-            "eval_map": "mAP",
-            "eval_map_50": "mAP@50",
-            "eval_map_75": "mAP@75",
-            "eval_mar_100": "mAR@100",
+            "train_map": ("mAP", "train"),
+            "eval_map": ("mAP", "eval"),
+
+            "train_map_50": ("mAP@50", "train"),
+            "eval_map_50": ("mAP@50", "eval"),
+
+            "train_map_75": ("mAP@75", "train"),
+            "eval_map_75": ("mAP@75", "eval"),
+
+            "train_mar_100": ("mAR@100", "train"),
+            "eval_mar_100": ("mAR@100", "eval"),
+
+            # Разбивка по размерам: на Cityscapes после ресайза большая часть
+            # объектов мелкая, и именно эта тройка показывает, где теряется mAP.
+            "eval_map_small": ("mAP by size", "small"),
+            "eval_map_medium": ("mAP by size", "medium"),
+            "eval_map_large": ("mAP by size", "large"),
+
+            # Диагностика коллапса: обе величины падают раньше, чем mAP
+            # успевает дойти до нуля.
+            "eval_predictions_per_image": ("detections", "per_image"),
+            "eval_max_score": ("detections", "max_score"),
         }
-        for key, series_name in detection_metrics.items():
+
+        for key, (title, series_name) in detection_metrics.items():
             if key in row:
-                _safe_report("detection_metrics", series_name, row[key])
+                # title берётся из словаря: с захардкоженным именем графика все
+                # метрики писались в одну серию и затирали друг друга.
+                _safe_report(title, series_name, row[key])
+
+        # per-class AP приходит ключами вида eval_ap_person. Перечислить их
+        # в словаре нельзя: имена классов зависят от датасета.
+        for key, value in row.items():
+            if key.startswith("eval_ap_"):
+                _safe_report("AP per class", key.removeprefix("eval_ap_"), value)
 
         # 9. Метрики сегментации
         segmentation_metrics = {
@@ -268,7 +317,27 @@ def clearml_reporter(task):
                     yaxis=plot.yaxis,
                 )
 
-    return report_scalar, report_single, report_table, report_plots
+    def report_debug_sample(
+        image,
+        series: str,
+        iteration: int,
+    ) -> None:
+        image = image.detach().cpu()
+
+        if image.dtype == torch.uint8:
+            image = image.permute(1, 2, 0).numpy()
+        else:
+            image = image.clamp(0, 1)
+            image = image.permute(1, 2, 0).numpy()
+
+        logger.report_image(
+            title="Validation Detection",
+            series=series,
+            iteration=iteration,
+            image=image,
+    )
+
+    return report_scalar, report_single, report_table, report_plots, report_debug_sample
 
 
 @hydra.main(config_path="../configs", config_name="config", version_base="1.3")
@@ -331,15 +400,22 @@ def main(cfg: DictConfig) -> float:
             student = nn.SyncBatchNorm.convert_sync_batchnorm(student)
             log.info("BatchNorm заменён на SyncBatchNorm")
 
-        # заменяем слои BatchNorm до сборки optimizer
-        if cfg.distributed.sync_bn and dist.is_distributed:
-            student = nn.SyncBatchNorm.convert_sync_batchnorm(student)
-            log.info("BatchNorm заменён на SyncBatchNorm")
-
         # Обучаемые параметры лосса (адаптеры feature-KD) оптимизируются вместе с учеником.
-        params = list(student.parameters()) + list(criterion.parameters())
-        optimizer = instantiate(cfg.optimizer)(params)
+        if cfg.task_type == "detection" and cfg.data.dataset.targets_format_mode == "lw-detr-small":
+            params = (
+                list(student.named_parameters())
+                + [(f"criterion.{name}", param) for name, param in criterion.named_parameters()]
+            )
+        else:
+            params = list(student.parameters()) + list(criterion.parameters())
+
+        optimizer = instantiate(cfg.optimizer)(params)  
         scheduler = instantiate(cfg.scheduler)(optimizer) if cfg.get("scheduler") is not None else None
+
+        # cfg.get(...): при `prediction_postprocessors: null` Hydra ключ в struct не создаёт,
+        # прямое обращение падает с ConfigAttributeError.
+        postprocessor_cfg = cfg.get("prediction_postprocessors")
+        prediction_postprocessor = instantiate(postprocessor_cfg) if postprocessor_cfg is not None else None
 
         if cfg.task_type == "classification":
             trainer = Trainer(
@@ -377,8 +453,24 @@ def main(cfg: DictConfig) -> float:
                 prediction_postprocessor=prediction_postprocessor,
                 label_offset=cfg.data.dataset.build.label_offset,
                 targers_mode=cfg.data.dataset.targets_format_mode,
+                # Подписывают per-class AP; без них в логе останутся индексы 0..7.
+                class_names=getattr(train_loader.dataset, "label_to_name", None),
+                # Возвращает Debug Samples исходные цвета; None, если
+                # нормализации не было (у YOLO вход остаётся в 0..1).
+                normalize=_normalize_stats(cfg.data.dataset),
+                plots=_plain(cfg.clearml.get("plots")),
                 **cfg.trainer,
             )
+            if cfg.resume:
+                checkpoint_path = output_dir / "last.pt"
+                if checkpoint_path.exists():
+                    trainer.load_checkpoint(checkpoint_path)
+                    log.info(
+                        "Продолжаем с чекпоинта %s: эпоха %d, лучший mAP=%.4f",
+                        checkpoint_path, trainer.start_epoch - 1, trainer.best_map,
+                    )
+                else:
+                    log.warning("resume=true, но %s не найден — стартуем с нуля.", checkpoint_path)
         elif cfg.task_type == "segmentation":
             trainer = SegmentationTrainer(
                 student=student,

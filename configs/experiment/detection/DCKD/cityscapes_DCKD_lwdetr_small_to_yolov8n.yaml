@@ -1,0 +1,92 @@
+# @package _global_
+defaults:
+  - override /data/dataset: cityscapes
+  - override /data/transform/train: cityscapes_transform_for_yolo
+  - override /data/transform/eval: cityscapes_transform_for_yolo
+  - override /model/teacher: lwdetr
+  - override /model/student: yolo
+  - override /loss: dckd
+  - override /optimizer: SGD
+  - override /scheduler: warmup_cosine
+  - override /prediction_postprocessors: yolov8n
+
+name: cityscapes_DCKD_LWDETR_small_to_yolov8n
+device: cuda
+deterministic: false
+
+task_type: "detection"
+
+clearml:
+  enabled: True
+  tags: [cityscapes, DCKD, LW-DETR-small, yolov8n]
+  output_uri: false
+  plots:
+    # 0 — Debug Samples не отправляются вовсе.
+    debug_samples: 0
+    # 0/не указано — зонд вклада компонентов лосса в градиент выключен;
+    # N>0 — считается раз в N шагов внутри эпохи (график grad_contribution
+    # в ClearML). См. GradientContributionTracker в src/utils/metrics.py.
+    grad_contrib_every_n_steps: 50
+
+trainer:
+  epochs: 100
+  amp: true
+  grad_clip_norm: 10.0
+
+optimizer:
+  lr: 0.01
+  momentum: 0.937
+  weight_decay: 0.005
+
+scheduler:
+  warmup_epochs: 5
+  start_factor: 0.01
+  end_factor: 1.0
+  eta_min: 1.0e-4
+
+data:
+  dataset:
+    image_size: [512, 1024]
+    targets_format_mode: "yolov8n"
+    build:
+      label_offset: 0
+  loader:
+    batch_size: 32
+    num_workers: 16
+    persistent_workers: true
+    pin_memory: true
+
+model:
+  student:
+    weights: null
+    backbone_dropout: 0.02
+    neck_dropout: 0.0
+    bbox_dropout: 0.0
+    cls_dropout: 0.08
+  teacher:
+    checkpoint_path: "data/weights/lw-detr-small/best.pt"
+
+loss:
+  num_classes: 8
+
+  lambda_det: 0.1
+  lambda_hekld: 10.0
+  lambda_hokfd: 11.0
+
+  temperature: 2.0
+
+  teacher_has_no_object: false
+
+  teacher_topk: 100
+  student_topk: 1000
+  teacher_score_threshold: 0.0
+
+  match_cls_weight: 1.0
+  match_l1_weight: 5.0
+  match_giou_weight: 2.0
+
+  local_iou_threshold: 0.5
+  quality_gamma: 0.5
+  attention_temperature: 0.1
+
+  eps: 1.0e-6

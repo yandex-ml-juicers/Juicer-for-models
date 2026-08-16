@@ -2,6 +2,7 @@
 
 from collections.abc import Sequence
 from torchvision import transforms
+
 from src.utils import detection_transforms, segmentation_transforms
 
 
@@ -155,15 +156,104 @@ def build_transform_tinyvit_eval(
 def build_base_transform_for_cityscapes(
     mean: Sequence[float],
     std: Sequence[float],
+    train: bool = True,
     image_size: tuple[int, int] | None = None,
-) -> transforms.Compose:
+    horizontal_flip: float = 0.0,
+) -> detection_transforms.DetectionCompose:
     ops: list = []
-    if image_size is not None:
-        ops.append(detection_transforms.DetectionResize(image_size))
+    if train:
+        # Флип идёт первым: он не меняет геометрию кадра, а кроп ниже
+        # рассчитывает свои параметры уже по итоговому изображению.
+        if horizontal_flip > 0.0:
+            ops.append(detection_transforms.DetectionRandomHorizontalFlip(p=horizontal_flip))
+
+        ops.append(
+                detection_transforms.DetectionRandomResizedCrop(
+                    size=image_size,
+                    scale=(0.6, 1.0),
+                    ratio=(1.7, 2.3),
+                )
+            )
+        ops.append(detection_transforms.DetectionColorJitter(
+            brightness=0.2,
+            contrast=0.2,
+            saturation=0.2,
+            hue=0.05,
+        ))
+        ops.append(
+            detection_transforms.DetectionGaussianBlur(
+                kernel_size=5,
+                sigma=(0.1, 2.0),
+                p=0.2,
+            )
+        )
+    else:
+        if image_size is not None:
+            ops.append(detection_transforms.DetectionResize(image_size))
+
     ops.append(detection_transforms.DetectionToTensor())
     ops.append(detection_transforms.DetectionNormalize(mean, std))
     return detection_transforms.DetectionCompose(ops)
 
+def build_transforms_for_yolo(
+    mean: Sequence[float] | None,
+    std: Sequence[float] | None,
+    train: bool = True,
+    image_size: tuple[int, int] | None = None,
+) -> detection_transforms.DetectionCompose:
+    ops: list = []
+
+    if train:
+        # Флип первым: он не меняет геометрию кадра, а кроп ниже считает свои
+        # параметры уже по итоговому изображению.
+        ops.append(detection_transforms.DetectionRandomHorizontalFlip(p=0.5))
+
+        # Единственная геометрия: кроп задаёт и сдвиг, и масштаб сразу.
+        # ratio держится около аспекта Cityscapes (2048/1024 = 2.0). При
+        # прежних (0.8, 1.25) кроп был почти квадратным и растягивался до
+        # 512x1024, тогда как eval делал честный resize, — train и eval
+        # видели кадры разной геометрии.
+        ops.append(
+            detection_transforms.DetectionRandomResizedCrop(
+                size=image_size,
+                scale=(0.5, 1.0),
+                ratio=(1.8, 2.2),
+            )
+        )
+
+        # Одна фотометрия вместо трёх, параметры из рецепта ultralytics.
+        ops.append(
+            detection_transforms.DetectionRandomHSV(
+                hgain=0.015,
+                sgain=0.7,
+                vgain=0.4,
+                p=1.0,
+            )
+        )
+        ops.append(
+            detection_transforms.DetectionGaussianBlur(
+                kernel_size=5,
+                sigma=(0.1, 2.0),
+                p=0.1,
+            )
+        )
+
+        # После кропа у объектов на границе кадра остаются вырожденные рамки.
+        ops.append(detection_transforms.DetectionFilterBoxes(min_size=2.0))
+
+    else:
+        if image_size is not None:
+            ops.append(detection_transforms.DetectionResize(image_size))
+
+    ops.append(detection_transforms.DetectionToTensor())
+
+    # mean/std = null — вход остаётся в 0..1, как обучает ultralytics и как
+    # приходят COCO-веса. ImageNet-нормализация сдвигала бы распределение
+    # входа относительно предобученной части.
+    if mean is not None and std is not None:
+        ops.append(detection_transforms.DetectionNormalize(mean, std))
+
+    return detection_transforms.DetectionCompose(ops)
 # def build_eval_transform_for_cityscapes(
 #     mean: Sequence[float],
 #     std: Sequence[float],

@@ -11,8 +11,10 @@ configs/model/teacher/*.yaml и configs/model/student/*.yaml.
 
 import timm
 from pathlib import Path
-import torchvision
+import warnings
+
 import torch
+import torchvision
 from torch import nn
 from torchvision import models as tv_models
 from torchvision.models._api import WeightsEnum
@@ -22,11 +24,20 @@ from torchvision.models.detection.rpn import AnchorGenerator
 from torchvision.models import resnet18, ResNet18_Weights
 from transformers import LwDetrConfig, LwDetrForObjectDetection
 
+from ultralytics import YOLO
+from ultralytics.nn.tasks import DetectionModel
+from ultralytics.nn.modules.block import C2f, SPPF
+from ultralytics.nn.modules.head import Detect
+
+from src.models.lwdetr_clockdistill import LwDetrCLoCKDistillMemory
+from src.models.lwdetr_kd_detr import LwDetrKDDETRProbes
 from src.models.segformer import SegFormer
 from src.models.stochastic_depth import apply_stochastic_depth
 from src.models.timm_unet import TIMM_UNET_VARIANTS, TimmUNet
 from src.models.unet import UNET_VARIANTS, UNet
 from src.utils.checkpoints import load_checkpoint_into, resolve_weights_dir
+
+from hydra.utils import to_absolute_path
 
 
 def from_torch_hub(repo: str, name: str, pretrained: bool = False) -> nn.Module:
@@ -277,32 +288,207 @@ def segformer_for_segmentation(
 def lwdetr_small_for_detection(
     num_classes: int = 8,
     disable_custom_kernels: bool = True,
+    dropout: float = 0.1,
+    attention_dropout: float = 0.1,
+    activation_dropout: float = 0.1,
+    backbone_dropout: float = 0.0,
+    checkpoint_path: str | Path | None = None,
+    num_probe_points: int | None = None,
+    clockdistill: bool = False,
 ) -> nn.Module:
-    from transformers import LwDetrConfig, LwDetrForObjectDetection
-    
-    # Берем только чертеж архитектуры Small
-    model_name = "AnnaZhang/lwdetr_small_60e_coco"
-    
-    # Конфигурация классов Cityscapes
+    """
+    Args:
+        num_probe_points: None (по умолчанию) — обычный LwDetrForObjectDetection,
+            как раньше. Число > 0 — модель оборачивается в
+            _LwDetrWithKDDETRProbes: на каждый forward decoder дополнительно
+            прогоняется по num_probe_points probe-точкам с anchor-сетки
+            encoder'а ("general distillation points" из KD-DETR, см. docstring
+            _LwDetrWithKDDETRProbes), а результат кладётся в outputs.probe_logits
+            / outputs.probe_boxes. Нужен только для src/losses/kd_detr_loss.py;
+            для DCKD и остальных лоссов должен оставаться None.
+        clockdistill: True — модель оборачивается в LwDetrCLoCKDistillMemory
+            (src/models/lwdetr_clockdistill.py): наружу дополнительно
+            отдаются decoder и геометрия его входа для второго,
+            target-aware decoder-прохода. Нужен только для
+            src/losses/clockdistill_loss.py; несовместим с
+            num_probe_points (обе — разные обёртки одной и той же модели).
+    """
+    lwdetr_small_checkpoint = "AnnaZhang/lwdetr_small_60e_coco"
     cityscapes_classes = ["person", "rider", "car", "truck", "bus", "train", "motorcycle", "bicycle"]
-    id2label = {i: name for i, name in enumerate(cityscapes_classes)}
-    label2id = {name: i for i, name in id2label.items()}
 
-    # 1. Загружаем РОДНОЙ конфиг (в нем уже прописано num_feature_levels=2)
-    config = LwDetrConfig.from_pretrained(model_name)
-    
-    # 2. Обновляем только классы и включаем Group DETR (это ускорит Scratch)
-    config.update({
-        "num_labels": num_classes,
-        "id2label": id2label,
-        "label2id": label2id,
-        "disable_custom_kernels": disable_custom_kernels,
-        "use_group_detr": True,
-        "num_groups": 11
-    })
+    id2label = {index: class_name for index, class_name in enumerate(cityscapes_classes)}
+    label2id = {class_name: index for index, class_name in id2label.items()}
 
-    # 3. Создаем "пустую" модель (ВЕСА НЕ ГРУЗЯТСЯ, ЭТО SCRATCH)
-    model = LwDetrForObjectDetection(config)
+    config = LwDetrConfig.from_pretrained(lwdetr_small_checkpoint)
+
+    config.num_labels = num_classes
+    config.id2label = id2label
+    config.label2id = label2id
+    config.disable_custom_kernels = disable_custom_kernels
+
+    config.dropout = dropout
+    config.attention_dropout = attention_dropout
+    config.activation_dropout = activation_dropout
+    config.backbone_config.dropout_prob = backbone_dropout
+
+    model = LwDetrForObjectDetection.from_pretrained(lwdetr_small_checkpoint, config=config, ignore_mismatched_sizes=True)
+
+    if checkpoint_path is not None:
+        weights_path = Path(to_absolute_path(checkpoint_path))
+        if not weights_path.is_file():
+            raise FileNotFoundError(f"Checkpoint file was not found: {weights_path}")
+
+        checkpoint = torch.load(weights_path, map_location="cpu", weights_only=True)
+
+        if isinstance(checkpoint, dict) and "student_state" in checkpoint:
+            state_dict = checkpoint["student_state"]
+        elif isinstance(checkpoint, dict) and "state_dict" in checkpoint:
+            state_dict = checkpoint["state_dict"]
+        elif isinstance(checkpoint, dict) and "model" in checkpoint:
+            state_dict = checkpoint["model"]
+        else:
+            state_dict = checkpoint
+
+        state_dict = {
+            key.removeprefix("module."): value
+            for key, value in state_dict.items()
+        }
+
+        model.load_state_dict(state_dict, strict=True)
+
+    if num_probe_points is not None and clockdistill:
+        raise ValueError("num_probe_points и clockdistill — взаимоисключающие обёртки")
+
+    if num_probe_points is None and not clockdistill:
+        return model
+
+    if num_probe_points is not None:
+        return LwDetrKDDETRProbes(model, num_probe_points=num_probe_points)
+
+    return LwDetrCLoCKDistillMemory(model)
+
+
+def yolo(
+    model_name: str = "yolov8n",
+    num_classes: int = 8,
+    weights: str | Path | None = None,
+    weights_dir: str | None = "data/weights",
+    backbone_dropout: float = 0.05,
+    neck_dropout: float = 0.10,
+    bbox_dropout: float = 0.05,
+    cls_dropout: float = 0.15,
+):
+    """Универсальная фабрика для любой YOLO-архитектуры из ultralytics —
+    yolov8{n,s,m,l,x}, yolov9{t,s,m,c,e}, yolov10{n,s,m,b,l,x}, yolo11{n,...},
+    yolo12{n,...} и т.д. Подходит любое имя, для которого в пакете ultralytics
+    есть cfg cfg/models/**/<model_name>.yaml (это все стоковые архитектуры;
+    ultralytics сама ищет файл по имени независимо от подпапки).
+
+    Args:
+        model_name: имя архитектуры/масштаба ultralytics, например "yolov8n",
+            "yolov9t", "yolov10n", "yolo11n". Определяет и cfg (структуру
+            сети), и имя файла канонического претрейна.
+        weights: путь к локальному чекпоинту; None — канонический
+            претрейн (ultralytics сама докачает его в
+            <weights_dir>/<model_name>.pt, если файла там ещё нет);
+            "random" — без претрейна, чистая инициализация.
+        weights_dir: куда докачивать канонический чекпоинт при
+            weights=None; по умолчанию data/weights.
+        backbone_dropout, neck_dropout, bbox_dropout, cls_dropout: точечный
+            dropout в блоках C2f/SPPF (backbone/neck) и в ветках cv2/cv3
+            Detect-головы (bbox/cls). Это инъекция под конкретные типы
+            модулей v8-семейства: она работает для архитектур, что
+            унаследовали C2f/SPPF/Detect (v8, v10, v11, v12), но НЕ для
+            архитектур без них (например чистый YOLOv9 использует
+            RepNCSPELAN4/ELAN1/SPPELAN вместо C2f/SPPF). Если запрошен
+            ненулевой dropout, а подходящих слоёв в модели не нашлось —
+            функция не глотает это молча, а кидает предупреждение.
+            Для v10Detect (наследник Detect с доп. one2one-веткой)
+            bbox/cls dropout встаёт только в общую cv2/cv3-ветку
+            (one2many), one2one-ветка его не получает.
+    """
+    cityscapes_names = {
+        0: "person",
+        1: "rider",
+        2: "car",
+        3: "truck",
+        4: "bus",
+        5: "train",
+        6: "motorcycle",
+        7: "bicycle",
+    }
+
+    model = DetectionModel(cfg=f"{model_name}.yaml", ch=3, nc=num_classes, verbose=False)
+    if num_classes == 8:
+        model.names = cityscapes_names
+
+    if weights != "random":
+        if weights is None:
+            # null — канонический претрейн. Путь ниже отдаётся в YOLO(...)
+            # как есть: если файла там нет, ultralytics сама докачает его
+            # туда (attempt_download_asset по имени файла), так что
+            # повторный запуск уже ничего не тянет из сети.
+            weights_path = resolve_weights_dir(weights_dir) / f"{model_name}.pt"
+        else:
+            # hydra.job.chdir=True: CWD — это каталог запуска, поэтому путь из
+            # конфига разворачивается в абсолютный. Явная ошибка лучше молчаливой
+            # докачки для явно заданного пути: иначе прогон стартует не с тех
+            # весов, что в конфиге.
+            weights_path = Path(to_absolute_path(str(weights)))
+            if not weights_path.is_file():
+                raise FileNotFoundError(
+                    f"Файл весов не найден: {weights_path}. "
+                    f"Ожидается локальная копия претрейна ({model_name}.pt)."
+                )
+
+        pretrained_model = YOLO(str(weights_path)).model
+        model.load(pretrained_model, verbose=True)
+
+    # Dropout2d(p=0) — не бесплатный no-op: это лишний Sequential и лишний
+    # CUDA-кернел на каждый C2f/SPPF/Detect-branch, на каждом шаге forward и
+    # backward. При дообучении дропауты часто выключены (p=0), поэтому слои
+    # оборачиваются только когда дропаут реально используется.
+    dropout_applied = {"backbone": False, "neck": False, "bbox": False, "cls": False}
+
+    for layer in model.model:
+        if isinstance(layer, C2f):
+            is_backbone = layer.i < 10
+            dropout = backbone_dropout if is_backbone else neck_dropout
+            if dropout > 0:
+                layer.cv2 = nn.Sequential(layer.cv2, nn.Dropout2d(p=dropout))
+                dropout_applied["backbone" if is_backbone else "neck"] = True
+
+        elif isinstance(layer, SPPF):
+            if backbone_dropout > 0:
+                layer.cv2 = nn.Sequential(layer.cv2, nn.Dropout2d(p=backbone_dropout))
+                dropout_applied["backbone"] = True
+
+        elif isinstance(layer, Detect):
+            if bbox_dropout > 0:
+                for branch in layer.cv2:
+                    branch.insert(len(branch) - 1, nn.Dropout2d(p=bbox_dropout))
+                dropout_applied["bbox"] = True
+
+            if cls_dropout > 0:
+                for branch in layer.cv3:
+                    branch.insert(len(branch) - 1, nn.Dropout2d(p=cls_dropout))
+                dropout_applied["cls"] = True
+
+    requested = {
+        "backbone": backbone_dropout > 0,
+        "neck": neck_dropout > 0,
+        "bbox": bbox_dropout > 0,
+        "cls": cls_dropout > 0,
+    }
+    missed = [name for name, was_requested in requested.items() if was_requested and not dropout_applied[name]]
+    if missed:
+        warnings.warn(
+            f"yolo(model_name={model_name!r}): запрошен dropout для {missed}, "
+            "но в этой архитектуре нет подходящих слоёв (C2f/SPPF/Detect) — "
+            "dropout не применён.",
+            stacklevel=2,
+        )
+
     return model
 
 def faster_rcnn_resnet18_for_detection(
@@ -340,4 +526,3 @@ def faster_rcnn_resnet18_for_detection(
     )
     
     return model
-   
