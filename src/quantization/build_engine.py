@@ -136,8 +136,14 @@ def _make_logger(trt: Any, verbose: bool) -> Any:
     class _BridgeLogger(trt.ILogger):
         def __init__(self) -> None:
             trt.ILogger.__init__(self)
+            # Ошибки копим: настоящая причина падения приходит сюда, а наружу
+            # C++ отдаёт nullptr или None. Без этого списка в исключении
+            # остаётся только «смотри выше в логе».
+            self.errors: list[str] = []
 
         def log(self, severity, message) -> None:
+            if severity in (trt.Logger.ERROR, trt.Logger.INTERNAL_ERROR):
+                self.errors.append(str(message))
             log.log(levels.get(severity, logging.INFO), "TRT: %s", message)
 
     return _BridgeLogger()
@@ -211,7 +217,7 @@ def _layer_precision_summary(trt: Any, engine: Any, output_path: Path) -> dict |
         return None
 
     sidecar = output_path.with_suffix(".layers.json")
-    sidecar.write_text(raw)
+    sidecar.write_text(raw, encoding="utf-8")
 
     layers = info.get("Layers", info) if isinstance(info, dict) else info
     if not isinstance(layers, list):
@@ -223,6 +229,13 @@ def _layer_precision_summary(trt: Any, engine: Any, output_path: Path) -> dict |
             continue
         precision = layer.get("Precision") or layer.get("precision") or "unknown"
         summary[str(precision)] = summary.get(str(precision), 0) + 1
+
+    if not summary:
+        log.warning(
+            "Инспектор не отдал точности слоёв. Обычно это значит, что движок собран "
+            "без detailed_layers: TensorRT по умолчанию хранит только имена слоёв."
+        )
+        return None
 
     log.info("Слои движка по точности: %s (полный разбор: %s)", summary, sidecar.name)
     return summary
@@ -238,6 +251,7 @@ def build_engine(
     workspace_bytes: int = DEFAULT_WORKSPACE_BYTES,
     timing_cache_path: str | Path | None = None, # файл кэша замеров тактик. Общий на все сборки. Ускоряет повторные сборки
     verbose: bool = False, # поднять INFO-поток TRT из DEBUG в INFO
+    detailed_layers: bool = True, # хранить в движке разбор слоёв (иначе не узнать, что ушло в fp16)
 ) -> BuildResult:
     """Собирает `.engine` из `.onnx` и пишет рядом паспорт сборки"""
 
@@ -264,7 +278,17 @@ def build_engine(
     shape_min, shape_opt, shape_max = profile_shapes(dims, dynamic_axes, opt_shape)
 
     logger = _make_logger(trt, verbose)
-    builder = trt.Builder(logger)
+    try:
+        builder = trt.Builder(logger)
+    except TypeError as error:
+        # trt.Builder отдаёт nullptr, а pybind переводит это в невнятное
+        # "factory function returned nullptr". Настоящая причина — в логгере.
+        raise RuntimeError(
+            "TensorRT не смог создать билдер. Причины бывают две: сборка TensorRT не под "
+            "ту CUDA, что драйвер и torch, либо архитектура карты уже не поддерживается "
+            "этой веткой TensorRT. Что сказал сам TensorRT:\n  "
+            + "\n  ".join(logger.errors or ["(сообщений не было)"])
+        ) from error
     network = builder.create_network(_network_flags(trt, precision))
 
     _parse_onnx(trt, network, logger, onnx_path)
@@ -272,6 +296,13 @@ def build_engine(
     config = builder.create_builder_config()
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, workspace_bytes)
     precision_route = _apply_precision(trt, builder, config, network, precision)
+
+    if detailed_layers:
+        # По умолчанию TensorRT хранит в движке только имена слоёв, и инспектор
+        # отдаёт пустой разбор. А без него нельзя ответить на главный вопрос
+        # fp16-стадии: какие слои реально ушли в fp16, а какие остались в fp32.
+        # На выбор тактик не влияет, растёт только объём метаданных.
+        config.profiling_verbosity = trt.ProfilingVerbosity.DETAILED
 
     profile = builder.create_optimization_profile()
     profile.set_shape(input_name, shape_min, shape_opt, shape_max)
@@ -301,9 +332,9 @@ def build_engine(
 
     if serialized is None:
         raise RuntimeError(
-            "TensorRT вернул пустой движок. Причина всегда выше в логе, в потоке "
-            "'TRT: ...' -- чаще всего не хватило workspace или ни одна тактика не "
-            "подошла под заданный профиль."
+            "TensorRT вернул пустой движок — чаще всего не хватило workspace или ни одна "
+            "тактика не подошла под заданный профиль. Что сказал сам TensorRT:\n  "
+            + "\n  ".join(logger.errors or ["(сообщений не было)"])
         )
 
     output_path.write_bytes(bytes(serialized))
@@ -347,7 +378,7 @@ def build_engine(
 
     # Паспорт пишет сама стадия, а не оркестратор: артефакт без паспорта
     meta_path = output_path.with_suffix(".meta.json")
-    meta_path.write_text(json.dumps(meta, indent=2, ensure_ascii=False))
+    meta_path.write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
 
     log.info(
         "Движок собран за %.1f с: %s (%.1f МиБ), паспорт — %s",

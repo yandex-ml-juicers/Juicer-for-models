@@ -5,6 +5,9 @@
 сервера.
 """
 
+import json
+from pathlib import Path
+
 import pytest
 import torch
 from hydra import compose, initialize
@@ -18,7 +21,7 @@ from src.quantization.export import export_onnx
 from src.quantization.numerics import compare_runners, evaluate_runner, tensor_diff
 from src.quantization.report import check_acceptance
 
-RECIPES = ["base", "trt_fp16", "trt_fp32", "torch_fp16", "ort_cpu"]
+RECIPES = ["base", "trt_fp16", "trt_fp32", "torch_fp16", "ort_cpu", "ort_cuda"]
 
 
 class TinyNet(nn.Module):
@@ -242,6 +245,74 @@ def test_strongly_typed_tensorrt_accepts_fp16_graph():
     # STRONGLY_TYPED ставится только там, где флага точности не осталось.
     assert _network_flags(trt, "fp16") == 1 << 1
     assert _network_flags(_FakeTensorRT(has_fp16_flag=True), "fp16") == 1 << 0
+
+
+def test_report_survives_non_ascii_payload(tmp_path):
+    """Отчёт содержит русский текст (причины пропуска стадий) — он обязан писаться."""
+    from src.quantization.report import QuantizationReport
+
+    report = QuantizationReport(tmp_path)
+    report.stage("calibrate", {"reason": "ни масштабов, ни zero-point здесь нет"})
+
+    written = json.loads(report.path.read_text(encoding="utf-8"))
+    assert written["stages"]["calibrate"]["reason"].startswith("ни масштабов")
+
+
+def test_text_io_always_declares_encoding():
+    """На сервере локаль ASCII, и write_text без encoding роняет запись отчёта.
+
+    Проверяем не поведение, а исходники: воспроизвести чужую локаль внутри
+    процесса нельзя — Python читает её на уровне C при открытии файла.
+    """
+    import ast
+
+    root = Path(__file__).resolve().parent.parent
+    files = [*(root / "src" / "quantization").rglob("*.py"), root / "scripts" / "quantize.py"]
+
+    offenders = []
+    for path in files:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+                continue
+            if node.func.attr not in ("write_text", "read_text"):
+                continue
+            if not any(keyword.arg == "encoding" for keyword in node.keywords):
+                offenders.append(f"{path.relative_to(root)}:{node.lineno}")
+
+    assert not offenders, f"файловые операции без encoding: {offenders}"
+    """Проверенные на V100 границы: 10.16 и 11.2 уже без Volta, 10.3 не проверяли."""
+    from src.quantization.backends.tensorrt_backend import unsupported_gpu
+
+    assert unsupported_gpu((10, 16), (7, 5)) is None   # Turing проходит
+    assert unsupported_gpu((11, 2), (8, 0)) is None    # Ampere проходит
+    # Ниже 10.16 не зарекаемся: пусть отвечает сам билдер, ошибка у него внятная.
+    assert unsupported_gpu((10, 3), (7, 0)) is None
+
+    for version in ((10, 16), (11, 2)):
+        message = unsupported_gpu(version, (7, 0))
+        assert message is not None
+        assert "sm_70" in message
+        # Сообщение обязано давать рабочий путь, а не только диагноз.
+        assert "torch_fp16" in message
+
+
+def test_cuda_variant_mismatch_is_caught_before_tensorrt_touches_cuda():
+    """`pip install tensorrt` тянет свежайшую сборку — она бывает под чужую CUDA.
+
+    Внутри TensorRT это выглядит как cudaError 35 и pybind-nullptr, поэтому
+    несовпадение обязано ловиться до первого обращения к CUDA.
+    """
+    from src.quantization.backends.tensorrt_backend import cuda_variant_mismatch
+
+    assert cuda_variant_mismatch("cu12", "12.6") is None
+    assert cuda_variant_mismatch(None, "12.6") is None
+
+    message = cuda_variant_mismatch("cu13", "12.6")
+    assert message is not None
+    # В сообщении должна быть готовая команда починки, а не только диагноз.
+    assert "pip install 'tensorrt-cu12'" in message
+    assert "cudaError 35" in message
 
 
 def test_require_tensorrt_is_the_single_import_point():

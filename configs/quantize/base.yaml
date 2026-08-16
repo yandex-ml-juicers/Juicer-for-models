@@ -55,6 +55,9 @@ build:
   timing_cache: true    # кэш замеров тактик: быстрее и стабильнее пересборка
   opt_batch: null       # null — оптимизировать под максимум профиля
   verbose: false        # true поднимает INFO-поток TensorRT в лог
+  # Хранить в движке разбор слоёв. Без этого TensorRT кладёт только их имена,
+  # и ответить "что реально ушло в fp16" нечем. На тактики не влияет.
+  detailed_layers: true
 
 validate:
   compare_batches: 20   # L1: сколько батчей сравнивать с fp32

@@ -37,7 +37,12 @@ class QuantizationReport:
         return path
 
     def flush(self) -> None:
-        self.path.write_text(json.dumps(self.payload, indent=2, ensure_ascii=False, default=str))
+        # encoding обязателен: без него Python берёт кодировку локали, а на
+        # сервере она ASCII — и русский текст в отчёте роняет запись.
+        self.path.write_text(
+            json.dumps(self.payload, indent=2, ensure_ascii=False, default=str),
+            encoding="utf-8",
+        )
 
 
 # годен ли сквантованный движок к использованию

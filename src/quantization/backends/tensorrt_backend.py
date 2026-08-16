@@ -13,9 +13,84 @@ log = logging.getLogger(__name__)
 
 MIN_TRT_VERSION = (8, 5)
 
+# Volta (V100). В 10.x объявлена устаревшей, в 11.x уже удалена.
+VOLTA = (7, 0)
+
+# Минимальная архитектура карты, начиная с версии TensorRT. Проверено на V100
+# 2026-08-16:
+#   11.2  — билдер вообще не создаётся: ассерт `SmVersion{0x0705} <= smVersion`
+#           (0x0705 = sm_75), обёрнутый в невнятное pybind-nullptr;
+#   10.16 — билдер создаётся, но buildSerializedNetwork возвращает пустой
+#           движок с "Target GPU SM 70 is not supported by this TensorRT release".
+# Где именно внутри 10.x выпилили Volta — не выяснено, поэтому версии ниже
+# 10.16 пропускаем: там ошибка билдера уже внятная и скажет сама за себя.
+SM_REQUIREMENTS: tuple[tuple[tuple[int, int], tuple[int, int]], ...] = (((10, 16), (7, 5)),)
+
+
+def tensorrt_cuda_variant() -> str | None:
+    """Под какую CUDA собрано установленное колесо TensorRT: 'cu12', 'cu13', ...
+
+    Пакет `tensorrt` — метапакет, а настоящие библиотеки лежат в
+    `tensorrt_cu<N>_libs`. Иначе версию CUDA у TensorRT узнать неоткуда:
+    `trt.__version__` говорит только про сам TensorRT.
+    """
+    from importlib.metadata import distributions
+
+    for dist in distributions():
+        name = (dist.metadata["Name"] or "").replace("-", "_").lower()
+        if name.startswith("tensorrt_cu") and name.endswith("_libs"):
+            return name.split("_")[1]
+    return None
+
+
+def unsupported_gpu(version: tuple[int, int], capability: tuple[int, int]) -> str | None:
+    """Сообщение, если эта версия TensorRT уже не поддерживает карту, иначе None."""
+    required = None
+    for since, minimum in SM_REQUIREMENTS:
+        if version >= since:
+            required = minimum
+    if required is None or capability >= required:
+        return None
+
+    card = f"sm_{capability[0]}{capability[1]}"
+    return (
+        f"TensorRT {version[0]}.{version[1]} не поддерживает {card}: ядер под эту "
+        f"архитектуру в сборке нет, и настройками это не обходится.\n"
+        f"Варианты, по убыванию скорости получения результата:\n"
+        f"  1) quantize=torch_fp16 — fp16 средствами torch. Работает на этой карте "
+        f"прямо сейчас, стадия build не нужна.\n"
+        f"  2) quantize=ort_cuda — onnxruntime с CUDA EP (нужен onnxruntime-gpu). Пока "
+        f"это fp32-граф на карте: fp16 там требует fp16-графа ONNX, отдельная работа.\n"
+        f"  3) более старый TensorRT: 'pip install tensorrt-cu12==10.3.0' и ниже. "
+        f"Точная версия, где выпилили {card}, не выяснена — проверять придётся перебором, "
+        f"каждая установка это ~4 ГБ.\n"
+        f"Проверить версию TensorRT, не трогая данные и не гоняя валидацию:\n"
+        f"  python scripts/quantize.py <те же аргументы> quantize.stages='[build]'"
+    )
+
+
+def cuda_variant_mismatch(variant: str | None, torch_cuda: str | None) -> str | None:
+    """Сообщение о несовпадении сборок TensorRT и torch по CUDA, иначе None."""
+    if not variant or not torch_cuda:
+        return None
+
+    major = torch_cuda.split(".")[0]
+    if variant == f"cu{major}":
+        return None
+
+    return (
+        f"TensorRT собран под {variant}, а torch — под CUDA {torch_cuda}. Драйвер машины "
+        f"поддерживает ту CUDA, под которую собран torch, поэтому инициализация TensorRT "
+        f"провалится с cudaError 35 ('CUDA driver version is insufficient').\n"
+        f"Нужна сборка под ту же CUDA:\n"
+        f"  pip uninstall -y tensorrt tensorrt_{variant} "
+        f"tensorrt_{variant}_bindings tensorrt_{variant}_libs\n"
+        f"  pip install 'tensorrt-cu{major}'"
+    )
+
 
 def require_tensorrt() -> Any:
-    """точка импорта TensorRT: ленивая, с проверкой версии"""
+    """точка импорта TensorRT: ленивая, с проверкой версии и сборки под CUDA"""
     try:
         import tensorrt as trt
     except ModuleNotFoundError as error:
@@ -25,12 +100,35 @@ def require_tensorrt() -> Any:
             "стадии export/validate/benchmark на бэкендах torch и onnxruntime."
         ) from error
 
-    version = tuple(int(part) for part in trt.__version__.split(".")[:2])
+    major, minor = (int(part) for part in trt.__version__.split(".")[:2])
+    version = (major, minor)
     if version < MIN_TRT_VERSION:
         raise RuntimeError(
             f"TensorRT {trt.__version__} слишком старый: нужен "
             f">= {'.'.join(map(str, MIN_TRT_VERSION))}."
         )
+
+    # `pip install tensorrt` тянет САМУЮ СВЕЖУЮ сборку — сейчас под CUDA 13.
+    # Если драйвер и torch стоят на CUDA 12, TensorRT падает не здесь, а глубже,
+    # в C++: "cudaError 35: CUDA driver version is insufficient" и следом
+    # `pybind11::init(): factory function returned nullptr`. По такому сообщению
+    # причину не угадать, поэтому ловим несовпадение заранее.
+    mismatch = cuda_variant_mismatch(tensorrt_cuda_variant(), torch.version.cuda)
+    if mismatch:
+        raise RuntimeError(mismatch)
+
+    if torch.cuda.is_available():
+        capability = torch.cuda.get_device_capability()
+        unsupported = unsupported_gpu(version, capability)
+        if unsupported:
+            raise RuntimeError(unsupported)
+        if capability == VOLTA:
+            log.warning(
+                "Карта — Volta (sm_70), а TensorRT %s из веток, где её уже выпиливают. "
+                "Если сборка вернёт пустой движок с 'Target GPU SM 70 is not supported' — "
+                "ставь версию младше или переходи на quantize=torch_fp16.",
+                trt.__version__,
+            )
     return trt
 
 

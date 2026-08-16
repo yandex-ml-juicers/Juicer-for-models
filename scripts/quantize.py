@@ -132,7 +132,7 @@ def write_source_manifest(path: Path, cfg: DictConfig, checkpoint: Path) -> dict
         "source_run": cfg.quantize.source_run,
         "dataset": cfg.data.dataset.get("_target_") or cfg.data.dataset.get("build", {}).get("_target_"),
     }
-    path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False))
+    path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
     return manifest
 
 
@@ -142,7 +142,7 @@ def stage_export(cfg, student, get_loader, device, onnx_path, manifest, report) 
 
     if cfg.quantize.reuse and onnx_path.is_file():
         previous = onnx_path.parent / "source.json"
-        same = previous.is_file() and json.loads(previous.read_text()).get(
+        same = previous.is_file() and json.loads(previous.read_text(encoding="utf-8")).get(
             "checkpoint_sha256"
         ) == manifest["checkpoint_sha256"]
         if same:
@@ -200,7 +200,7 @@ def stage_build(cfg, onnx_path, artifacts, report) -> dict:
     if cfg.quantize.reuse and engine_path.is_file():
         meta_path = engine_path.with_suffix(".meta.json")
         if meta_path.is_file():
-            meta = json.loads(meta_path.read_text())
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
             if meta.get("source_onnx_sha256") == sha256_file(onnx_path):
                 log.info("build: %s собран из этого же .onnx - пропускаем", engine_path.name)
                 report.stage("build", {**meta, "reused": True})
@@ -223,6 +223,7 @@ def stage_build(cfg, onnx_path, artifacts, report) -> dict:
         workspace_bytes=int(float(settings.workspace_gb) * 1024**3),
         timing_cache_path=engine_path.parent / "timing.cache" if settings.timing_cache else None,
         verbose=bool(settings.verbose),
+        detailed_layers=bool(settings.get("detailed_layers", True)),
     )
     report.stage("build", result.meta)
     return result.meta
