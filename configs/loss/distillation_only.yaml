@@ -1,0 +1,5 @@
+# Чистая дистилляция без разметки (src/losses/distillation_only.py) —
+# для прогрева ученика на неразмеченных данных перед основным обучением,
+# см. configs/experiment/segmentation/pretrain/.
+_target_: src.losses.DistillationOnlyLoss
+temperature: 4.0

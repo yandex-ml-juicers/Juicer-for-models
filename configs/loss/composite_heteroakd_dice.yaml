@@ -1,0 +1,42 @@
+# HeteroAKD (проекция признаков в пространство классов + KMM/KEM) + Dice.
+# Попиксельную классификацию в экспериментах берёт на себя третье слагаемое
+# (OHEM), поэтому ce_weight здесь обнулён.
+#
+# Внимание: у этого лосса есть ОБУЧАЕМЫЕ параметры — два проектора 1x1.
+# Они попадают в optimizer через criterion.parameters() (это делает
+# scripts/train.py) и сохраняются в чекпоинте под criterion_state.
+_target_: src.losses.CompositeLoss
+_convert_: all
+
+losses:
+  hetero:
+    _target_: src.losses.HeteroAKDLoss
+    # В статье проецируется последняя стадия бэкбона (страйд 32).
+    # Каналы — под пару SegFormer-B{2,5} -> timm-U-Net(efficientnet_b0);
+    # у B2 и B5 стадии одинаковой ширины [64, 128, 320, 512].
+    layer: taps.stage4
+    student_channels: 320
+    teacher_channels: 512
+    num_classes: ${data.dataset.num_classes}
+
+    temperature: 1.0
+    ce_weight: 0.0
+    # Обычная попиксельная KD по логитам; в статье её вес 0.1.
+    kd_weight: 0.1
+    # lambda_2 статьи: 1.0 или 10.0 в зависимости от пары моделей.
+    hakd_weight: 1.0
+    # Супервизия проекторов разметкой. Ноль ставить нельзя: проектор учителя
+    # тогда не получит градиента вовсе (таргет отсоединён от графа).
+    proj_weight: 1.0
+    ignore_index: ${data.dataset.ignore_index}
+
+  seg:
+    _target_: src.losses.DiceLoss
+    ce_weight: 0.0
+    dice_weight: 1.0
+    smooth: 1.0
+    ignore_index: ${data.dataset.ignore_index}
+
+weights:
+  hetero: 1.0
+  seg: 0.3

@@ -10,8 +10,8 @@ configs/model/teacher/*.yaml и configs/model/student/*.yaml.
 """
 
 import timm
-from pathlib import Path
 import warnings
+from pathlib import Path
 
 import torch
 import torchvision
@@ -29,13 +29,24 @@ from ultralytics.nn.tasks import DetectionModel
 from ultralytics.nn.modules.block import C2f, SPPF
 from ultralytics.nn.modules.head import Detect
 
+from src.models.espnetv2 import ESPNETV2_VARIANTS, ESPNetV2, ESPNetV2Native, convert_espnetv2_state_dict
+from src.models.espnetv2 import IMAGENET_WEIGHTS as ESPNETV2_IMAGENET_WEIGHTS
 from src.models.lwdetr_clockdistill import LwDetrCLoCKDistillMemory
 from src.models.lwdetr_kd_detr import LwDetrKDDETRProbes
+from src.models.mask2former import Mask2Former
 from src.models.segformer import SegFormer
+from src.models.segnext import IMAGENET_WEIGHTS, SegNeXt, convert_mmseg_state_dict
 from src.models.stochastic_depth import apply_stochastic_depth
 from src.models.timm_unet import TIMM_UNET_VARIANTS, TimmUNet
 from src.models.unet import UNET_VARIANTS, UNet
-from src.utils.checkpoints import load_checkpoint_into, resolve_weights_dir
+from src.utils.checkpoints import (
+    download_file,
+    load_checkpoint_into,
+    load_converted_checkpoint,
+    resolve_weights_dir,
+)
+
+from hydra.utils import to_absolute_path
 
 from hydra.utils import to_absolute_path
 
@@ -283,6 +294,208 @@ def segformer_for_segmentation(
         return model
 
     return load_checkpoint_into(model, checkpoint_path, f"SegFormer-{variant.upper()}")
+
+
+def segnext_for_segmentation(
+    variant: str = "t",
+    num_classes: int = 19,
+    pretrained: str | None = "imagenet",
+    checkpoint_path: str | None = None,
+    weights_dir: str | None = None,
+    align_corners: bool = False,
+    drop_path_rate: float | None = None,
+    dropout: float = 0.1,
+) -> nn.Module:
+    """SegNeXt-T/S/B/L для семантической сегментации.
+
+    Args:
+        pretrained: None | "imagenet" — энкодер MSCAN, предобученный на
+            ImageNet (конвертация OpenMMLab, качается автоматически).
+            Голова декодера при этом инициализируется случайно — это рецепт
+            самой статьи и штатный режим для УЧЕНИКА.
+            Игнорируется, если задан checkpoint_path.
+        checkpoint_path: путь к весам целиком — так SegNeXt становится
+            УЧИТЕЛЕМ. Понимает три формата: чекпоинт нашего тренера,
+            чекпоинт mmsegmentation и чекпоинт оригинального репозитория
+            SegNeXt (см. convert_mmseg_state_dict).
+
+    Про веса на Cityscapes. Автоматически скачиваемых нет: OpenMMLab
+    опубликовал SegNeXt только на ADE20K, а cityscapes-чекпоинты авторов
+    лежат на TsingHua Cloud (ссылки — в README
+    github.com/Visual-Attention-Network/SegNeXt). Файл нужно скачать руками
+    и указать сюда checkpoint_path; переименовывать ключи не нужно.
+    """
+    model = SegNeXt(
+        variant=variant,
+        num_classes=num_classes,
+        drop_path_rate=drop_path_rate,
+        dropout=dropout,
+        align_corners=align_corners,
+    )
+
+    if checkpoint_path is not None:
+        return load_converted_checkpoint(
+            model, checkpoint_path, convert_mmseg_state_dict, f"SegNeXt-{variant.upper()}"
+        )
+
+    if pretrained is None:
+        return model
+
+    if pretrained != "imagenet":
+        raise ValueError(
+            f"pretrained должен быть None | 'imagenet', получено {pretrained!r}. "
+            f"Веса на Cityscapes задаются через checkpoint_path."
+        )
+
+    url = IMAGENET_WEIGHTS[variant]
+    weights_path = download_file(
+        url, resolve_weights_dir(weights_dir) / "segnext" / url.rsplit("/", 1)[-1]
+    )
+    # strict=False: в файле только энкодер, декодер остаётся случайным.
+    return load_converted_checkpoint(
+        model,
+        str(weights_path),
+        convert_mmseg_state_dict,
+        f"MSCAN-{variant.upper()} (ImageNet)",
+        strict=False,
+        expected_prefix="encoder.",
+    )
+
+
+def espnetv2_for_segmentation(
+    variant: str = "s050",
+    num_classes: int = 19,
+    in_channels: int = 3,
+    pretrained: str | None = "imagenet",
+    checkpoint_path: str | None = None,
+    weights_dir: str | None = None,
+    dropout: float = 0.1,
+    align_corners: bool = False,
+) -> nn.Module:
+    """ESPNetv2 (EESP-энкодер) + наш UNet-декодер для семантической сегментации.
+
+    Args:
+        pretrained: None | "imagenet" — энкодер EESPNet, предобученный на
+            ImageNet классификатором (официальный чекпоинт sacmehta/ESPNetv2,
+            качается автоматически). Декодер при этом случайный.
+            Игнорируется, если задан checkpoint_path.
+        checkpoint_path: чекпоинт нашего тренера (ключ student_state) —
+            модель, уже обученная в этом проекте.
+    """
+    model = ESPNetV2(
+        variant=variant,
+        num_classes=num_classes,
+        in_channels=in_channels,
+        dropout=dropout,
+        align_corners=align_corners,
+    )
+
+    if checkpoint_path is not None:
+        return load_checkpoint_into(model, checkpoint_path, f"ESPNetv2-{variant}")
+
+    if pretrained is None:
+        return model
+
+    if pretrained != "imagenet":
+        raise ValueError(
+            f"pretrained должен быть None | 'imagenet', получено {pretrained!r}. "
+            f"У ESPNetv2 нет собственных Cityscapes-весов в проекте."
+        )
+
+    url = ESPNETV2_IMAGENET_WEIGHTS[variant]
+    weights_path = download_file(
+        url, resolve_weights_dir(weights_dir) / "espnetv2" / url.rsplit("/", 1)[-1]
+    )
+    # strict=False: в файле только энкодер, декодер остаётся случайным.
+    return load_converted_checkpoint(
+        model,
+        str(weights_path),
+        convert_espnetv2_state_dict,
+        f"EESPNet-{variant} (ImageNet)",
+        strict=False,
+        expected_prefix="encoder.",
+    )
+
+
+def espnetv2_native_for_segmentation(
+    variant: str = "s050",
+    num_classes: int = 19,
+    in_channels: int = 3,
+    pretrained: str | None = "imagenet",
+    checkpoint_path: str | None = None,
+    weights_dir: str | None = None,
+    dropout: float = 0.2,
+    align_corners: bool = True,
+) -> nn.Module:
+    """ESPNetv2 с декодером ИЗ ОРИГИНАЛЬНОЙ статьи (EESPNet_Seg), а не наш
+    UNetDoubleConv — см. ESPNetV2Native. На порядок меньше espnetv2_for_segmentation
+    при том же variant (декодер работает в num_classes-мерном пространстве,
+    а не в широких каналах энкодера).
+
+    Args: те же, что у espnetv2_for_segmentation — энкодер ImageNet-чекпоинт
+    тот же файл (level5/level5_0 в нём есть, но этой модели не нужны —
+    лишние ключи молча отбрасываются, strict=False).
+    """
+    model = ESPNetV2Native(
+        variant=variant,
+        num_classes=num_classes,
+        in_channels=in_channels,
+        dropout=dropout,
+        align_corners=align_corners,
+    )
+
+    if checkpoint_path is not None:
+        return load_checkpoint_into(model, checkpoint_path, f"ESPNetv2Native-{variant}")
+
+    if pretrained is None:
+        return model
+
+    if pretrained != "imagenet":
+        raise ValueError(
+            f"pretrained должен быть None | 'imagenet', получено {pretrained!r}. "
+            f"У ESPNetv2 нет собственных Cityscapes-весов в проекте."
+        )
+
+    url = ESPNETV2_IMAGENET_WEIGHTS[variant]
+    weights_path = download_file(
+        url, resolve_weights_dir(weights_dir) / "espnetv2" / url.rsplit("/", 1)[-1]
+    )
+    return load_converted_checkpoint(
+        model,
+        str(weights_path),
+        convert_espnetv2_state_dict,
+        f"EESPNet-{variant} (ImageNet)",
+        strict=False,
+        expected_prefix="encoder.",
+    )
+
+
+def mask2former_for_segmentation(
+    variant: str = "tiny",
+    num_classes: int = 19,
+    pretrained: str | None = "cityscapes",
+    weights_dir: str | None = None,
+    align_corners: bool = False,
+) -> nn.Module:
+    """Mask2Former-{tiny,small,base,large} — только учитель (см. src/models/mask2former.py).
+
+    Args:
+        variant: tiny (47M) | small (69M) | base (107M, IN21k) | large (216M).
+        pretrained: только "cityscapes" — готовый чекпоинт facebook/mask2former-
+            swin-{variant}-cityscapes-semantic. Другие значения отвергаются
+            моделью с внятной ошибкой: ученика/случайную инициализацию
+            Mask2Former здесь не собирает.
+        weights_dir: куда качать веса; по умолчанию data/weights (веса HF —
+            в <weights_dir>/huggingface, тот же кэш, что у SegFormer).
+    """
+    cache_dir = str(resolve_weights_dir(weights_dir) / "huggingface")
+    return Mask2Former(
+        variant=variant,
+        num_classes=num_classes,
+        pretrained=pretrained,
+        cache_dir=cache_dir,
+        align_corners=align_corners,
+    )
 
 
 def lwdetr_small_for_detection(

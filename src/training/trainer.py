@@ -35,6 +35,7 @@ from tqdm import tqdm
 from src.data.batch_augment import MixedBatch, interpolate_losses
 from src.losses.base import DistillationLoss
 from src.models.feature_extractor import FeatureExtractor
+from src.training.loss_schedule import LossWeightScheduler
 from src.utils.distributed import DistInfo, unwrap, all_reduce_sum_, all_reduce_max_
 from src.utils.logger import MetricsHistory, get_logger
 
@@ -126,12 +127,50 @@ class NormTracker:
         }
 
 
-def mix_batch(batch_augment: Callable | None, images: Tensor, targets: Tensor) -> MixedBatch:
+def group_learning_rates(optimizer: torch.optim.Optimizer) -> dict[str, float]:
+    """{"lr_encoder": ..., "lr_decoder": ...} для именованных групп параметров.
+
+    Пустой словарь, когда группа одна (имён у неё нет): тогда всё уже
+    сказано скаляром "lr", и дублировать его отдельной серией незачем.
+    Нужно потому, что param_groups[0]["lr"] показывает только основную
+    группу — по нему не видно, что энкодер идёт с другим шагом.
+    """
+    if len(optimizer.param_groups) < 2:
+        return {}
+    return {
+        f"lr_{group['name']}": group["lr"]
+        for group in optimizer.param_groups
+        if "name" in group
+    }
+
+
+def mix_batch(
+    batch_augment: Callable | None,
+    images: Tensor,
+    targets: Tensor,
+    teacher_images: Tensor | None = None,
+) -> MixedBatch:
     """Применяет Mixup/CutMix, если он задан; иначе отдаёт батч как есть."""
     if batch_augment is None:
-        return MixedBatch(images, targets, targets, 1.0)
+        return MixedBatch(images, targets, targets, 1.0, teacher_images)
 
-    return batch_augment(images, targets)
+    return batch_augment(images, targets, teacher_images)
+
+
+def split_segmentation_batch(batch: Sequence[Tensor]) -> tuple[Tensor, Tensor | None, Tensor]:
+    """Разбирает батч сегментации в (кадры ученика, кадры учителя, маски).
+
+    Датасет отдаёт тройку, только если train-трансформ собран с видом для
+    учителя (teacher_skips в build_segmentation_transform_train); во всех
+    остальных случаях — привычную пару, и учитель смотрит на тот же кадр,
+    что и ученик.
+    """
+    if len(batch) == 3:
+        images, teacher_images, masks = batch
+        return images, teacher_images, masks
+
+    images, masks = batch
+    return images, None, masks
 
 
 def compute_losses(
@@ -268,6 +307,7 @@ class Trainer:
         metrics_callback: tuple[Callable, ...] | None = None,
         scalars: dict[str, float | int | str],
         batch_augment: Callable | None = None,
+        loss_schedule: LossWeightScheduler | None = None,
     ) -> None:
         if criterion.requires_teacher and teacher is None:
             raise ValueError(
@@ -299,6 +339,8 @@ class Trainer:
         # только на обучении. На eval смешивания нет никогда — иначе метрика
         # измеряла бы качество на несуществующих картинках.
         self.batch_augment = batch_augment
+        # Расписание весов слагаемых лосса; None — веса постоянны.
+        self.loss_schedule = loss_schedule
         # Точка стыковки внешнего трекера (ClearML и т.п.): вызывается после
         # каждой эпохи со строкой метрик — той же, что уходит в history.csv.
         # Trainer ничего не знает о трекере, колбэк собирает scripts/train.py.
@@ -360,6 +402,9 @@ class Trainer:
 
                 start = time.time()
                 lr=self.optimizer.param_groups[0]["lr"]
+                # Веса лосса выставляются ДО эпохи, чтобы её значения лосса
+                # относились ровно к тем весам, которые уехали в лог.
+                loss_weights = self.loss_schedule.step(epoch) if self.loss_schedule else {}
 
                 train_loss_components, other_train_metrics = self._train_epoch(epoch)
                 eval_loss, eval_acc = evaluate(
@@ -371,11 +416,13 @@ class Trainer:
                 all_values = {
                     "epoch": epoch,
                     "lr": lr,
+                    **group_learning_rates(self.optimizer),
                     "world_size": self.dist.world_size,
                     "global_batch_size": (self.train_loader.batch_size or 0) * self.dist.world_size,
                     "eval_loss": eval_loss,
                     "eval_acc": eval_acc,
                     "time_epoch": round(time.time() - start, 1),
+                    **loss_weights,
                     **{f"train_loss_{key}": value for key, value in train_loss_components.items()},
                     **{f"train_{key}": value for key, value in other_train_metrics.items()},
                 }
@@ -1343,6 +1390,7 @@ def segmentation_evaluate(
     ignore_index: int = 255,
     limit_batches: int | None = None,
     amp: bool = False,
+    micro_batch_size: int | None = None,
 ) -> tuple[float, IoUAccumulator]:
     """Возвращает (средний CE-лосс, аккумулятор IoU).
 
@@ -1367,6 +1415,15 @@ def segmentation_evaluate(
     mIoU при этом совпадает с однопроцессным прогоном точно — матрица
     аддитивна. Лосс может разойтись в последних знаках: он взвешен по
     картинкам батча, а границы батчей у шардов другие.
+
+    micro_batch_size: если задан, каждый батч из loader'а дополнительно
+        режется на форвард-под-батчи этого размера — без градиентов это не
+        влияет на результат (аккумулятор аддитивен), только на пиковую
+        память. Нужен, когда loader настроен под память ДРУГОЙ модели —
+        например, при разовой оценке учителя на eval_loader, собранном под
+        батч (заметно менее прожорливого) студента: тот же батч, что легко
+        входит для U-Net на 1024x2048, может не влезть для SegFormer-B5
+        целиком (см. SegmentationTrainer.fit(), teacher_native_miou).
     """
     was_training = model.training
     model.eval()
@@ -1381,13 +1438,18 @@ def segmentation_evaluate(
         images = images.to(device, non_blocking=True)
         masks = masks.to(device, non_blocking=True)
 
-        with torch.autocast(device.type, enabled=amp):
-            logits = model(images)
+        chunk_size = micro_batch_size or images.size(0)
+        for start in range(0, images.size(0), chunk_size):
+            images_chunk = images[start : start + chunk_size]
+            masks_chunk = masks[start : start + chunk_size]
 
-        loss = F.cross_entropy(logits.float(), masks, ignore_index=ignore_index)
+            with torch.autocast(device.type, enabled=amp):
+                logits = model(images_chunk)
 
-        loss_meter.update(loss.item(), images.size(0))
-        iou.update(logits.argmax(dim=1), masks)
+            loss = F.cross_entropy(logits.float(), masks_chunk, ignore_index=ignore_index)
+
+            loss_meter.update(loss.item(), images_chunk.size(0))
+            iou.update(logits.argmax(dim=1), masks_chunk)
 
     if was_training:
         model.train()
@@ -1437,6 +1499,7 @@ class SegmentationTrainer:
         scalars: dict[str, float | int | str],
         ignore_index: int = 255,
         batch_augment: Callable | None = None,
+        loss_schedule: LossWeightScheduler | None = None,
         plots: dict | None = None,
         class_names: Sequence[str] | None = None,
         palette: Sequence[Sequence[int]] | None = None,
@@ -1463,6 +1526,10 @@ class SegmentationTrainer:
         self.broadcast_buffers = broadcast_buffers
         self.output_dir = Path(output_dir)
         self.epochs = epochs
+        # Стартовая эпоха и лучший результат "с нуля"; load_checkpoint() их перезатрёт.
+        self.start_epoch = 1
+        self.best_miou = 0.0
+        self.best_epoch = 0
         self.grad_clip_norm = grad_clip_norm
         self.limit_train_batches = limit_train_batches
         self.limit_eval_batches = limit_eval_batches
@@ -1473,6 +1540,8 @@ class SegmentationTrainer:
         # он переносит вместе с куском изображения и кусок маски, поэтому
         # таргет остаётся точным (см. src/data/batch_augment.py).
         self.batch_augment = batch_augment
+        # Расписание весов слагаемых лосса; None — веса постоянны.
+        self.loss_schedule = loss_schedule
         self.metrics_callback_scalar = metrics_callback[0] if metrics_callback is not None else None
         self.metrics_callback_single = metrics_callback[1] if metrics_callback is not None else None
         self.metrics_callback_table = metrics_callback[2] if metrics_callback is not None else None
@@ -1489,6 +1558,13 @@ class SegmentationTrainer:
         self.probe_batches = int(plots.get("probe_batches", 20))
         self.debug_every_n_epochs = int(plots.get("debug_every_n_epochs", 10))
         self.debug_width = int(plots.get("debug_width", 512))
+        # Разовый прогон учителя на eval_loader (teacher_native_miou, см. fit())
+        # использует batch_size, подобранный под СТУДЕНТА — для тяжёлого
+        # учителя (SegFormer-B5 и т.п.) на родном разрешении 1024x2048 это
+        # легко даёт OOM. 4 — консервативный дефолт (столько же или меньше
+        # использовал ручной прогон scripts/eval.py eval_slot=teacher для
+        # SegFormer-B5, см. outputs/eval_teacher_b5); при нужде — переопределить.
+        self.teacher_native_eval_batch_size = int(plots.get("teacher_native_eval_batch_size", 4))
         self.palette = list(palette) if palette is not None else default_palette(self.num_classes)
         self.normalize = normalize
         # Картинки для Debug Samples берутся с равным шагом по валидации и
@@ -1511,6 +1587,34 @@ class SegmentationTrainer:
                 self.ignore_index,
                 pixels_per_batch=int(plots.get("probe_pixels", 8192)),
             )
+
+        # Собственное качество учителя (а не схожесть с ним) — диагностика
+        # для дистилляции: "видит ли учитель то, на чём сам хорошо предсказывает".
+        # Два НЕЗАВИСИМЫХ флага в clearml.scalars — специально не один, чтобы
+        # можно было взять дешёвую метрику без дорогой:
+        #   "teacher_miou"        -> train_teacher_miou, каждую эпоху, почти
+        #                            бесплатно (teacher_logits и так нужны
+        #                            каждый шаг ради KD-лосса, здесь только
+        #                            argmax+bincount по тем же кропам/масштабу/
+        #                            аугментациям, что видит ученик прямо
+        #                            сейчас — это и есть "насколько сильные
+        #                            таргеты учитель выдаёт ученику").
+        #   "teacher_native_miou" -> разовый прогон segmentation_evaluate по
+        #                            eval_loader (родное разрешение, без кропа
+        #                            и без аугментаций — тот же путь, что
+        #                            scripts/eval.py eval_slot=teacher), ~1-2
+        #                            минуты один раз в начале fit(). Число не
+        #                            меняется по эпохам (учитель заморожен) и
+        #                            обычно и так известно заранее — включайте,
+        #                            только если хотите готовую линию-ориентир
+        #                            на том же графике, а не считать самим.
+        self.teacher_iou: IoUAccumulator | None = None
+        if teacher is not None and "teacher_miou" in set(self.scalars):
+            self.teacher_iou = IoUAccumulator(self.num_classes, self.device, self.ignore_index)
+        self.teacher_native_miou_enabled = (
+            teacher is not None and "teacher_native_miou" in set(self.scalars)
+        )
+        self.teacher_native_miou: float | None = None
 
         self.amp_enabled = amp and self.device.type == "cuda"
         self.scaler = GradScaler(self.device.type, enabled=self.amp_enabled)
@@ -1556,18 +1660,73 @@ class SegmentationTrainer:
         # учителя не оборачиваем в DDP, т.к. синхронизация между процессами не нужна
 
     def fit(self) -> dict:
-        history = MetricsHistory(self.output_dir / "history.csv") if self.dist.is_main else None
-        best_miou, best_epoch = 0.0, 0
+        history = (
+            MetricsHistory(self.output_dir / "history.csv", resume=self.start_epoch > 1)
+            if self.dist.is_main
+            else None
+        )
+        best_miou, best_epoch = self.best_miou, self.best_epoch
+
+        if history is not None and history.rows and self.metrics_callback_scalar is not None:
+            # history.csv пишется синхронно и пережил крэш целиком, а отчёт в
+            # ClearML асинхронный — часть уже посчитанных эпох могла не успеть
+            # долететь до сервера. Реплеим все локально сохранённые эпохи
+            # заново: те же title/series/iteration в ClearML — это перезапись
+            # той же точки графика, а не дубль, так что безопасно послать и то,
+            # что уже долетело.
+            for row in history.rows:
+                self.metrics_callback_scalar(row)
 
         # Срез до первого шага (iteration 0): у необученной модели предсказание
         # шумовое, и именно с ним потом сравниваются все последующие эпохи.
-        if self.plots_enabled and self.debug_indices:
+        # При resume это уже отправлено в прошлом запуске — повторный срез
+        # только задвоил бы iteration 0 на графике Debug Samples.
+        if self.plots_enabled and self.debug_indices and self.start_epoch == 1:
             self.metrics_callback_plots(self._debug_samples(), 0)
 
+        # Разовый прогон учителя по eval_loader (родное разрешение, без кропа —
+        # тот же путь, что scripts/eval.py eval_slot=teacher). Учитель заморожен,
+        # число не меняется по эпохам, поэтому считаем один раз ДО цикла и потом
+        # просто повторяем в каждой строке лога — как плоскую линию-ориентир
+        # рядом с train_teacher_miou (тот считается на кропах, которые учитель
+        # реально видит при дистилляции). Отдельный флаг (teacher_native_miou_enabled,
+        # см. __init__) — эта метрика не меняется по эпохам и часто уже известна
+        # заранее, поэтому не включена по умолчанию вместе с train_teacher_miou.
+        # Коллективная операция (synchronize внутри segmentation_evaluate) —
+        # вызывается на всех ранках одинаково, т.к. self.scalars одинаков на
+        # всех ранках.
+        if self.teacher_native_miou_enabled:
+            _, native_iou = segmentation_evaluate(
+                model=self.teacher,
+                loader=self.eval_loader,
+                device=self.device,
+                num_classes=self.num_classes,
+                ignore_index=self.ignore_index,
+                limit_batches=self.limit_eval_batches,
+                amp=self.amp_enabled,
+                micro_batch_size=self.teacher_native_eval_batch_size,
+            )
+            self.teacher_native_miou = native_iou.compute()["miou"]
+            log.info(
+                "Учитель на eval-разрешении (родное, без кропа): mIoU=%.4f — "
+                "сравни с train_teacher_miou (кропы, которые он видит при дистилляции)",
+                self.teacher_native_miou,
+            )
+            # Без этого PyTorch держит закэшированными блоки под форму
+            # 1024x2048/micro_batch_size — а основной цикл сразу просит
+            # крупный батч 512x1024, форма другая, кэш ему не подходит.
+            # Итог — OOM на первом же шаге обучения при формально свободной
+            # памяти (проверено: SegFormer-B5 + batch=80 падал без этой строки).
+            if self.device.type == "cuda":
+                torch.cuda.empty_cache()
+
         try:
-            for epoch in range(1, self.epochs + 1):
+            for epoch in range(self.start_epoch, self.epochs + 1):
                 start = time.time()
                 lr = self.optimizer.param_groups[0]["lr"]
+                # Веса лосса выставляются ДО эпохи, чтобы её значения лосса
+                # относились ровно к тем весам, которые уехали в лог.
+                loss_weights = self.loss_schedule.step(epoch) if self.loss_schedule else {}
 
                 train_loss_components, other_train_metrics, norms = self._train_epoch(epoch)
                 eval_loss, eval_iou = segmentation_evaluate(
@@ -1590,14 +1749,22 @@ class SegmentationTrainer:
                 all_values = {
                     "epoch": epoch,
                     "lr": lr,
+                    **group_learning_rates(self.optimizer),
                     "world_size": self.dist.world_size,
                     "global_batch_size": (self.train_loader.batch_size or 0) * self.dist.world_size,
                     "eval_loss": eval_loss,
                     "eval_miou": eval_metrics["miou"],
                     "eval_pixel_acc": eval_metrics["pixel_acc"],
                     "time_epoch": round(time.time() - start, 1),
+                    **loss_weights,
                     **{f"train_loss_{key}": value for key, value in train_loss_components.items()},
                     **{f"train_{key}": value for key, value in other_train_metrics.items()},
+                    # Плоская линия-ориентир, пересылается без пересчёта (см. выше).
+                    **(
+                        {"teacher_native_miou": self.teacher_native_miou}
+                        if self.teacher_native_miou is not None
+                        else {}
+                    ),
                 }
 
                 if history is not None:
@@ -1611,9 +1778,9 @@ class SegmentationTrainer:
                 if is_best:
                     best_miou, best_epoch = eval_metrics["miou"], epoch
                     if self.save_best:
-                        self._save_checkpoint("best.pt", epoch, best_miou)
+                        self._save_checkpoint("best.pt", epoch, best_miou, best_epoch)
                 if self.save_last:
-                    self._save_checkpoint("last.pt", epoch, best_miou)
+                    self._save_checkpoint("last.pt", epoch, best_miou, best_epoch)
 
                 log.info(
                     "Эпоха %02d/%d | lr=%.6f | train loss=%.4f | train mIoU=%.4f | "
@@ -1653,6 +1820,8 @@ class SegmentationTrainer:
         self.train_iou.reset()
         if self.similarity is not None:
             self.similarity.reset()
+        if self.teacher_iou is not None:
+            self.teacher_iou.reset()
         # Сравнение с учителем считается не на каждом шаге: за эпоху достаточно
         # probe_batches замеров, чтобы среднее устоялось, а гистограмма набрала
         # форму. Шаги берутся с равным интервалом по эпохе — иначе метрика
@@ -1670,18 +1839,25 @@ class SegmentationTrainer:
             leave=False,
         )
 
-        for step, (images, masks) in enumerate(iterator):
+        for step, batch in enumerate(iterator):
             if self.limit_train_batches is not None and step >= self.limit_train_batches:
                 iterator.close()
                 break
 
+            images, teacher_images, masks = split_segmentation_batch(batch)
             images = images.to(self.device, non_blocking=True)
             masks = masks.to(self.device, non_blocking=True)
+            if teacher_images is not None:
+                teacher_images = teacher_images.to(self.device, non_blocking=True)
             batch_size = images.size(0)
 
             # До прогона учителя: он обязан видеть ту же склейку, что и ученик.
-            mixed = mix_batch(self.batch_augment, images, masks)
+            mixed = mix_batch(self.batch_augment, images, masks, teacher_images)
             images, masks = mixed.images, mixed.targets_a
+            # Кадр учителя отличается от ученического только слабыми
+            # аугментациями; геометрия у них общая, поэтому логиты и карты
+            # признаков остаются выровненными с ученическими попиксельно.
+            teacher_input = mixed.teacher_images if mixed.teacher_images is not None else images
 
             self.optimizer.zero_grad(set_to_none=True)
             if self.student_extractor is not None:
@@ -1692,7 +1868,7 @@ class SegmentationTrainer:
             teacher_logits = None
             if self.teacher is not None:
                 with torch.no_grad(), torch.autocast(self.device.type, enabled=self.amp_enabled):
-                    teacher_logits = self.teacher(images)
+                    teacher_logits = self.teacher(teacher_input)
 
             with torch.autocast(self.device.type, enabled=self.amp_enabled):
                 student_logits = self.student(images)
@@ -1736,6 +1912,10 @@ class SegmentationTrainer:
                 # вместе с пикселями), поэтому train mIoU остаётся честным;
                 # для Mixup он превращается в оценку снизу.
                 self.train_iou.update(student_logits.detach().argmax(dim=1), masks)
+                # Собственное качество учителя на тех же кропах — без лишнего
+                # forward'а, teacher_logits уже посчитаны выше ради KD-лосса.
+                if self.teacher_iou is not None and teacher_logits is not None:
+                    self.teacher_iou.update(teacher_logits.detach().argmax(dim=1), masks)
 
             iterator.set_postfix({"loss": f"{losses['total'].item():.3f}"})
 
@@ -1748,11 +1928,16 @@ class SegmentationTrainer:
         norms.synchronize(self.device)
         if self.similarity is not None:
             self.similarity.synchronize()
+        if self.teacher_iou is not None:
+            self.teacher_iou.synchronize()
 
         train_loss_components = {key: meter.avg for key, meter in meters_avg_loss.items()}
 
         meters_other.update(self.train_iou.compute())  # miou, pixel_acc
         meters_other.update(norms.results())
+        if self.teacher_iou is not None:
+            # Своё имя, а не "miou": иначе затрёт miou студента при merge ниже.
+            meters_other["teacher_miou"] = self.teacher_iou.compute()["miou"]
         if self.similarity is not None:
             meters_other.update(self.similarity.compute())  # KL_divergence, agreement_rate
 
@@ -1904,11 +2089,29 @@ class SegmentationTrainer:
 
         return plots
 
+    def load_checkpoint(self, path: Path) -> None:
+        """Восстанавливает student/criterion/optimizer/scheduler/scaler из
+        чекпоинта и выставляет эпоху и лучший mIoU, с которых продолжать fit().
+        """
+        checkpoint = torch.load(path, map_location=self.device, weights_only=True)
+        unwrap(self.student).load_state_dict(checkpoint["student_state"])
+        unwrap(self.criterion).load_state_dict(checkpoint["criterion_state"])
+        self.optimizer.load_state_dict(checkpoint["optimizer_state"])
+        if self.scheduler is not None and checkpoint.get("scheduler_state") is not None:
+            self.scheduler.load_state_dict(checkpoint["scheduler_state"])
+        self.scaler.load_state_dict(checkpoint["scaler_state"])
+        self.start_epoch = checkpoint["epoch"] + 1
+        self.best_miou = checkpoint["best_miou"]
+        # get(): чекпоинты, сохранённые до появления resume, ключа не содержат —
+        # эпоха последнего сохранения (last.pt) в этом случае лучшее приближение.
+        self.best_epoch = checkpoint.get("best_epoch", checkpoint["epoch"])
+
     def _save_checkpoint(
         self,
         filename: str,
         epoch: int,
         best_miou: float,
+        best_epoch: int,
     ) -> None:
         if not self.dist.is_main:
             return
@@ -1916,6 +2119,7 @@ class SegmentationTrainer:
         checkpoint = {
             "epoch": epoch,
             "best_miou": best_miou,
+            "best_epoch": best_epoch,
             "world_size": self.dist.world_size,
             # unwrap: под DDP ключи иначе ушли бы с префиксом "module.",
             # и чекпоинт не встал бы в обычную модель.

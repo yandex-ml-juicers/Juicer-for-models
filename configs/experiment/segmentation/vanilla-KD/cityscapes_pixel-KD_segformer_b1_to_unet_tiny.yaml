@@ -1,0 +1,110 @@
+# @package _global_
+# Сетка "6 методов дистилляции x 4 пары учитель/студент" (см.
+# outputs/claude-analis/analysis.md, ответ на вопросы про capacity gap и
+# набор лоссов). Учитель SegFormer-B1 (eval mIoU~0.7742) ->
+# unet_tiny (timm_unet/mobilenetv2, ~2.33M).
+#
+# Структура (dice+lovasz рядом с KD-членом, форма loss_schedule,
+# оптимизатор/батч/трейнер) — БЕЗ ИЗМЕНЕНИЙ из
+# segmentation/diagnostics/cityscapes_BPKD_segformer_b2_to_unet_small.yaml
+# (так просили) — меняется учитель/студент и KD-слагаемое.
+#
+# Ванильная KD Хинтона попиксельно (configs/loss/pixel_kd.yaml), тапы не нужны.
+defaults:
+  - override /data/dataset: cityscapes_seg
+  - override /data/transform/train: cityscapes_seg_strong_transform_for_segmentation
+  - override /data/transform/eval: cityscapes_seg_transform
+  - override /model/teacher: segformer
+  - override /model/student: timm_unet
+  - override /loss: composite_base
+  - override /optimizer: adamw
+  - override /scheduler: warmup_cosine
+  - override /augment: cutmix_segmentation
+
+name: cityscapes_pixel-KD_segformer_b1_to_unet_tiny
+device: cuda
+deterministic: false
+
+task_type: "segmentation"
+
+clearml:
+  enabled: True
+  tags: [cityscapes, KD, pixel-KD, segformer-b1, unet-tiny, segmentation]
+  scalars: ['KL_divergence', 'agreement_rate', 'teacher_miou']
+  plots:
+    enabled: False
+    every_n_epochs: 10
+  reuse_last_task_id: False
+  continue_last_task: False
+  output_uri: false
+
+trainer:
+  epochs: 100
+  amp: true
+  grad_clip_norm: 5.0
+
+loss:
+  losses:
+    pixel_kd:
+      _target_: src.losses.PixelWiseKD
+      temperature: 4.0
+      # alpha=1.0: чистая KL без встроенной CE (та живёт в dice ниже —
+      # правило "CE ровно в одном слагаемом").
+      alpha: 1.0
+      ignore_index: ${data.dataset.ignore_index}
+      label_smoothing: 0.0
+    dice:
+      _target_: src.losses.DiceLoss
+      ce_weight: 1.5
+      dice_weight: 2.5
+    lovasz:
+      _target_: src.losses.LovaszSoftmax
+      ce_weight: 0.0
+      lovasz_weight: 3.5
+      pixel_stride: 2
+      label_smoothing: 0.05
+      ignore_index: ${data.dataset.ignore_index}
+
+  weights:
+    pixel_kd: 1.25
+    dice: 1.0
+    lovasz: 0.5
+
+loss_schedule:
+  weights.pixel_kd: {schedule: cosine, start: 1.25, end: 0.50, start_epoch: 75}
+  weights.dice: {schedule: cosine, start: 1.0, end: 0.50, start_epoch: 75}
+  weights.lovasz: {schedule: cosine, start: 0.5, end: 1.25, start_epoch: 75}
+
+optimizer:
+  lr: 2.0e-3
+  weight_decay: 3.0e-2
+
+# Раздельный lr энкодер/декодер (docs/param_groups.md): энкодер предобучен,
+# декодер/голова — с нуля, общий lr бил бы по предобучению в первые эпохи.
+# encoder_lr_mult=0.35 -> энкодеру lr в ~2.86 раза ниже optimizer.lr
+# (энкодер — большая доля весов модели, 0.2 было слишком консервативно).
+param_groups:
+  encoder_lr_mult: 0.35
+  no_decay_on_norm_and_bias: false
+
+scheduler:
+  warmup_epochs: 10
+  eta_min: 1.5e-4
+
+data:
+  loader:
+    batch_size: 20
+    eval_batch_size: 12
+    num_workers: 20
+    pin_memory: true
+    persistent_workers: true
+
+model:
+  student:
+    variant: mobilenetv2
+    pretrained: true
+    dropout: 0.1
+  teacher:
+    variant: b1
+    pretrained: cityscapes
+    checkpoint_path: null

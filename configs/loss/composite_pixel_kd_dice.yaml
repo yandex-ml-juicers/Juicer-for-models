@@ -1,0 +1,19 @@
+_target_: src.losses.CompositeLoss
+_convert_: all
+
+losses:
+  pixel:
+    _target_: src.losses.PixelWiseKD
+    temperature: 1.0
+    alpha: 0.5
+
+  seg:
+    _target_: src.losses.DiceLoss
+    ce_weight: 1.0
+    dice_weight: 1.0
+    smooth: 1.0
+    ignore_index: ${data.dataset.ignore_index}
+
+weights:
+  pixel: 0.7
+  seg: 0.3

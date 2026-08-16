@@ -1,0 +1,29 @@
+# SegNeXt — ученик семантической сегментации.
+#
+# Размеры и mIoU на Cityscapes из статьи (1024x1024, single scale):
+#   t   4.3M   79.8   <- сопоставим с timm-U-Net efficientnet_b0 (4.24M)
+#   s  13.9M   81.3
+#   b  27.6M   82.6
+#   l  48.9M   83.2
+#
+# pretrained: imagenet качает энкодер MSCAN (конвертация OpenMMLab) и
+# оставляет декодер случайным — это рецепт самой статьи. false/null даёт
+# ту же архитектуру со случайной инициализацией: честный контроль для
+# абляции «сколько дало предобучение».
+_target_: src.models.factory.segnext_for_segmentation
+variant: t
+num_classes: ${data.dataset.num_classes}
+
+pretrained: imagenet
+align_corners: false
+
+# Stochastic depth внутри блоков MSCA. null — значение варианта из статьи
+# (0.1 для t/s/b, 0.3 для l).
+drop_path_rate: null
+# Dropout2d перед классификатором декодера (в статье 0.1).
+dropout: 0.1
+
+# Чекпоинт (наш тренер / mmsegmentation / оригинальный SegNeXt).
+# Если задан, pretrained игнорируется.
+checkpoint_path: null
+weights_dir: data/weights

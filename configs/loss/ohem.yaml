@@ -1,0 +1,12 @@
+# OHEM Cross-Entropy: backward только по трудным пикселям кадра.
+# Замена обычной CE, не добавка к ней — сочетается с model/teacher=null.
+_target_: src.losses.OhemCrossEntropy
+
+# Пиксель трудный, если вероятность верного класса ниже thresh.
+# null — отбирать только по keep_ratio.
+thresh: 0.7
+# Доля самых трудных пикселей кадра, которая остаётся в лоссе в любом случае.
+keep_ratio: 0.1
+
+ignore_index: ${data.dataset.ignore_index}
+label_smoothing: 0.0

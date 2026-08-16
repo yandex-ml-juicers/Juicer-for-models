@@ -1,0 +1,145 @@
+# @package _global_
+# BPKD (arXiv:2306.08075, WACV 2024): SegFormer-B5 -> timm-U-Net(efficientnet_b0).
+# Единственный метод сетки, который разделяет кадр на ГРАНИЦЫ и ТЕЛА объектов
+# и дистиллирует их разными лоссами: на границе — попиксельная KL по классам
+# (там ученик путает соседние классы), в теле — канальная KL, как в CWD
+# (там важна форма). Граница берётся морфологической разностью по разметке.
+#
+# Прямой конкурент — cityscapes_CWD_segformer_b5_to_unet_small: телесный
+# член BPKD это и есть CWD, только с выброшенной границей. Разница между
+# прогонами и есть ответ на вопрос, даёт ли что-то отдельная обработка краёв.
+# Всё остальное (оптимизатор, расписание, батч, эпохи) с ним совпадает.
+defaults:
+  - override /data/dataset: cityscapes_seg
+  - override /data/transform/train: cityscapes_seg_strong_transform_for_segmentation
+  - override /data/transform/eval: cityscapes_seg_transform
+  - override /model/teacher: segformer
+  - override /model/student: timm_unet
+  - override /loss: composite_base
+  - override /optimizer: adamw
+  - override /scheduler: warmup_cosine
+  - override /augment: cutmix_segmentation
+
+name: cityscapes_BPKD_segformer_b5_to_unet_small
+device: cuda
+deterministic: false
+
+task_type: "segmentation"
+
+clearml:
+  enabled: True
+  tags: [cityscapes, KD, BPKD, segformer-b5, unet-small, segmentation]
+  # Схожесть ученика с учителем по пикселям: KL и доля совпавших argmax'ов.
+  scalars: ['KL_divergence', 'agreement_rate']
+  plots:
+    enabled: False
+    every_n_epochs: 10
+  reuse_last_task_id: False
+  continue_last_task: False
+  output_uri: false
+
+trainer:
+  epochs: 100
+  amp: true
+  grad_clip_norm: 2.5
+
+loss:
+  losses:
+    bpkd:
+      _target_: src.losses.BPKDLoss
+      temperature: 1.0
+      ce_weight: 0.0
+      # edge в 2.5 раза тяжелее body — то же соотношение, что в статье
+      # (там 50 против 20). При паритете 1:1 замер показал 30/70 в пользу
+      # body, а body — это буквально CWD, и прогон дублировал бы соседний
+      # эксперимент вместо того, чтобы мерить вклад границ.
+      edge_weight: 1.3
+      body_weight: 0.5
+      edge_width: 7
+      spatial_stride: 2
+    dice:
+      _target_: src.losses.DiceLoss
+      ce_weight: 0.0
+      dice_weight: 3.5
+    ohem:
+      _target_: src.losses.OhemCrossEntropy
+      thresh: 0.7
+      keep_ratio: 0.1
+      ignore_index: ${data.dataset.ignore_index}
+    lovasz:
+      _target_: src.losses.LovaszSoftmax
+      ce_weight: 0.0
+      lovasz_weight: 3.5
+      pixel_stride: 2
+      label_smoothing: 0.05
+      ignore_index: ${data.dataset.ignore_index}
+
+  weights:
+    bpkd: 0.5
+    dice: 0.1
+    ohem: 0.3
+    lovasz: 0.1
+
+loss_schedule:
+  weights.bpkd: {schedule: cosine, start: 1.0, end: 0.0, start_epoch: 120}
+  weights.dice: {schedule: cosine, start: 1.0, end: 0.7, start_epoch: 120}
+  weights.ohem: {schedule: cosine, start: 1.0, end: 0.5, start_epoch: 120}
+  weights.lovasz: {schedule: cosine, start: 1.0, end: 0.5, start_epoch: 120}
+
+optimizer:
+  lr: 1.0e-3
+  weight_decay: 3.0e-2
+
+# Раздельные lr/weight_decay для частей модели. Все значения — МНОЖИТЕЛИ
+# от optimizer.lr и optimizer.weight_decay выше, поэтому перебор lr
+# (свипы, CLI-override) не ломает соотношение между группами.
+#
+# Зачем. Энкодер efficientnet_b0 приходит с ImageNet и уже умеет извлекать
+# признаки, а декодер и голова инициализированы случайно. При общем lr=1e-3
+# первые же эпохи затирают предобучение — то есть pretrained: true даёт
+# заметно меньше, чем мог бы. 0.1 — канонический множитель.
+#
+# no_decay_on_norm_and_bias убирает weight_decay=3e-2 с одномерных
+# параметров: gamma/beta BatchNorm и bias свёрток. Decay на gamma — это
+# систематическое подавление масштаба нормализации, чего никто не хотел.
+#
+# Проверить, что рычаг применился: в train.log печатается таблица групп,
+# а в ClearML на графике "lr" появляются отдельные серии encoder/decoder.
+param_groups:
+  encoder_lr_mult: 0.1              # энкодеру 1.0e-4 вместо 1.0e-3
+  no_decay_on_norm_and_bias: false
+  # Прочие рычаги (значения по умолчанию, оставлены явно для наглядности):
+  # encoder_weight_decay: null      # null — тот же wd, что у декодера
+  # criterion_lr_mult: 1.0          # lr обучаемых частей лосса
+  # criterion_weight_decay: 0.0     # адаптеры/проекторы лосса без decay
+  # encoder_prefixes: null          # префиксы имён вручную (для чужих моделей)
+
+scheduler:
+  warmup_epochs: 0
+  # eta_min — АБСОЛЮТНАЯ нижняя граница косинуса, общая для всех групп.
+  # Она обязана быть ниже самого маленького lr в param_groups (здесь это
+  # энкодер, 1.0e-4), иначе косинус будет не отжигать его, а РАЗГОНЯТЬ.
+  # Прежнее значение 3.0e-4 нарушало это условие и вдобавок оставляло
+  # обучение без фазы дообучения: lr заканчивался на трети от пикового.
+  eta_min: 1.0e-6
+
+data:
+  loader:
+    batch_size: 16
+    eval_batch_size: 10
+    num_workers: 16
+    pin_memory: true
+    persistent_workers: true
+
+model:
+  student:
+    variant: efficientnet_b0
+    pretrained: true
+    dropout: 0.1
+  teacher:
+    variant: b5
+    pretrained: cityscapes
+    checkpoint_path: null
+#  teacher_inference:
+#    scales: [1.0, 1.25]
+#    flip: true

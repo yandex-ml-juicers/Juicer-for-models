@@ -1,0 +1,22 @@
+# Mask2Former (arXiv:2112.01527) в роли замороженного учителя — только этот
+# слот, ученика/scratch из него не собрать (см. src/models/mask2former.py).
+#
+# Готовые чекпоинты facebook/mask2former-swin-{variant}-cityscapes-semantic
+# качаются автоматически с Hugging Face (как SegFormer pretrained: cityscapes)
+# в data/weights/huggingface. Своего checkpoint_path/этапа обучения не нужно.
+#
+# variant — цена за шаг дистилляции (учитель гоняется forward'ом каждый шаг
+# обучения ученика, не только на eval):
+#   tiny   47M   параметры Swin-Tiny
+#   small  69M   Swin-Small
+#   base  107M   Swin-Base, энкодер с ImageNet-21k
+#   large 216M   Swin-Large — заметно тяжелее, проверьте, что влезает по
+#                памяти/скорости на вашей GPU, прежде чем ставить длинный прогон
+_target_: src.models.factory.mask2former_for_segmentation
+variant: tiny
+
+num_classes: ${data.dataset.num_classes}
+pretrained: cityscapes
+align_corners: false
+
+weights_dir: data/weights

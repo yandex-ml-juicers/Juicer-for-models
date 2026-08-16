@@ -1,0 +1,113 @@
+# @package _global_
+# АБЛЯЦИЯ 3/4 (см. outputs/claude-analis/analysis.md): уменьшить разрыв
+# ёмкостей ещё сильнее, с обеих сторон сразу — учитель SegFormer-B1
+# (~13.7M, mIoU~0.7742 на eval, см. outputs/eval_teacher_b1) вместо B5
+# (~85M, ~0.8141), студент unet_tiny (timm_unet/mobilenetv2, 2.33M, тот же
+# студент, что в scratch/cityscapes_scratch_timm_unet_tiny_aug_lovasz.yaml,
+# ~0.72-0.72 mIoU) вместо unet_small (4.24M). B1 взят вместо B0 (B0
+# ~0.7444 mIoU, самый слабый и самый близкий по размеру к B1, но заметно
+# менее точный) — компромисс "учитель всё ещё ощутимо сильнее студента, но
+# заметно ближе по размеру, чем B5", а не самый маленький учитель вообще.
+#
+# Рецепт лосса/оптимизатора — тот же композит BPKD+Dice+Lovász, что в
+# АБЛЯЦИИ 2 и в исходном рецепте на unet_small — меняется только пара
+# учитель/студент. batch_size поднят (32): обе модели заметно легче
+# B5+unet_small, есть запас памяти.
+defaults:
+  - override /data/dataset: cityscapes_seg
+  - override /data/transform/train: cityscapes_seg_strong_transform_for_segmentation
+  - override /data/transform/eval: cityscapes_seg_transform
+  - override /model/teacher: segformer
+  - override /model/student: timm_unet
+  - override /loss: composite_base
+  - override /optimizer: adamw
+  - override /scheduler: warmup_cosine
+  - override /augment: cutmix_segmentation
+
+name: cityscapes_BPKD_segformer_b1_to_unet_tiny
+device: cuda
+deterministic: false
+
+task_type: "segmentation"
+
+clearml:
+  enabled: True
+  tags: [cityscapes, KD, BPKD, ablation, segformer-b1, unet-tiny, segmentation]
+  scalars: ['KL_divergence', 'agreement_rate', 'teacher_miou']
+  plots:
+    enabled: False
+    every_n_epochs: 10
+  reuse_last_task_id: False
+  continue_last_task: False
+  output_uri: false
+
+trainer:
+  epochs: 100
+  amp: true
+  grad_clip_norm: 10.0
+
+loss:
+  losses:
+    bpkd:
+      _target_: src.losses.BPKDLoss
+      temperature: 2.0
+      ce_weight: 0.0
+      edge_weight: 1.3
+      body_weight: 0.5
+      edge_width: 7
+      spatial_stride: 2
+    dice:
+      _target_: src.losses.DiceLoss
+      ce_weight: 1.5
+      dice_weight: 2.5
+    lovasz:
+      _target_: src.losses.LovaszSoftmax
+      ce_weight: 0.0
+      lovasz_weight: 3.5
+      pixel_stride: 2
+      label_smoothing: 0.05
+      ignore_index: ${data.dataset.ignore_index}
+
+  weights:
+    bpkd: 1.0
+    dice: 1.0
+    lovasz: 0.5
+
+loss_schedule:
+  weights.bpkd: {schedule: cosine, start: 1.0, end: 0.50, start_epoch: 90}
+  weights.dice: {schedule: cosine, start: 1.0, end: 0.50, start_epoch: 90}
+  weights.lovasz: {schedule: cosine, start: 0.5, end: 1.00, start_epoch: 80}
+
+optimizer:
+  lr: 2.0e-3
+  weight_decay: 3.0e-2
+
+# Раздельный lr энкодер/декодер (docs/param_groups.md): энкодер предобучен,
+# декодер/голова — с нуля, общий lr бил бы по предобучению в первые эпохи.
+# encoder_lr_mult=0.35 -> энкодеру lr в ~2.86 раза ниже optimizer.lr
+# (энкодер — большая доля весов модели, 0.2 было слишком консервативно).
+param_groups:
+  encoder_lr_mult: 0.35
+  no_decay_on_norm_and_bias: false
+
+scheduler:
+  warmup_epochs: 10
+  eta_min: 2.0e-6
+
+data:
+  loader:
+    batch_size: 20
+    eval_batch_size: 12
+    num_workers: 20
+    pin_memory: true
+    persistent_workers: true
+
+model:
+  student:
+    variant: mobilenetv2
+    pretrained: true
+    dropout: 0.1
+  teacher:
+    variant: b1
+    pretrained: cityscapes
+    checkpoint_path: null

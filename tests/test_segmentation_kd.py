@@ -9,7 +9,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from src.losses import ChannelWiseKD, DISTLoss, FitNetsKD, PixelWiseKD
+from src.losses import ChannelWiseKD, DISTLoss, DistillationOnlyLoss, FitNetsKD, PixelWiseKD
 from src.losses.segmentation_utils import subsample_spatially
 from src.models import (
     STAGE_TAPS,
@@ -100,6 +100,80 @@ class TestPixelWiseKD:
         student_logits, _, labels = batch
         with pytest.raises(ValueError, match="классов"):
             PixelWiseKD()(student_logits, torch.randn(2, NUM_CLASSES + 1, 8, 12), labels)
+
+
+class TestDistillationOnlyLoss:
+    """configs/experiment/segmentation/pretrain/ — прогрев ученика без
+    разметки. Главный инвариант — ровно тот, ради которого класс и заведён
+    отдельно от PixelWiseKD/HintonKD: labels может быть ЦЕЛИКОМ ignore_index
+    (ровно так устроена заглушка test-сплита Cityscapes) и это не должно
+    давать NaN — F.cross_entropy на пустом множестве валидных пикселей его
+    как раз даёт, а вес 0 не спасает, потому что 0*NaN=NaN."""
+
+    def test_matches_temperature_scaled_kl(self, batch):
+        student_logits, teacher_logits, labels = batch
+        temperature = 2.0
+        criterion = DistillationOnlyLoss(temperature=temperature)
+
+        result = criterion(student_logits, teacher_logits, labels)
+
+        log_student = F.log_softmax(student_logits / temperature, dim=1)
+        log_teacher = F.log_softmax(teacher_logits / temperature, dim=1)
+        expected = (
+            (log_teacher.exp() * (log_teacher - log_student)).sum(dim=1).mean() * temperature**2
+        )
+        assert torch.allclose(result["total"], expected, atol=1e-6)
+
+    def test_labels_are_never_touched(self, batch):
+        """Полностью void-маска (test-сплит Cityscapes) не должна портить
+        результат — лосс её не читает вовсе."""
+        student_logits, teacher_logits, labels = batch
+        all_ignored = torch.full_like(labels, IGNORE_INDEX)
+
+        criterion = DistillationOnlyLoss()
+        with_real_labels = criterion(student_logits, teacher_logits, labels)
+        with_void_labels = criterion(student_logits, teacher_logits, all_ignored)
+
+        assert torch.isfinite(with_void_labels["total"])
+        assert torch.allclose(with_void_labels["total"], with_real_labels["total"])
+
+    def test_none_teacher_raises(self, batch):
+        student_logits, _, labels = batch
+        with pytest.raises(TypeError, match="requires_teacher"):
+            DistillationOnlyLoss()(student_logits, None, labels)
+
+    def test_gradient_reaches_student(self, batch):
+        student_logits, teacher_logits, labels = batch
+        student_logits = student_logits.clone().requires_grad_(True)
+
+        loss = DistillationOnlyLoss()(student_logits, teacher_logits, labels)["total"]
+        loss.backward()
+
+        assert student_logits.grad is not None and student_logits.grad.abs().sum() > 0
+
+    def test_real_models_all_void_labels_optimizer_step(self):
+        """Сквозной прогон сценария configs/experiment/segmentation/pretrain/:
+        настоящий учитель/студент, настоящий шаг optimizer, маска ЦЕЛИКОМ
+        ignore_index (как у test-сплита Cityscapes) — total обязан остаться
+        конечным, а студент — получить ненулевой градиент."""
+        torch.manual_seed(0)
+        student = unet_for_segmentation(variant="tiny", num_classes=NUM_CLASSES)
+        teacher = SegFormer(variant="b0", num_classes=NUM_CLASSES, pretrained=None)
+        teacher.eval()
+        teacher.requires_grad_(False)
+
+        images = torch.randn(1, 3, 64, 96)
+        labels = torch.full((1, 64, 96), IGNORE_INDEX, dtype=torch.int64)
+
+        with torch.no_grad():
+            teacher_logits = teacher(images)
+
+        loss = DistillationOnlyLoss()(student(images), teacher_logits, labels)["total"]
+        loss.backward()
+
+        assert torch.isfinite(loss)
+        head_grad = student.head.weight.grad
+        assert head_grad is not None and head_grad.abs().sum() > 0
 
 
 class TestChannelWiseKD:
@@ -556,6 +630,7 @@ class TestAutocast:
             lambda: PixelWiseKD(ignore_index=IGNORE_INDEX),
             lambda: ChannelWiseKD(ignore_index=IGNORE_INDEX),
             lambda: DISTLoss(ignore_index=IGNORE_INDEX),
+            lambda: DistillationOnlyLoss(),
             lambda: FitNetsKD(
                 layers={
                     "taps.stage3": {
@@ -598,6 +673,7 @@ class TestOptimizationStep:
             lambda: PixelWiseKD(ignore_index=IGNORE_INDEX),
             lambda: ChannelWiseKD(ignore_index=IGNORE_INDEX),
             lambda: DISTLoss(ignore_index=IGNORE_INDEX),
+            lambda: DistillationOnlyLoss(),
             # U-Net-tiny даёт на stage3 (боттлнек, страйд 16) 16*16=256 каналов,
             # SegFormer-B0 — 160. Регрессор их и согласует.
             lambda: FitNetsKD(

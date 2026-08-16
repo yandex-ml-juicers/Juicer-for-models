@@ -17,8 +17,16 @@ from omegaconf import DictConfig, ListConfig, OmegaConf
 from torch import nn
 
 from src.data import base_loader
-from src.training import Trainer, DetectionTrainer, SegmentationTrainer
-from src.utils import distributed, seed_everything, prediction_postprocessor
+from src.models import ChunkedTeacher, MultiScaleInference, NativeResolutionTeacher
+from src.training import (
+    DetectionTrainer,
+    LossWeightScheduler,
+    SegmentationTrainer,
+    Trainer,
+    build_param_groups,
+    describe_param_groups,
+)
+from src.utils import distributed, resolve_device, seed_everything
 from src.utils.distributed import DistInfo
 from src.utils import resolve_device, seed_everything
 
@@ -49,6 +57,29 @@ def _normalize_stats(dataset_cfg: DictConfig):
     if normalize is None:
         return None
     return list(normalize.mean), list(normalize.std)
+
+
+def build_optimizer_params(cfg: DictConfig, student: nn.Module, criterion: nn.Module):
+    """Параметры для optimizer: плоский список (по умолчанию) или группы
+    с раздельным lr/weight_decay (cfg.param_groups, см. docs/param_groups.md).
+
+    Обучаемые параметры лосса (адаптеры FitNets, проекторы HeteroAKD) идут
+    вместе со студентом в обоих случаях — SegmentationTrainer/Trainer в
+    конструкторе проверяют, что КАЖДЫЙ параметр criterion попал в optimizer,
+    и падают, если нет (иначе адаптер тихо не обучался бы).
+    """
+    if not cfg.get("param_groups"):
+        return list(student.parameters()) + list(criterion.parameters())
+
+    groups = build_param_groups(
+        student,
+        criterion,
+        lr=cfg.optimizer.lr,
+        weight_decay=cfg.optimizer.get("weight_decay", 0.0),
+        **_plain(cfg.param_groups),
+    )
+    log.info("Группы параметров оптимизатора:\n%s", describe_param_groups(groups))
+    return groups
 
 
 def configure_rank_logging(dist: DistInfo) -> None:
@@ -100,11 +131,14 @@ def init_clearml(cfg: DictConfig, dist: DistInfo):
         return None
     from clearml import Task
 
-    # resume=true (пока — только detection, см. DetectionTrainer.load_checkpoint):
-    # без continue_last_task=True ClearML завёл бы новый таск, и график в UI
-    # разъехался бы на "до крэша" и "после" вместо одной линии.
+    # resume=true (detection и segmentation, см. DetectionTrainer.load_checkpoint /
+    # SegmentationTrainer.load_checkpoint): без continue_last_task=True ClearML
+    # завёл бы новый таск, и график в UI разъехался бы на "до крэша" и "после"
+    # вместо одной линии.
     continue_last_task = (
-        True if (cfg.resume and cfg.task_type == "detection") else cfg.clearml.continue_last_task
+        True
+        if (cfg.resume and cfg.task_type in ("detection", "segmentation"))
+        else cfg.clearml.continue_last_task
     )
 
     task = Task.init(
@@ -117,6 +151,7 @@ def init_clearml(cfg: DictConfig, dist: DistInfo):
         output_uri=cfg.clearml.output_uri,                     # складывать ли артефакты/модели и если куда-то базово, то url
         auto_connect_frameworks=_plain(cfg.clearml.auto_connect_frameworks), # авто-перехват фреймворков
         auto_connect_arg_parser=cfg.clearml.auto_connect_arg_parser, # авто-перехват аргументов из argparse
+        auto_resource_monitoring=cfg.clearml.auto_resource_monitoring, # графики :monitor:gpu/:monitor:machine
     )
 
     # Полный разрешённый конфиг — в Configuration objects задачи.
@@ -197,7 +232,35 @@ def clearml_reporter(task):
             # Логируем все отдельные компоненты лосса (например: train_loss_ce, train_loss_kd)
             if key.startswith("train_loss_") and key != "train_loss_total":
                 series_name = key.removeprefix("train_loss_")
-                _safe_report("loss_components", series_name, value)
+                # Вклады слагаемых композиции — то же, что компоненты, но
+                # домноженное на веса (loss_contributions) и отнормированное
+                # к единице (loss_shares). Именно по ним подбираются веса:
+                # в loss_components лежат СЫРЫЕ значения, на которые вес
+                # не влияет, и по ним не видно, кто тянет сумму.
+                if series_name.endswith("_weighted"):
+                    _safe_report(
+                        "loss_contributions", series_name.removesuffix("_weighted"), value
+                    )
+                elif series_name.endswith("_share"):
+                    _safe_report("loss_shares", series_name.removesuffix("_share"), value)
+                else:
+                    _safe_report("loss_components", series_name, value)
+            # Веса слагаемых, если они меняются по расписанию: без этого
+            # графика падение дистилляционного члена не отличить от того,
+            # что ученик догнал учителя.
+            elif key.startswith("loss_weight_"):
+                _safe_report("loss_weights", key.removeprefix("loss_weight_"), value)
+
+        # 7a. Вклад компонентов лосса в градиент (только detection, только если
+        # включён clearml.plots.grad_contrib_every_n_steps — см.
+        # GradientContributionTracker). gradnorm — абсолютная норма ‖∂L_i/∂θ‖
+        # компонента ДО умножения на λ (сравнима 1-в-1 с loss_components выше),
+        # gradshare — её доля среди всех компонентов в %, сумма долей = 100.
+        for key, value in row.items():
+            if key.startswith("train_gradnorm_"):
+                _safe_report("grad_contribution", key.removeprefix("train_gradnorm_"), value)
+            elif key.startswith("train_gradshare_"):
+                _safe_report("grad_contribution_share_pct", key.removeprefix("train_gradshare_"), value)
 
         # 7a. Вклад компонентов лосса в градиент (только detection, только если
         # включён clearml.plots.grad_contrib_every_n_steps — см.
@@ -254,6 +317,18 @@ def clearml_reporter(task):
             "eval_miou": ("segmentation_metrics", "eval_mIoU"),
             "train_pixel_acc": ("pixel_accuracy", "train"),
             "eval_pixel_acc": ("pixel_accuracy", "eval"),
+            # Диагностика дистилляции — собственное качество учителя, а не
+            # схожесть с ним. Два независимых флага в clearml.scalars:
+            # train_teacher_mIoU (флаг "teacher_miou") — по эпохам, учитель на
+            # тех же кропах/масштабе/аугментациях, что ПРЯМО СЕЙЧАС видит
+            # ученик; teacher_native_mIoU (отдельный флаг "teacher_native_miou")
+            # — плоская линия-ориентир, учитель на eval_loader (родное
+            # разрешение, без кропа) — не включена по умолчанию вместе с
+            # первой, т.к. не меняется по эпохам и обычно и так известна.
+            # Разница между ними — прямая проверка гипотезы про разрешение
+            # учителя при дистилляции.
+            "train_teacher_miou": ("segmentation_metrics", "train_teacher_mIoU"),
+            "teacher_native_miou": ("segmentation_metrics", "teacher_native_mIoU"),
         }
         for key, (title, series_name) in segmentation_metrics.items():
             if key in row:
@@ -393,6 +468,37 @@ def main(cfg: DictConfig) -> float:
             teacher = None
             if cfg.model.get("teacher") is not None:
                 teacher = instantiate(cfg.model.teacher).to(device)
+                # Учителя апсемплим до разрешения, на котором его мерили/
+                # дообучали (см. src/models/native_resolution_teacher.py) —
+                # ПЕРЕД мультимасштабным прогоном, если оба заданы: тогда
+                # каждый масштаб MultiScaleInference берётся уже от родного
+                # разрешения, а не от кропа студента.
+                teacher_native_resolution = _plain(cfg.model.get("teacher_native_resolution"))
+                if teacher_native_resolution:
+                    teacher = NativeResolutionTeacher(teacher, **teacher_native_resolution)
+                    log.info(
+                        "Учитель апсемплится до родного разрешения: %s", teacher_native_resolution
+                    )
+                # Мультимасштабный прогон учителя: несколько forward'ов вместо
+                # одного, зато таргет заметно чище (см. src/models/multi_scale.py).
+                teacher_inference = _plain(cfg.model.get("teacher_inference"))
+                if teacher_inference:
+                    teacher = MultiScaleInference(teacher, **teacher_inference)
+                    log.info("Учитель считает таргеты мультимасштабно: %s", teacher_inference)
+                # Режем батч учителя на куски ПОСЛЕДНИМ (снаружи всех
+                # обёрток выше) — учитель без градиентов, чанкинг ничего не
+                # меняет в результате (см. src/models/chunked_teacher.py),
+                # только развязывает batch_size, под который тюнились lr и
+                # расписание оптимизатора, от памяти/лимитов CUDA-ядер на
+                # ОДИН forward тяжёлого учителя (особенно актуально вместе с
+                # teacher_native_resolution — апсемпленный батч целиком легко
+                # не помещается).
+                teacher_micro_batch_size = cfg.model.get("teacher_micro_batch_size")
+                if teacher_micro_batch_size:
+                    teacher = ChunkedTeacher(teacher, micro_batch_size=teacher_micro_batch_size)
+                    log.info(
+                        "Учитель считается кусками батча по %s", teacher_micro_batch_size
+                    )
             criterion = instantiate(cfg.loss).to(device)
 
         # заменяем слои BatchNorm до сборки optimizer
@@ -401,12 +507,30 @@ def main(cfg: DictConfig) -> float:
             log.info("BatchNorm заменён на SyncBatchNorm")
 
         # Обучаемые параметры лосса (адаптеры feature-KD) оптимизируются вместе с учеником.
+        # lwdetr_adamw группирует параметры по имени (backbone/decoder/...,
+        # см. src/optimizers/lwdetr_optimizer.py), поэтому ему нужны (name, param),
+        # а не build_param_groups — тот отдаёт голые nn.Parameter/группы-словари.
         if cfg.task_type == "detection" and cfg.data.dataset.targets_format_mode == "lw-detr-small":
             params = (
                 list(student.named_parameters())
                 + [(f"criterion.{name}", param) for name, param in criterion.named_parameters()]
             )
         else:
+            params = build_optimizer_params(cfg, student, criterion)
+
+        optimizer = instantiate(cfg.optimizer)(params)
+        scheduler = instantiate(cfg.scheduler)(optimizer) if cfg.get("scheduler") is not None else None
+
+        # Расписание весов слагаемых лосса. Строится до тренера: там criterion
+        # уже может уехать под DDP-обёртку, а планировщику нужен сам модуль.
+        loss_schedule = None
+        if cfg.get("loss_schedule"):
+            if cfg.task_type == "detection":
+                raise ValueError("loss_schedule пока поддержан только для классификации и сегментации")
+            loss_schedule = LossWeightScheduler(
+                criterion, _plain(cfg.loss_schedule), total_epochs=cfg.trainer.epochs
+            )
+
             params = list(student.parameters()) + list(criterion.parameters())
 
         optimizer = instantiate(cfg.optimizer)(params)  
@@ -434,6 +558,7 @@ def main(cfg: DictConfig) -> float:
                 num_classes=cfg.data.dataset.num_classes,
                 scalars=cfg.clearml.scalars,
                 batch_augment=batch_augment,
+                loss_schedule=loss_schedule,
                 **cfg.trainer,
             )
         elif cfg.task_type == "detection":
@@ -489,6 +614,7 @@ def main(cfg: DictConfig) -> float:
                 scalars=cfg.clearml.scalars,
                 ignore_index=cfg.data.dataset.ignore_index,
                 batch_augment=batch_augment,
+                loss_schedule=loss_schedule,
                 plots=_plain(cfg.clearml.get("plots")),
                 # Имена классов подписывают столбики per-class графиков и оси
                 # матрицы ошибок; без них останутся индексы 0..18.
@@ -499,6 +625,16 @@ def main(cfg: DictConfig) -> float:
                 normalize=_normalize_stats(cfg.data.dataset),
                 **cfg.trainer,
             )
+            if cfg.resume:
+                checkpoint_path = output_dir / "last.pt"
+                if checkpoint_path.exists():
+                    trainer.load_checkpoint(checkpoint_path)
+                    log.info(
+                        "Продолжаем с чекпоинта %s: эпоха %d, лучший mIoU=%.4f",
+                        checkpoint_path, trainer.start_epoch - 1, trainer.best_miou,
+                    )
+                else:
+                    log.warning("resume=true, но %s не найден — стартуем с нуля.", checkpoint_path)
         else:
             # Недостижимо, пока task_type проверяется в начале main(). Нужно
             # на случай, когда новую задачу добавят в BEST_METRIC_KEY, а ветку

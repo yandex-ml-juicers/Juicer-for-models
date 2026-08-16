@@ -1,0 +1,120 @@
+# @package _global_
+# Тот же FitNets SegFormer-B2 -> timm-U-Net(efficientnet_b0), что и в
+# cityscapes_FitNets_segformer_b2_to_unet_small, но со всеми рычагами,
+# которые бьют по слабым местам этой пары:
+#
+#   1. лосс-композиция: hint + KD по логитам + (CE, Dice, OHEM) вместо
+#      одной CE. Dice и OHEM тянут редкие классы и трудные пиксели —
+#      именно там, где ученик проседает по per-class IoU;
+#   2. учитель не видит blur/erasing (teacher_skips в train-трансформе),
+#      поэтому регуляризацию можно держать включённой, не портя таргеты;
+#   3. таргеты учителя считаются мультимасштабно;
+#   4. дистилляционные слагаемые гаснут к концу обучения.
+#
+# Сравнивать имеет смысл с cityscapes_FitNets_segformer_b2_to_unet_small:
+# всё остальное (оптимизатор, расписание, батч, число эпох) совпадает.
+defaults:
+  - override /data/dataset: cityscapes_seg
+  - override /data/transform/train: cityscapes_seg_strong_transform_for_segmentation
+  - override /data/transform/eval: cityscapes_seg_transform
+  - override /model/teacher: segformer
+  - override /model/student: timm_unet
+  - override /loss: composite_base
+  - override /optimizer: adamw
+  - override /scheduler: warmup_cosine
+  - override /augment: cutmix_segmentation
+
+name: cityscapes_FitNets_dice_ohem_segformer_b5_to_unet_small
+device: cuda
+deterministic: false
+
+task_type: "segmentation"
+
+clearml:
+  enabled: True
+  tags: [cityscapes, KD, FitNets, Dice, OHEM, segformer-b2, unet-small, segmentation]
+  scalars: ['KL_divergence', 'agreement_rate']
+  plots:
+    enabled: true
+    every_n_epochs: 10
+  reuse_last_task_id: false
+  continue_last_task: False
+  output_uri: false
+
+trainer:
+  epochs: 100
+  amp: true
+  grad_clip_norm: 2.5
+
+# Композиция. Попиксельную классификацию берёт на себя ровно одно
+# слагаемое — OHEM (это и есть CE, только по трудным пикселям), поэтому
+# у kd и seg ce_weight обнулён. Dice остаётся чистым региональным членом.
+# Веса weights.* — то, что гасит планировщик ниже.
+loss:
+  losses:
+    fitnets:
+      _target_: src.losses.FitNetsKD
+      ce_weight: 0.0
+      hint_weight: 1.75
+      logits_weight: 0.9
+      temperature: 1.0
+      layers:
+        taps.stage3: { student_channels: 112, teacher_channels: 320, weight: 0.6 }
+        taps.stage4: { student_channels: 320, teacher_channels: 512, weight: 0.2 }  
+    dice:
+      _target_: src.losses.DiceLoss
+      ce_weight: 0.0
+      dice_weight: 3.5
+    ohem:
+      _target_: src.losses.OhemCrossEntropy
+      thresh: 0.7
+      keep_ratio: 0.1
+      ignore_index: ${data.dataset.ignore_index}
+    lovasz:
+      _target_: src.losses.LovaszSoftmax
+      ce_weight: 0.0
+      lovasz_weight: 3.5
+      pixel_stride: 2
+      label_smoothing: 0.05
+      ignore_index: ${data.dataset.ignore_index}
+
+  weights:
+    fitnets: 0.75
+    dice: 0.1
+    ohem: 0.45
+    lovasz: 0.1
+
+loss_schedule:
+  weights.fitnets: {schedule: cosine, start: 1.0, end: 0.25, start_epoch: 75}
+  weights.dice: {schedule: cosine, start: 0.1, end: 0.3, start_epoch: 60}
+  weights.ohem: {schedule: cosine, start: 0.45, end: 0.1, start_epoch: 75}
+  weights.lovasz: {schedule: cosine, start: 0.1, end: 0.75, start_epoch: 75}
+
+optimizer:
+  lr: 1.0e-3
+  weight_decay: 3.0e-2
+
+scheduler:
+  warmup_epochs: 20
+  eta_min: 3.0e-4
+
+data:
+  loader:
+    batch_size: 16
+    eval_batch_size: 10
+    num_workers: 16
+    pin_memory: true
+    persistent_workers: true
+
+model:
+  student:
+    variant: efficientnet_b0
+    pretrained: true
+    dropout: 0.1
+  teacher:
+    variant: b5
+    pretrained: cityscapes
+    checkpoint_path: null
+#  teacher_inference:
+#    scales: [1.0, 1.25]
+#    flip: true
