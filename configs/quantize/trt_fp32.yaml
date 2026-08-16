@@ -1,0 +1,19 @@
+# Базовый TensorRT-движок без fp16.
+#
+# Нужен, чтобы разделить два эффекта: сколько дал сам TensorRT (слияние
+# слоёв, выбор ядер, отсутствие оверхеда python) и сколько — понижение
+# точности. Без этой строки в таблице весь выигрыш припишется fp16.
+#
+#   python scripts/quantize.py experiment=<...> ckpt_path=<...> quantize=trt_fp32
+defaults:
+  - base
+  - _self_
+
+backend: tensorrt
+precision: fp32
+
+validate:
+  # Движок fp32 обязан совпадать с torch fp32 практически бит в бит:
+  # расхождение здесь означает проблему экспорта или сборки, а не точности.
+  min_agreement: 0.999
+  max_metric_drop: 0.001

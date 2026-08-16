@@ -1,0 +1,16 @@
+# PTQ fp32 -> fp16 через TensorRT — основной рецепт.
+#
+# Флаг FP16 не переводит граф в fp16 целиком: он разрешает билдеру выбирать
+# fp16-тактики, и движок получается смешанным. Сколько слоёв реально ушло в
+# fp16 — в meta["layer_precisions"] рядом с движком.
+#
+#   python scripts/quantize.py experiment=<...> ckpt_path=<...> quantize=trt_fp16
+#
+# Требует GPU и tensorrt на машине. Волатильность железа: движок непереносим,
+# путь до него содержит hardware_tag (карта + sm + версии TRT/CUDA).
+defaults:
+  - base
+  - _self_
+
+backend: tensorrt
+precision: fp16

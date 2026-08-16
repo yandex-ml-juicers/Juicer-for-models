@@ -1,0 +1,71 @@
+# Общая часть всех рецептов квантизации. Сама по себе не выбирается:
+# quantize=base соберётся, но соберёт fp32-эталон без движка.
+#
+# Ключи 1:1 соответствуют аргументам функций в src/quantization/.
+
+# Список стадий оркестратора. calibrate — no-op для fp16, стоит в списке
+# заранее: под int8 в него встанет сбор статистик, и порядок менять не придётся.
+stages: [export, calibrate, build, validate, benchmark]
+
+# Пропускать стадию, если её артефакт уже лежит на месте и собран из того же
+# исходника (сверяется по sha256 в паспорте). Пересборка движка — это минуты.
+reuse: true
+
+# Откуда берутся веса и архитектура.
+#   source_run: папка обучающего запуска — из её .hydra/config.yaml берутся
+#               model/data. Самый честный вариант: конфиг эксперимента в
+#               configs/ мог уехать вперёд с момента обучения.
+#   null      : архитектура берётся из текущего конфига (experiment=...),
+#               веса — из ckpt_path в корне конфига.
+source_run: null
+
+# Куда складывать тяжёлые артефакты. Папка запуска Hydra остаётся для логов
+# и отчётов, .onnx и .engine переиспользуются между запусками.
+artifacts_dir: data/deploy
+# Идентификатор модели = имя подпапки в artifacts_dir. По умолчанию — имя запуска.
+model_id: ${name}
+
+# Бэкенд, на котором считается КАНДИДАТ (эталон всегда torch fp32).
+backend: torch          # torch | onnxruntime | tensorrt
+precision: fp16         # fp32 | fp16
+# Провайдеры onnxruntime. null — CPUExecutionProvider. Задавать явно:
+# при недоступном провайдере ORT молча уходит на CPU, и "замер GPU"
+# оказывается замером CPU без единого предупреждения.
+providers: null
+
+export:
+  opset: 18             # < 18 несовместим с dynamo-экспортером
+  dynamo: true          # false — легаси TorchScript-путь
+  optimize: true
+  external_data: null   # null — решить по размеру весов (один файл, пока влезает)
+  parity_atol: 1.0e-4   # L0: допуск расхождения torch и onnxruntime
+  # Откуда взять образец входа для трассировки:
+  #   loader — первый батч eval-лоадера (реальные данные, реальные формы)
+  #   random — шум по data.dataset.image_size
+  sample_source: loader
+  batch_size: 8         # размер образца; он же opt-точка профиля TensorRT
+  # Динамические оси входа. Пустой список — полностью статический вход
+  # (быстрее всего в TensorRT). Батч почти всегда стоит оставить динамическим:
+  # иначе на каждый размер батча нужен свой движок.
+  dynamic_axes:
+    - {axis: 0, name: batch, min: 1, max: 64}
+
+build:
+  workspace_gb: 2       # лимит рабочей памяти билдера; карта общая
+  timing_cache: true    # кэш замеров тактик: быстрее и стабильнее пересборка
+  opt_batch: null       # null — оптимизировать под максимум профиля
+  verbose: false        # true поднимает INFO-поток TensorRT в лог
+
+validate:
+  compare_batches: 20   # L1: сколько батчей сравнивать с fp32
+  limit_eval_batches: null  # L2: null — вся eval-выборка
+  max_metric_drop: 0.005    # допустимая потеря accuracy/mIoU в долях (0.005 = 0.5 п.п.)
+  min_agreement: 0.99       # минимальная доля совпавших с fp32 предсказаний
+  strict: true          # true — ненулевой код возврата, если приёмка не прошла
+
+benchmark:
+  batch_sizes: [1, 8, 32]
+  warmup: 50
+  iters: 200
+  modes: [compute, e2e] # compute — только карта; e2e — с копированием с хоста
+  baseline: torch_fp32  # относительно чего считать ускорение

@@ -1,0 +1,8 @@
+defaults:
+  - base
+  - _self_
+
+stages: [validate, benchmark]
+
+backend: torch
+precision: fp16
