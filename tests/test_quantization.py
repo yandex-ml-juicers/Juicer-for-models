@@ -189,6 +189,31 @@ def test_evaluate_runner_rejects_detection(model, loader):
         evaluate_runner(runner, loader, torch.device("cpu"), task_type="detection")
 
 
+def test_kl_is_per_position_and_comparable_across_tasks():
+    """У сегментации на кадр миллионы пикселей — KL обязан быть на позицию.
+
+    Иначе метрика превращается в сумму по пикселям (в реальном прогоне выходило
+    2.5e3 вместо долей нáта) и не сравнима ни с классификацией, ни между
+    разрешениями.
+    """
+    from src.quantization.numerics import kl_divergence
+
+    torch.manual_seed(0)
+    logits = torch.randn(2, 19)
+    shifted = logits + torch.randn(2, 19) * 0.01
+
+    flat = kl_divergence(logits, shifted)
+    # Тот же тензор, разложенный по 64x64 пикселям: KL на позицию не меняется.
+    spatial = kl_divergence(
+        logits[:, :, None, None].expand(2, 19, 64, 64).contiguous(),
+        shifted[:, :, None, None].expand(2, 19, 64, 64).contiguous(),
+    )
+    # Допуск на порядок суммирования: 64*64 одинаковых слагаемых во float32
+    # дают доли процента расхождения. Без нормировки разница была бы в 4096 раз.
+    assert spatial == pytest.approx(flat, rel=1e-2)
+    assert 0 < flat < 1
+
+
 def test_tensor_diff_sees_shifted_logits():
     reference = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
     metrics = tensor_diff(reference, reference + 0.5)

@@ -38,12 +38,21 @@ def tensor_diff(reference: Tensor, candidate: Tensor) -> dict[str, float]:
 
 
 def kl_divergence(reference: Tensor, candidate: Tensor) -> float:
+    """KL(fp32 || fp16) в натах НА ОДНУ ПОЗИЦИЮ.
+
+    Нормировка на число позиций, а не на батч: у сегментации на кадр
+    приходится два миллиона пикселей, и `reduction="batchmean"` превращал бы
+    метрику в сумму по ним — числа порядка тысяч, ничего не значащие и
+    несравнимые с классификацией. Для классификации (тензор [B, C]) позиция
+    одна на объект, поэтому там значение не меняется.
+    """
     reference = reference.detach().float()
     candidate = candidate.detach().float().to(reference.device)
 
     log_reference = F.log_softmax(reference, dim=1)
     log_candidate = F.log_softmax(candidate, dim=1)
-    return F.kl_div(log_candidate, log_reference, log_target=True, reduction="batchmean").item()
+    per_position = (log_reference.exp() * (log_reference - log_candidate)).sum(dim=1)
+    return per_position.mean().item()
 
 
 @torch.no_grad()
