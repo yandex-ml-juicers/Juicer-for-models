@@ -46,6 +46,53 @@ def get_normalize_stats(cfg: DictConfig | Any) -> tuple | None:
     return None
 
 
+def find_training_snapshot(cfg: DictConfig) -> Path | None:
+    """Снапшот конфига того запуска, которым обучены веса.
+
+    Ищем в двух местах: явный `quantize.source_run` и — если его нет — рядом
+    с чекпоинтом. Второе важнее первого: `.hydra/config.yaml` лежит в той же
+    папке, что и `best.pt`, то есть доступен ВСЕГДА, даже когда пайплайн
+    запущен через `experiment=`. Именно так ловится расхождение нормировки,
+    которое иначе выглядит как необъяснимая просадка метрики.
+    """
+    if cfg.quantize.source_run:
+        path = Path(to_absolute_path(cfg.quantize.source_run)) / ".hydra" / "config.yaml"
+        if not path.is_file():
+            raise FileNotFoundError(
+                f"Снапшот конфига не найден: {path}. source_run должен указывать "
+                f"на папку запуска обучения (в ней лежит .hydra/config.yaml)."
+            )
+        return path
+
+    if cfg.ckpt_path is None:
+        return None
+    path = Path(to_absolute_path(cfg.ckpt_path)).parent / ".hydra" / "config.yaml"
+    return path if path.is_file() else None
+
+
+def warn_on_normalize_drift(cfg: DictConfig, snapshot: DictConfig | Any) -> None:
+    """Сверяет нормировку входа с той, на которой модель обучалась.
+
+    Расхождение бьёт по метрике на единицы процентов и при этом никак себя не
+    проявляет: ошибки нет, модель считает, числа просто хуже. На сравнение
+    fp32 с fp16 не влияет (вход у обоих один), но абсолютную метрику делает
+    непригодной для отчёта.
+    """
+    current = get_normalize_stats(cfg)
+    trained = get_normalize_stats(snapshot)
+    if not current or not trained or current == trained:
+        return
+
+    log.warning(
+        "Нормировка входа разошлась с обучением!\n"
+        "  обучали:    mean=%s std=%s\n"
+        "  валидируем: mean=%s std=%s\n"
+        "Абсолютная метрика будет занижена, и fp16 тут ни при чём. Сравнение "
+        "fp32 с fp16 при этом корректно: вход у обоих одинаковый.",
+        trained[0], trained[1], current[0], current[1],
+    )
+
+
 def build_student(cfg: DictConfig) -> torch.nn.Module:
     """Собирает ученика и грузит в него веса
 
@@ -53,27 +100,14 @@ def build_student(cfg: DictConfig) -> torch.nn.Module:
     (если  задан 'quantize.source_run) или из текущего configs/
     """
     model_cfg = cfg.model.student
+    snapshot_path = find_training_snapshot(cfg)
 
-    if cfg.quantize.source_run:
-        snapshot_path = Path(to_absolute_path(cfg.quantize.source_run)) / ".hydra" / "config.yaml"
-        if not snapshot_path.is_file():
-            raise FileNotFoundError(
-                f"Снапшот конфига не найден: {snapshot_path}. source_run должен указывать "
-                f"на папку запуска обучения (в ней лежит .hydra/config.yaml)."
-            )
+    if snapshot_path is not None:
         snapshot = OmegaConf.load(snapshot_path)
-        model_cfg = snapshot.model.student
-        log.info("Архитектура ученика взята из снапшота %s", snapshot_path)
-
-        current = get_normalize_stats(cfg)
-        trained = get_normalize_stats(snapshot)
-        if current and trained and current != trained:
-            log.warning(
-                "Нормировка входа разошлась: обучали с %s, валидируем на %s. "
-                "Метрика после квантизации будет занижена, проблема не в fp16.",
-                trained,
-                current,
-            )
+        warn_on_normalize_drift(cfg, snapshot)
+        if cfg.quantize.source_run:
+            model_cfg = snapshot.model.student
+            log.info("Архитектура ученика взята из снапшота %s", snapshot_path)
 
     try:
         student = instantiate(model_cfg)
@@ -135,20 +169,26 @@ def check_batch_fits_profile(cfg: DictConfig) -> None:
         return
 
     axes = get_dynamic_axes(cfg)
-    if 0 not in axes:
-        return
+    if 0 in axes:
+        _, low, high = axes[0]
+    else:
+        # Батч не объявлен динамическим — движок примет ровно тот размер, с
+        # которым экспортировали. Для сегментации в полном разрешении это
+        # нормальный режим, и промахнуться тут даже легче, чем с профилем.
+        low = high = int(cfg.quantize.export.batch_size)
 
     loader = cfg.data.loader
     batch = int(loader.eval_batch_size or loader.batch_size)
-    _, low, high = axes[0]
     if low <= batch <= high:
         return
 
+    allowed = f"[{low}, {high}]" if low != high else f"ровно {low} (вход статический)"
     raise ValueError(
-        f"Батч валидации {batch} вне профиля движка [{low}, {high}]. Либо уменьши батч:\n"
+        f"Батч валидации {batch} не подходит движку: он принимает {allowed}. "
+        f"Либо приведи батч в соответствие:\n"
         f"  data.loader.eval_batch_size={high}\n"
-        f"либо расширь профиль (и пересобери движок):\n"
-        f"  'quantize.export.dynamic_axes=[{{axis:0,name:batch,min:{low},max:{batch}}}]' "
+        f"либо расширь профиль и пересобери движок:\n"
+        f"  'quantize.export.dynamic_axes=[{{axis:0,name:batch,min:1,max:{batch}}}]' "
         f"quantize.reuse=false\n"
         f"Первое обычно правильнее: профиль описывает то, как модель поедет в прод, "
         f"а батч лоадера — как удобнее считать метрику."

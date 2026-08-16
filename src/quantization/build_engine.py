@@ -207,18 +207,7 @@ def _parse_onnx(trt: Any, network: Any, logger: Any, onnx_path: Path) -> None:
 
 
 def layer_precision(layer: dict) -> str:
-    """В какой точности собран слой, по отчёту EngineInspector.
-
-    Поля `Precision` у слоя нет — в отчёте TensorRT 10 точность видна по типу
-    весов (`Weights.Type`: Half / Float / Int8). Это и есть прямой ответ на
-    вопрос стадии fp16: какие слои реально считаются в половинной точности.
-
-    Форматы тензоров (`Format/Datatype`) годятся только для статических форм —
-    при динамическом батче там честное "N/A due to dynamic shapes".
-
-    Слои без весов (Reformat, Pooling, Concat) точности не имеют вовсе:
-    у них она определяется соседями, и считать их вместе со свёртками нельзя.
-    """
+    """В какой точности собран слой, по отчёту EngineInspector"""
     weights = layer.get("Weights")
     if isinstance(weights, dict) and weights.get("Type"):
         return str(weights["Type"])

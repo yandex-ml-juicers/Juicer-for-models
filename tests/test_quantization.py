@@ -21,7 +21,7 @@ from src.quantization.export import export_onnx
 from src.quantization.numerics import compare_runners, evaluate_runner, tensor_diff
 from src.quantization.report import check_acceptance
 
-RECIPES = ["base", "trt_fp16", "trt_fp32", "torch_fp16", "ort_cpu", "ort_cuda"]
+RECIPES = ["base", "trt_fp16", "trt_fp32", "trt_fp16_seg", "torch_fp16", "ort_cpu", "ort_cuda"]
 
 
 class TinyNet(nn.Module):
@@ -247,6 +247,32 @@ def test_strongly_typed_tensorrt_accepts_fp16_graph():
     assert _network_flags(_FakeTensorRT(has_fp16_flag=True), "fp16") == 1 << 0
 
 
+def test_normalize_drift_is_reported(caplog):
+    """Обучали с одной нормировкой, валидируем с другой — метрика молча просядет."""
+    import logging
+
+    from omegaconf import OmegaConf
+
+    from scripts.quantize import warn_on_normalize_drift
+
+    trained = OmegaConf.create(
+        {"data": {"normalize": {"mean": [0.4914, 0.4822, 0.4465], "std": [0.247, 0.2435, 0.2616]}}}
+    )
+    current = OmegaConf.create(
+        {"data": {"dataset": {"normalize": {"mean": [0.485, 0.456, 0.406],
+                                            "std": [0.229, 0.224, 0.225]}}}}
+    )
+
+    with caplog.at_level(logging.WARNING):
+        warn_on_normalize_drift(current, trained)
+    assert "Нормировка входа разошлась" in caplog.text
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        warn_on_normalize_drift(trained, trained)
+    assert caplog.text == ""
+
+
 def test_layer_precision_reads_weight_type():
     """Схема EngineInspector в TRT 10: точность видна по типу весов слоя."""
     from src.quantization.build_engine import layer_precision
@@ -279,10 +305,30 @@ def test_batch_outside_engine_profile_is_caught_before_the_dataset(tmp_path):
         )
 
     cfg.data.loader.eval_batch_size = 256          # профиль по умолчанию 1..64
-    with pytest.raises(ValueError, match="вне профиля движка"):
+    with pytest.raises(ValueError, match=r"принимает \[1, 64\]"):
         check_batch_fits_profile(cfg)
 
     cfg.data.loader.eval_batch_size = 64
+    assert check_batch_fits_profile(cfg) is None
+
+
+def test_static_input_requires_exact_batch():
+    """У сегментации в полном разрешении вход статический — батч обязан совпасть."""
+    from scripts.quantize import check_batch_fits_profile
+
+    with initialize(version_base="1.3", config_path="../configs"):
+        cfg = compose(
+            config_name="config",
+            overrides=["quantize=trt_fp16_seg", "data/dataset=fake_cifar10"],
+        )
+
+    assert not cfg.quantize.export.dynamic_axes, "у сегментационного рецепта вход статический"
+
+    cfg.data.loader.eval_batch_size = 4
+    with pytest.raises(ValueError, match="ровно 1"):
+        check_batch_fits_profile(cfg)
+
+    cfg.data.loader.eval_batch_size = 1
     assert check_batch_fits_profile(cfg) is None
 
 
