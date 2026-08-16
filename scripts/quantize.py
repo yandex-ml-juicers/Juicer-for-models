@@ -239,6 +239,14 @@ def stage_export(cfg, student, get_loader, device, onnx_path, manifest, report) 
             return {"path": str(onnx_path), "reused": True}
         log.info("export: артефакт есть, но веса другие")
 
+    verify = bool(settings.get("verify", True))
+    if not verify:
+        log.warning(
+            "L0-проверка экспорта выключена (quantize.export.verify=false). Расхождение "
+            "движка с моделью теперь не с чем сопоставить: поломка экспорта и эффект "
+            "точности станут неразличимы."
+        )
+
     result = export_onnx(
         student.to("cpu"),
         sample=take_sample(cfg, get_loader, torch.device("cpu")),
@@ -248,6 +256,7 @@ def stage_export(cfg, student, get_loader, device, onnx_path, manifest, report) 
         dynamic_axes=get_dynamic_axes(cfg),
         external_data=settings.external_data,
         optimize=bool(settings.optimize),
+        verify=verify,
         parity_atol=float(settings.parity_atol),
     )
     student.to(device)
