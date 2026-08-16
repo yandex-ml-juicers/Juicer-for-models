@@ -215,18 +215,26 @@ def export_onnx(
         )
 
         if dynamo:
-            torch.onnx.export(
-                model,
-                (sample,),
-                str(output_path),
-                dynamo=dynamo,
-                external_data=external_data,
-                optimize=optimize,
-                opset_version=opset,
-                input_names=[input_name],
-                output_names=[output_name],
-                dynamic_shapes=_dynamo_dynamic_shapes(spec) if spec else None,
-            )
+            try:
+                torch.onnx.export(
+                    model,
+                    (sample,),
+                    str(output_path),
+                    dynamo=dynamo,
+                    external_data=external_data,
+                    optimize=optimize,
+                    opset_version=opset,
+                    input_names=[input_name],
+                    output_names=[output_name],
+                    dynamic_shapes=_dynamo_dynamic_shapes(spec) if spec else None,
+                )
+            except ModuleNotFoundError as error:
+                raise ModuleNotFoundError(
+                    f"dynamo-экспортеру нужен пакет {error.name!r}, а он не установлен: "
+                    f"pip install -e '.[deploy]' (или pip install onnxscript). "
+                    f"Запасной путь без него — легаси-экспортер: "
+                    f"quantize.export.dynamo=false quantize.export.opset=17"
+                ) from error
         else:
             torch.onnx.export(
                 model,

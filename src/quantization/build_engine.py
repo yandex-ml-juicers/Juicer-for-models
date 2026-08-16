@@ -27,7 +27,7 @@ class BuildResult:
     meta: dict
 
 
-def hardware_tag(device: int = 0) -> str:
+def hardware_tag(device: int | None = None) -> str:
     """Метка железа и тулчейна, например: `Tesla-V100-PCIE-32GB_sm70_trt10.7.0_cu126`.
     Должны собираться под конкретное железо, версию TRT"""
     if not torch.cuda.is_available():
@@ -36,6 +36,9 @@ def hardware_tag(device: int = 0) -> str:
             "замерами на том железе, под которое собираем."
         )
 
+    # По умолчанию текущее устройство процесса, а не нулевое
+    device = torch.cuda.current_device() if device is None else device
+    
     name = torch.cuda.get_device_name(device).replace(" ", "-")
     major, minor = torch.cuda.get_device_capability(device)
     cuda = (torch.version.cuda or "unknown").replace(".", "")
@@ -323,8 +326,10 @@ def build_engine(
         "source_onnx": str(onnx_path),
         "source_onnx_sha256": sha256_file(onnx_path),
         "hardware_tag": hardware_tag(),
-        "gpu_name": torch.cuda.get_device_name(0),
-        "compute_capability": ".".join(map(str, torch.cuda.get_device_capability(0))),
+        "gpu_name": torch.cuda.get_device_name(torch.cuda.current_device()),
+        "compute_capability": ".".join(
+            map(str, torch.cuda.get_device_capability(torch.cuda.current_device()))
+        ),
         "tensorrt_version": trt.__version__,
         "cuda_version": torch.version.cuda,
         "input_name": input_name,

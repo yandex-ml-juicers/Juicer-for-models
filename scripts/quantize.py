@@ -321,6 +321,9 @@ def main(cfg: DictConfig) -> float:
     seed_everything(cfg.seed, deterministic=cfg.deterministic, warn_only=cfg.deterministic_warn_only)
     device = resolve_device(cfg.device)
 
+    if device.type == "cuda":
+        torch.cuda.set_device(device)
+
     output_dir = Path(HydraConfig.get().runtime.output_dir)
     report = QuantizationReport(output_dir)
 
