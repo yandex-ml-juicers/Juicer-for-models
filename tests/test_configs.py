@@ -124,6 +124,18 @@ def test_default_config_composes():
     assert cfg.trainer.epochs > 0
 
 
+def test_resume_flag_exists_and_is_off_by_default():
+    """cfg.resume читается напрямую (без cfg.get) в scripts/train.py —
+    init_clearml() и main() для detection/segmentation. Если ключа нет в
+    struct-конфиге, ЛЮБОЙ запуск с clearml.enabled=true падает на старте с
+    ConfigAttributeError, даже не дойдя до тренера. Регрессия на этот сценарий."""
+    cfg = compose_config([])
+    assert cfg.resume is False
+
+    cfg_on = compose_config(["resume=true"])
+    assert cfg_on.resume is True
+
+
 @pytest.mark.parametrize("experiment", EXPERIMENTS + SEGMENTATION_EXPERIMENTS)
 def test_experiment_composes_and_is_consistent(experiment):
     cfg = compose_config([f"experiment={experiment}"])
