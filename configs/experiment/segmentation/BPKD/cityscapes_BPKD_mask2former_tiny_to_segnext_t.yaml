@@ -99,13 +99,9 @@ scheduler:
 
 data:
   loader:
-    # batch_size снижен вдвое (24 -> 12): amp:false выше означает, что и
-    # учитель Mask2Former-tiny теперь считается в fp32, а не в fp16, как в
-    # версии, которая была смоук-тестирована при 24. Не перепроверял —
-    # если не влезет, убавляйте дальше.
     batch_size: 12
     eval_batch_size: 10
-    num_workers: 16
+    num_workers: 12
     pin_memory: true
     persistent_workers: true
 

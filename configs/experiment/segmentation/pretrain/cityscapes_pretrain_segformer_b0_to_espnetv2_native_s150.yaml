@@ -57,8 +57,7 @@ clearml:
   output_uri: false
 
 trainer:
-  # ~1/3 обычных 100 эпох — тот же принцип, что у cityscapes_pretrain_segformer_b0_to_unet_nano.yaml.
-  epochs: 33
+  epochs: 50
   amp: true
   grad_clip_norm: 5.0
 
@@ -74,7 +73,7 @@ param_groups:
   no_decay_on_norm_and_bias: false
 
 scheduler:
-  warmup_epochs: 3
+  warmup_epochs: 5
   eta_min: 2.0e-6
 
 data:
