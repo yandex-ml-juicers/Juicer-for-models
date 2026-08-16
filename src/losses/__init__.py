@@ -16,6 +16,10 @@ from src.losses.distillation_only import DistillationOnlyLoss
 from src.losses.fitnets import FitNetsKD
 from src.losses.heteroakd import HeteroAKDLoss
 from src.losses.pixel_kd import PixelWiseKD
+from src.losses.yolo_loss import YOLO
+from src.losses.dckd_loss import DCKDLoss
+from src.losses.kd_detr_loss import KDDETRLoss
+from src.losses.clockdistill_loss import CLoCKDistillLoss
 
 # Лоссы самой сегментации (учитель не нужен)
 from src.losses.dice import DiceLoss
@@ -44,4 +48,8 @@ __all__ = [
     "LovaszSoftmax",
     "OhemCrossEntropy",
     "PixelWiseKD",
+    "YOLO",
+    "DCKDLoss",
+    "KDDETRLoss",
+    "CLoCKDistillLoss",
 ]

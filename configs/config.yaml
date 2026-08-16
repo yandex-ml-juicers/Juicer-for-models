@@ -15,6 +15,7 @@ defaults:
   # то, что смешивает РАЗНЫЕ примеры батча.
   - augment: null
   - distributed: default
+  - prediction_postprocessors: null
   - experiment: null
 
 name: default # имя таски
@@ -32,6 +33,20 @@ ckpt_path: null
 # teacher. Учителю ckpt_path не нужен, он собирается уже с весами.
 eval_slot: student
 task_type: 'classification' # Доступны опции ['classification', 'detection', 'segmentation']
+
+# Продолжить упавший/остановленный запуск с последнего чекпоинта
+# (student/criterion/optimizer/scheduler/scaler/эпоха/лучшая метрика — см.
+# DetectionTrainer.load_checkpoint, SegmentationTrainer.load_checkpoint).
+# Поддержано для detection и segmentation
+#
+# Чтобы найти чекпоинт, output_dir нового запуска должен совпасть с output_dir
+# упавшего: hydra.run.dir строится из ${oc.env:JUICER_RUN_ID,...}, поэтому
+# нужно передать ТОТ ЖЕ JUICER_RUN_ID, что был у упавшего запуска, а не менять
+# hydra.run.dir напрямую — иначе трейнер молча стартует с нуля (см. warning
+# "resume=true, но .../last.pt не найден"):
+#   JUICER_RUN_ID=<run_id упавшего запуска> python scripts/train.py \
+#       experiment=<тот же эксперимент> resume=true
+resume: False
 
 model:
   # Учителя апсемплить до разрешения, на котором его мерили/дообучали, и
@@ -112,7 +127,7 @@ clearml:
   # Строятся из уже накопленных агрегатов, поэтому почти бесплатны;
   # платная часть — только сравнение с учителем (probe_*).
   plots:
-    enabled: true
+    enabled: False
     every_n_epochs: 5   # период тяжёлых графиков (матрица ошибок); последняя эпоха всегда
     probe_batches: 20   # сколько батчей за эпоху идёт на сравнение ученика с учителем
     probe_pixels: 8192  # сколько пикселей берётся с каждого такого батча

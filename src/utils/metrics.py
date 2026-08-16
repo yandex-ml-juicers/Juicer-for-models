@@ -4,6 +4,9 @@
 готовые средние).
 """
 
+import logging
+import math
+from collections import defaultdict
 from collections.abc import Mapping
 
 import numpy as np
@@ -15,6 +18,8 @@ import torch.nn.functional as F
 from src.utils.distributed import all_reduce_sum_
 
 from src.utils.distributed import all_reduce_sum_
+
+log = logging.getLogger(__name__)
 
 def accuracy(logits: torch.Tensor, targets: torch.Tensor) -> float:
     """Доля правильных ответов по argmax логитов, в [0, 1]."""
@@ -89,6 +94,123 @@ def sync_meters(meters: Mapping[str, AverageMeter], device: torch.device) -> Non
     for name, (total, count) in zip(names, packed.tolist()):
         meters[name].sum = total
         meters[name].count = int(count)
+
+
+class GradientContributionTracker:
+    """Норма градиента каждого именованного компонента лосса за эпоху.
+
+    Компонент — любой тензор из словаря, который возвращает criterion.forward()
+    (например bbox/cls/dfl у YOLO, det/hekld/hokfd у DCKD, det/lcmd/tcld у
+    CLoCKDistill), кроме "total". Норма считается С УЧЁТОМ λ, с которым
+    компонент реально входит в total = Σ λ_i · L_i (см. weights в probe() и
+    DistillationLoss.gradient_probe_weights) — то есть это вклад именно в тот
+    градиент, что реально уходит в total.backward(), а не сырая величина
+    самого L_i (та уже видна на графике train_loss_<component>, но она не
+    учитывает, что, например, DCKD с lambda_det=0.1 давит on task loss
+    в 10 раз сильнее, чем говорит его собственная норма).
+
+    Дорогая операция: probe() делает по torch.autograd.grad(retain_graph=True)
+    на каждый компонент — K лишних backward-проходов по общей части графа на
+    шаге зонда (K = число компонентов). Поэтому probe() не рассчитан на вызов
+    на каждом шаге — троттлинг (раз в N шагов) остаётся на вызывающей стороне
+    (см. DetectionTrainer.grad_contrib_every_n_steps).
+    """
+
+    def __init__(self) -> None:
+        self.norms: dict[str, AverageMeter] = defaultdict(AverageMeter)
+        self.non_finite: set[str] = set()
+
+    def probe(
+        self,
+        losses: dict[str, torch.Tensor],
+        params: list[torch.Tensor],
+        grad_scale: float = 1.0,
+        weights: dict[str, float] | None = None,
+    ) -> None:
+        """Считает |λ_i| · ‖∂L_i/∂params‖₂ для каждого L_i из losses (кроме "total").
+
+        weights — {key: λ_i}, обычно criterion.gradient_probe_weights; ключ,
+        которого там нет, получает λ=1.0. Умножение на |λ_i| — после
+        autograd.grad, а не до (домножать сам тензор перед backward'ом было бы
+        математически то же самое: ‖λ·∇L‖ = |λ|·‖∇L‖ для любого λ, но лишний
+        тензорный op на графе не нужен).
+
+        grad_scale — текущий scaler.get_scale() под AMP: L_i домножается на
+        него перед autograd.grad, а итоговая норма делится обратно на
+        grad_scale. Без этого на fp16 многие компоненты просто underflow'ят в
+        0 — та же защита, которую настоящему backward'у даёт scaler.scale(...).
+        allow_unused=True: не каждый компонент обязан задевать каждый
+        параметр (например det не трогает criterion.feature_adapter, который
+        существует только ради hokfd/lcmd) — такие параметры просто
+        пропускаются, а не роняют probe с ошибкой. Но allow_unused не спасает
+        от параметров с requires_grad=False в самом params (например conv
+        DFL-слоя в ultralytics YOLO заморожен намеренно, а не unused) —
+        autograd.grad падает на них с "does not require grad" ещё до всякого
+        allow_unused, поэтому такие параметры отфильтровываются заранее.
+        Компоненты с одинаковым тензором под разными ключами (bbox/box_loss —
+        алиасы для обратной совместимости логов) считаются один раз.
+        """
+        components: list[tuple[str, torch.Tensor]] = []
+        seen_tensors: set[int] = set()
+        for key, value in losses.items():
+            if key == "total" or not torch.is_tensor(value) or not value.requires_grad:
+                continue
+            if id(value) in seen_tensors:
+                continue
+            seen_tensors.add(id(value))
+            components.append((key, value))
+
+        trainable_params = [p for p in params if p.requires_grad]
+        if not components or not trainable_params:
+            return
+
+        weights = weights or {}
+
+        for key, value in components:
+            # λ домножается ДО autograd.grad, а не после: под AMP компонент
+            # должен пройти backward ровно с тем множителем, с каким он входит
+            # в scaler.scale(total).backward(), то есть λ_i · grad_scale. Иначе
+            # компонент с λ<1 (det с lambda_det=0.1 у DCKD) зондируется с
+            # множителем в 1/λ раз большим, чем выдерживает настоящий backward,
+            # fp16-градиенты переполняются в inf, и isfinite ниже молча
+            # выбрасывает его из статистики. На результат порядок не влияет:
+            # ‖λ·S·∇L‖ / S = |λ|·‖∇L‖.
+            probe_scale = grad_scale * abs(weights.get(key, 1.0))
+            scaled = value * probe_scale if probe_scale != 1.0 else value
+            grads = torch.autograd.grad(scaled, trainable_params, retain_graph=True, allow_unused=True)
+            per_param_norms = [g.detach().norm() for g in grads if g is not None]
+            if not per_param_norms:
+                continue
+
+            norm_value = float(torch.stack(per_param_norms).norm()) / grad_scale
+            if math.isfinite(norm_value):
+                self.norms[key].update(norm_value)
+            elif key not in self.non_finite:
+                # Не-конечная норма = переполнение fp16 в backward'е зонда.
+                # Компонент выпадает из averages, а доли остальных ренормируются
+                # до 100%, поэтому на графике это выглядит не как ошибка, а как
+                # «компонента просто нет». Предупреждаем один раз за эпоху.
+                self.non_finite.add(key)
+                log.warning(
+                    "Градиентный зонд: норма компонента '%s' не конечна (grad_scale=%g); "
+                    "компонент исключён из grad_contribution за эту эпоху.",
+                    key, grad_scale,
+                )
+
+    def results(self) -> dict[str, float]:
+        """gradnorm_<key> — средняя норма компонента за эпоху; gradshare_<key>
+        — её доля среди всех замеренных компонентов, % (сумма долей = 100)."""
+        averages = {key: meter.avg for key, meter in self.norms.items() if meter.count}
+        if not averages:
+            return {}
+
+        out = {f"gradnorm_{key}": value for key, value in averages.items()}
+
+        total = sum(averages.values())
+        if total > 0:
+            out.update({f"gradshare_{key}": 100.0 * value / total for key, value in averages.items()})
+
+        return out
 
 
 class IoUAccumulator:

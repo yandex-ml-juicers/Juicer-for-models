@@ -1,0 +1,85 @@
+# @package _global_
+defaults:
+  - override /data/dataset: cityscapes
+  - override /data/transform/train: cityscapes_transform_for_yolo
+  - override /data/transform/eval: cityscapes_transform_for_yolo
+  - override /model/teacher: null
+  - override /model/student: yolo
+  - override /loss: yolo
+  - override /optimizer: yolo_sgd
+  - override /scheduler: warmup_cosine
+  - override /prediction_postprocessors: yolov8n
+
+name: cityscapes_finetune_yolov9t
+device: cuda
+deterministic: false
+
+task_type: "detection"
+
+clearml:
+  enabled: True
+  tags: [cityscapes, student, finetune, yolov9t]
+  output_uri: false
+  plots:
+    # 0 — Debug Samples не отправляются вовсе.
+    debug_samples: 0
+    # 0/не указано — зонд вклада компонентов лосса в градиент выключен;
+    # N>0 — считается раз в N шагов внутри эпохи (график grad_contribution
+    # в ClearML). См. GradientContributionTracker в src/utils/metrics.py.
+    grad_contrib_every_n_steps: 50
+
+trainer:
+  epochs: 100
+  amp: true
+  # Как и для yolov8n: YOLO-лосс умножает лосс на batch_size, поэтому
+  # реальная норма градиента - десятки-сотни, а не единицы. Клиппинг
+  # 1.0 нормировал бы каждый шаг и эффективно гасил lr сильнее косинуса.
+  grad_clip_norm: null
+  track_train_map: true
+
+optimizer:
+  # Тот же рецепт ultralytics, что и для yolov8n: lr0 0.01 при номинальном
+  # батче 64, здесь батч 32 -> 0.01 * 64 / 32 = 0.02. Формула не зависит
+  # от архитектуры, только от batch_size.
+  lr: 0.02
+  momentum: 0.937
+  weight_decay: 0.0005
+
+scheduler:
+  warmup_epochs: 3
+  start_factor: 0.01
+  end_factor: 1.0
+  eta_min: 2.0e-4
+
+data:
+  dataset:
+    image_size: [512, 1024]
+    # Имя формата таргетов в prepare_targets.py, не имя модели: общий
+    # anchor-free DFL-формат ultralytics (yolov8n/yolov9t/yolo11n и т.д.).
+    targets_format_mode: "yolov8n"
+    normalize: null
+    build:
+      label_offset: 0
+  loader:
+    batch_size: 32
+    num_workers: 16
+    persistent_workers: true
+    pin_memory: true
+
+model:
+  student:
+    model_name: yolov9t
+    # Локальной копии data/weights/yolov9t.pt ещё нет: null вместо явного
+    # пути значит "докачать канонический COCO-претрейн туда же", а не
+    # упасть с FileNotFoundError (см. src/models/factory.py:yolo). После
+    # первого запуска стоит зафиксировать явный путь, как сделано для
+    # yolov8n.yaml, - тогда конфиг перестанет зависеть от сети.
+    weights: null
+    # C2f/SPPF/Detect-дропаут из yolo() для этой архитектуры - no-op
+    # (YOLOv9 использует RepNCSPELAN4/ELAN1/SPPELAN), но 0.0 явно
+    # документирует "дропаут выключен", а не оставляет дефолты фабрики
+    # молча висеть.
+    backbone_dropout: 0.0
+    neck_dropout: 0.0
+    bbox_dropout: 0.0
+    cls_dropout: 0.0

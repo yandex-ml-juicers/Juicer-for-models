@@ -9,9 +9,16 @@
 
 import math
 import time
+import random
+from types import SimpleNamespace
 from collections import defaultdict
 from collections.abc import Callable, Sequence
 from pathlib import Path
+
+from scipy.optimize import linear_sum_assignment
+
+import matplotlib.pyplot as plt
+from matplotlib.patches import Rectangle
 
 import torch
 import torch.nn.functional as F
@@ -21,7 +28,7 @@ from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from torch.amp.grad_scaler import GradScaler
 from torchmetrics.detection.mean_ap import MeanAveragePrecision
-from torchvision.ops import box_convert
+from torchvision.ops import box_convert, generalized_box_iou
 
 from tqdm import tqdm
 
@@ -32,9 +39,11 @@ from src.training.loss_schedule import LossWeightScheduler
 from src.utils.distributed import DistInfo, unwrap, all_reduce_sum_, all_reduce_max_
 from src.utils.logger import MetricsHistory, get_logger
 
-from src.utils.metrics import AverageMeter, accuracy, ConfusionMatrixAccumulator, IoUAccumulator, TeacherSimilarity, count_parameters, build_param_table, sync_meters
+from src.utils.metrics import AverageMeter, accuracy, ConfusionMatrixAccumulator, GradientContributionTracker, IoUAccumulator, TeacherSimilarity, count_parameters, build_param_table, sync_meters
 from src.utils.plots import Plot, bar_plot, distribution_plot, image_plot, matrix_plot
 from src.utils.visualization import default_palette, prediction_panel
+from src.utils.prepare_targets import prepare_targets
+from src.utils.detection_visualization import visualize_detection
 
 log = get_logger(__name__)
 
@@ -295,7 +304,7 @@ class Trainer:
         progress_bar: bool = True,
         find_unused_parameters: bool = False,
         broadcast_buffers: bool = True,
-        metrics_callback: tuple[Callable, Callable, Callable, Callable] | None = None,
+        metrics_callback: tuple[Callable, ...] | None = None,
         scalars: dict[str, float | int | str],
         batch_augment: Callable | None = None,
         loss_schedule: LossWeightScheduler | None = None,
@@ -600,48 +609,31 @@ class Trainer:
         torch.save(checkpoint, self.output_dir / filename)
 
 
-def prepare_targets(
-    targets: Sequence[dict],
-    device: torch.device | str,
-    mode: str,
-) -> list[dict]:
-    if mode == "lw-detr-small":
-        prepared_targets = []
+def pick_debug_indices(dataset, count: int) -> list[int]:
+    """Равномерно разбросанные по валидации индексы картинок для Debug Samples.
 
-        for target in targets:
-            class_labels = target["labels"].to(device=device, dtype=torch.long, non_blocking=True)
-            boxes = target["boxes"].to(device=device, dtype=torch.float32, non_blocking=True)
+    Равномерно, а не случайно и не первые подряд: Cityscapes отсортирован по
+    городам, поэтому первые N кадров — это N видов одной улицы, а случайная
+    выборка на каждой отправке даёт новые кадры, которые не с чем сравнивать.
+    Фиксированные кадры — единственный способ увидеть, как меняется предсказание.
 
-            size = target["size"].to(device=device, dtype=torch.float32, non_blocking=True)
-            height, width = size.unbind()
+    count <= 0 — картинки не отправляются вовсе.
+    """
+    if count <= 0:
+        return []
 
-            boxes = box_convert(boxes, in_fmt="xyxy", out_fmt="cxcywh")
-            scale = torch.stack([width, height, width, height])
-            boxes = (boxes / scale).clamp(0.0, 1.0)
+    try:
+        total = len(dataset)
+    except TypeError:  # IterableDataset — индексов нет
+        return []
 
-            prepared_targets.append(
-                {
-                    "class_labels": class_labels,
-                    "boxes": boxes,
-                }
-            )
+    count = min(count, total)
+    if count == 0:
+        return []
+    if count == 1:
+        return [0]
 
-        return prepared_targets
-
-    return [
-        {
-            key: (
-                value.to(
-                    device,
-                    non_blocking=True,
-                )
-                if isinstance(value, Tensor)
-                else value
-            )
-            for key, value in target.items()
-        }
-        for target in targets
-    ]
+    return [round(i * (total - 1) / (count - 1)) for i in range(count)]
 
 
 @torch.no_grad()
@@ -653,29 +645,53 @@ def detection_evaluate(
     prediction_postprocessor: Callable | None = None,
     label_offset: int = 1,
     limit_batches: int | None = None,
-    targers_mode: str | None = None
+    targers_mode: str | None = None,
+    class_names: dict[int, str] | None = None,
+    amp: bool = False,
 ) -> tuple[float, float]:
     was_model_training = model.training
     was_criterion_training = criterion.training
+    amp_enabled = amp and device.type == "cuda"
 
     model.eval()
     criterion.eval()
 
     loss_meter = AverageMeter()
-    metric = MeanAveragePrecision(box_format="xyxy", iou_type="bbox")
+    # sync_on_compute=False: состояние метрики лежит на CPU, а группа процессов
+    # поднята с nccl-бэкендом даже при world_size=1 — иначе compute() уходит
+    # в all_gather по CPU-тензорам и падает.
+    # class_metrics=True включает map_per_class: на Cityscapes классы
+    # различаются по числу объектов в 200 раз (car 27153 против train 171),
+    # и средний mAP без разбивки не говорит ничего.
+    metric = MeanAveragePrecision(
+        box_format="xyxy",
+        iou_type="bbox",
+        class_metrics=True,
+        sync_on_compute=False,
+    )
+
+    total_predictions = 0
+    total_images = 0
+    max_score = 0.0
 
     for step, (images, targets) in enumerate(loader):
         if limit_batches is not None and step >= limit_batches:
             break
 
-        images = [image.to(device, non_blocking=True) for image in images]
-        if isinstance(images, (list, tuple)):
-            images = torch.stack(images, dim=0)
+        # Одна склейка на CPU + один H2D-перенос вместо переноса каждой
+        # картинки батча по отдельности (см. тот же приём в _train_epoch).
+        images = torch.stack(images, dim=0).to(device, non_blocking=True)
 
-        targets_device = prepare_targets(targets, device, targers_mode)
+        targets_device = prepare_targets(targets, device, targers_mode, label_offset)
 
-        outputs = model(pixel_values=images, labels=targets_device)
-        losses = criterion(outputs, teacher_outputs=None, labels=targets_device)
+        # Train-шаг уже считался в autocast при amp=true — eval гонялся в fp32
+        # и терял ускорение на тензорных ядрах для той же модели.
+        with torch.autocast(device.type, enabled=amp_enabled):
+            if targers_mode == "lw-detr-small":
+                outputs = model(pixel_values=images, labels=targets_device)
+            else:
+                outputs = model(images)
+            losses = criterion(outputs, teacher_outputs=None, labels=targets_device)
 
         batch_size = len(images)
         loss_meter.update(losses["total"].item(), batch_size)
@@ -689,21 +705,22 @@ def detection_evaluate(
         targets_for_metric = []
 
         for prediction, target in zip(predictions, targets):
+            scores = prediction["scores"]
+            total_predictions += int(scores.numel())
+            if scores.numel():
+                max_score = max(max_score, float(scores.max()))
+
+            # Постпроцессор уже вернул метки в системе датасета (label_offset
+            # прибавлен там), таргеты в ней же — вычитать его здесь нечего.
             predictions_for_metric.append({
                 "boxes": prediction["boxes"].detach().cpu(),
                 "scores": prediction["scores"].detach().cpu(),
-                "labels": (
-                    prediction["labels"].detach().cpu()
-                    - label_offset
-                ),
+                "labels": prediction["labels"].detach().cpu(),
             })
 
             metric_target = {
                 "boxes": target["boxes"].detach().cpu(),
-                "labels": (
-                    target["labels"].detach().cpu()
-                    - label_offset
-                ),
+                "labels": target["labels"].detach().cpu(),
             }
 
             if "area" in target:
@@ -711,10 +728,8 @@ def detection_evaluate(
 
             targets_for_metric.append(metric_target)
 
-        metric.update(
-            predictions_for_metric,
-            targets_for_metric,
-        )
+        total_images += len(predictions_for_metric)
+        metric.update(predictions_for_metric, targets_for_metric)
 
     computed_metrics = metric.compute()
 
@@ -723,7 +738,24 @@ def detection_evaluate(
         "map_50": computed_metrics["map_50"].item(),
         "map_75": computed_metrics["map_75"].item(),
         "mar_100": computed_metrics["mar_100"].item(),
+        # Разбивка по размерам: после ресайза 1024x2048 -> 512x1024 около 70%
+        # объектов Cityscapes попадают в COCO-категорию "small".
+        "map_small": computed_metrics["map_small"].item(),
+        "map_medium": computed_metrics["map_medium"].item(),
+        "map_large": computed_metrics["map_large"].item(),
+        # Диагностика коллапса: и число детекций, и максимум score падают
+        # раньше, чем mAP успевает дойти до нуля.
+        "predictions_per_image": total_predictions / max(total_images, 1),
+        "max_score": max_score,
     }
+
+    # torchmetrics отдаёт -1 для классов, которых нет в выборке.
+    classes = torch.atleast_1d(computed_metrics["classes"])
+    per_class = torch.atleast_1d(computed_metrics["map_per_class"])
+
+    for class_id, value in zip(classes.tolist(), per_class.tolist()):
+        name = class_names.get(class_id, class_id) if class_names else class_id
+        metrics[f"ap_{name}"] = float(value)
 
     if was_model_training:
         model.train()
@@ -755,11 +787,15 @@ class DetectionTrainer:
         save_best: bool = True,
         save_last: bool = True,
         progress_bar: bool = True,
-        metrics_callback: tuple[Callable, Callable, Callable, Callable] | None = None,
+        metrics_callback: tuple[Callable, ...] | None = None,
         scalars: dict[str, float | int | str],
         prediction_postprocessor: Callable | None = None,
         label_offset: int = 1,
-        targers_mode: str | None = None
+        targers_mode: str | None = None,
+        track_train_map: bool = True,
+        class_names: dict[int, str] | None = None,
+        normalize: tuple[Sequence[float], Sequence[float]] | None = None,
+        plots: dict | None = None,
     ) -> None:
 
         if criterion.requires_teacher and teacher is None:
@@ -771,6 +807,25 @@ class DetectionTrainer:
 
         self.label_offset = label_offset
         self.targers_mode = targers_mode
+        self.track_train_map = track_train_map
+        self.class_names = class_names
+        # (mean, std) из конфига датасета или None, если нормализации нет:
+        # возвращает Debug Samples исходные цвета. То же, что у SegmentationTrainer.
+        self.normalize = normalize
+
+        plots = dict(plots) if plots is not None else {}
+        # Debug Samples выключаются любым из двух нулей: debug_samples: 0 —
+        # «картинки не нужны совсем», debug_every_n_epochs: 0 — «не слать
+        # периодически». Раньше отправка была захардкожена каждые 5 эпох.
+        self.debug_every_n_epochs = int(plots.get("debug_every_n_epochs", 10))
+        self.debug_indices = pick_debug_indices(eval_loader.dataset, int(plots.get("debug_samples", 4)))
+
+        # Зонд вклада каждого компонента лосса в градиент (см.
+        # GradientContributionTracker): 0 — не считать совсем, N>0 — раз в N
+        # шагов внутри эпохи. Каждый зонд — это K лишних backward-проходов
+        # (K = число именованных компонентов лосса), поэтому по умолчанию
+        # выключено.
+        self.grad_contrib_every_n_steps = int(plots.get("grad_contrib_every_n_steps", 0))
 
         self.student = student
         self.teacher = teacher
@@ -783,6 +838,10 @@ class DetectionTrainer:
         self.device = device
         self.output_dir = Path(output_dir)
         self.epochs = epochs
+        # Стартовая эпоха и лучший результат "с нуля"; load_checkpoint() их перезатрёт.
+        self.start_epoch = 1
+        self.best_map = -1.0
+        self.best_epoch = 0
         self.grad_clip_norm = grad_clip_norm
         self.limit_train_batches = limit_train_batches
         self.limit_eval_batches = limit_eval_batches
@@ -795,6 +854,8 @@ class DetectionTrainer:
         self.metrics_callback_scalar = metrics_callback[0] if metrics_callback is not None else None
         self.metrics_callback_single = metrics_callback[1] if metrics_callback is not None else None
         self.metrics_callback_table = metrics_callback[2] if metrics_callback is not None else None
+        self.metrics_callback_debug = metrics_callback[4] if metrics_callback is not None and len(metrics_callback) > 4 else None
+
         self.scalars = scalars
 
         self.amp_enabled = amp and device.type == "cuda"
@@ -824,18 +885,37 @@ class DetectionTrainer:
 
         self.student_extractor: FeatureExtractor | None = None
         self.teacher_extractor: FeatureExtractor | None = None
-        if criterion.required_features:
-            layers = list(criterion.required_features)
-            self.student_extractor = FeatureExtractor(self.student, layers)
-            if self.teacher is not None:
-                self.teacher_extractor = FeatureExtractor(self.teacher, layers)
+        # Большинство лоссов снимают одноимённые слои у ученика и учителя
+        # (required_features). DCKD — исключение: у ученика и учителя разные
+        # архитектуры и разные имена слоёв, поэтому у него есть
+        # student_required_features/teacher_required_features. getattr с
+        # фоллбэком на required_features не меняет поведение остальных
+        # лоссов (FitNets, FeatureKD, MGD, SP) — у них имена общие.
+        student_layers = list(getattr(criterion, "student_required_features", criterion.required_features))
+        teacher_layers = list(getattr(criterion, "teacher_required_features", criterion.required_features))
+        if student_layers:
+            self.student_extractor = FeatureExtractor(self.student, student_layers)
+        if teacher_layers and self.teacher is not None:
+            self.teacher_extractor = FeatureExtractor(self.teacher, teacher_layers)
 
     def fit(self) -> dict:
-        history = MetricsHistory(self.output_dir / "history.csv")
-        best_map, best_epoch = 0.0, 0
+        history = MetricsHistory(self.output_dir / "history.csv", resume=self.start_epoch > 1)
+        # -1.0, а не 0.0: при коллапсе модели mAP ровно 0.0 и условие `>` никогда
+        # не сработало бы — best.pt не создавался вовсе.
+        best_map, best_epoch = self.best_map, self.best_epoch
+
+        if history.rows and self.metrics_callback_scalar is not None:
+            # history.csv пишется синхронно и пережил крэш целиком, а отчёт в
+            # ClearML асинхронный — часть уже посчитанных эпох могла не успеть
+            # долететь до сервера. Реплеим все локально сохранённые эпохи
+            # заново: те же title/series/iteration в ClearML — это перезапись
+            # той же точки графика, а не дубль, так что безопасно послать и то,
+            # что уже долетело.
+            for row in history.rows:
+                self.metrics_callback_scalar(row)
 
         try:
-            for epoch in range(1, self.epochs + 1):
+            for epoch in range(self.start_epoch, self.epochs + 1):
                 start = time.time()
                 lr = self.optimizer.param_groups[0]["lr"]
 
@@ -848,8 +928,12 @@ class DetectionTrainer:
                     prediction_postprocessor=self.prediction_postprocessor,
                     label_offset=self.label_offset,
                     limit_batches=self.limit_eval_batches,
-                    targers_mode=self.targers_mode
+                    targers_mode=self.targers_mode,
+                    class_names=self.class_names,
+                    amp=self.amp_enabled,
                 )
+
+                self._report_detection_samples(epoch)
 
                 if self.scheduler is not None:
                     self.scheduler.step()
@@ -858,10 +942,10 @@ class DetectionTrainer:
                     "epoch": epoch,
                     "lr": lr,
                     "eval_loss": eval_loss,
-                    "eval_map": eval_metrics["map"],
-                    "eval_map_50": eval_metrics["map_50"],
-                    "eval_map_75": eval_metrics["map_75"],
-                    "eval_mar_100": eval_metrics["mar_100"],
+                    # Перечисление ключей руками означало бы, что новые метрики
+                    # (per-class AP, разбивка по размерам) не доедут ни до
+                    # history.csv, ни до колбэков.
+                    **{f"eval_{key}": value for key, value in eval_metrics.items()},
                     "time_epoch": round(time.time() - start, 1),
                     **{
                         f"train_loss_{key}": value
@@ -882,9 +966,9 @@ class DetectionTrainer:
                     best_map = eval_metrics["map"]
                     best_epoch = epoch
                     if self.save_best:
-                        self._save_checkpoint("best.pt", epoch, best_map)
+                        self._save_checkpoint("best.pt", epoch, best_map, best_epoch)
                 if self.save_last:
-                    self._save_checkpoint("last.pt", epoch, best_map)
+                    self._save_checkpoint("last.pt", epoch, best_map, best_epoch)
 
                 log.info(
                     "Эпоха %02d/%d | lr=%.6f | "
@@ -916,10 +1000,15 @@ class DetectionTrainer:
         self.criterion.train()
 
         norms = NormTracker()
+        grad_contrib = GradientContributionTracker()
+
+        agreement_correct = 0
+        agreement_total = 0
 
         meters_avg: dict[str, AverageMeter] = defaultdict(AverageMeter)
         meters_avg_loss: dict[str, AverageMeter] = defaultdict(AverageMeter)
         meters_other: dict[str, float | int | str] = {}
+        meters_map = MeanAveragePrecision(box_format="xyxy", iou_type="bbox", sync_on_compute=False)
 
         iterator = tqdm(
             self.train_loader,
@@ -933,9 +1022,17 @@ class DetectionTrainer:
                 iterator.close()
                 break
 
-            images = [image.to(self.device, non_blocking=True) for image in images]
-            targets = prepare_targets(targets, self.device, self.targers_mode)
-            batch_size = len(images)
+            targets_for_meters_map = targets
+
+            # Одна склейка на CPU + один H2D-перенос вместо переноса каждой
+            # картинки батча по отдельности. torch.stack и раньше требовал
+            # одинакового размера всех картинок батча — трансформы всех
+            # детекционных экспериментов ресайзят к фиксированному
+            # data.dataset.image_size, так что условие не меняется, меняется
+            # только порядок операций (стек -> перенос, а не перенос -> стек).
+            images = torch.stack(images, dim=0).to(self.device, non_blocking=True)
+            targets = prepare_targets(targets, self.device, self.targers_mode, self.label_offset)
+            batch_size = images.size(0)
 
             self.optimizer.zero_grad(set_to_none=True)
             if self.student_extractor is not None:
@@ -949,13 +1046,13 @@ class DetectionTrainer:
                     teacher_outputs = self.teacher(images)
 
             with torch.autocast(self.device.type, enabled=self.amp_enabled):
-                if isinstance(images, (list, tuple)):
-                    images = torch.stack(images, dim=0)
-
                 if self.teacher is not None:
                     student_outputs = self.student(images)
                 else:
-                    student_outputs = self.student(pixel_values=images, labels=targets)
+                    if self.targers_mode == "lw-detr-small":
+                        student_outputs = self.student(pixel_values=images, labels=targets)
+                    else:
+                        student_outputs = self.student(images)
 
                 losses = self.criterion(
                     student_outputs,
@@ -969,11 +1066,31 @@ class DetectionTrainer:
                     ),
                 )
 
+            params = [p for group in self.optimizer.param_groups for p in group["params"]]
+
+            # Зонд вклада компонентов лосса в градиент — ДО настоящего
+            # backward'а: probe() держит граф живым через retain_graph=True,
+            # чтобы backward() ниже мог пройти по нему как обычно.
+            if self.grad_contrib_every_n_steps and step % self.grad_contrib_every_n_steps == 0:
+                # gradient_probe_keys сужает набор до реально независимых
+                # слагаемых total, если словарь лосса вперемешку содержит и
+                # их, и детальную раскладку одного из них для логов (см.
+                # DistillationLoss.gradient_probe_keys, KDDETRLoss).
+                probe_keys = getattr(self.criterion, "gradient_probe_keys", None)
+                losses_for_probe = (
+                    losses if probe_keys is None
+                    else {key: losses[key] for key in probe_keys if key in losses}
+                )
+                grad_contrib.probe(
+                    losses_for_probe, params,
+                    grad_scale=self.scaler.get_scale() if self.amp_enabled else 1.0,
+                    weights=getattr(self.criterion, "gradient_probe_weights", None),
+                )
+
             self.scaler.scale(losses["total"]).backward()
             self.scaler.unscale_(self.optimizer)
 
-            params = [p for group in self.optimizer.param_groups for p in group["params"]]
-            clip_threshold = self.grad_clip_norm if self.grad_clip_norm is not None else float("inf") 
+            clip_threshold = self.grad_clip_norm if self.grad_clip_norm is not None else float("inf")
             grad_norm = torch.nn.utils.clip_grad_norm_(params, clip_threshold)
 
             self.scaler.step(self.optimizer)
@@ -981,30 +1098,274 @@ class DetectionTrainer:
 
             norms.update(grad_norm, params)
 
-            for key, value in losses.items():
-                meters_avg_loss[key].update(value.item(), batch_size)
+            if self.track_train_map and step % 5 == 0:
+                self._update_detection_meters_map(
+                    metric=meters_map,
+                    student_outputs=student_outputs,
+                    images=images,
+                    targets=targets_for_meters_map,
+                )
 
-            iterator.set_postfix({"loss": f"{losses['total'].item():.3f}"})
+            if self.teacher is not None:
+                correct, total = self._detection_agreement_rate(student_outputs, teacher_outputs, num_classes=8, teacher_topk=100, student_topk=1000)
+                agreement_correct += correct
+                agreement_total += total
+
+            # Один .tolist() на все компоненты лосса вместо отдельного .item()
+            # на каждую (total/bbox/cls/dfl) — каждый .item() это отдельная
+            # синхронизация с GPU, а на train-шаге они дороже, чем на eval.
+            loss_keys = list(losses.keys())
+            loss_values = torch.stack([losses[key] for key in loss_keys]).tolist()
+            loss_values_by_key = dict(zip(loss_keys, loss_values))
+            for key, value in loss_values_by_key.items():
+                meters_avg_loss[key].update(value, batch_size)
+
+            iterator.set_postfix({"loss": f"{loss_values_by_key['total']:.3f}"})
 
         train_loss_components = {key: meter.avg for key, meter in meters_avg_loss.items()}
-
         meters_other.update(norms.results())
+        meters_other.update(grad_contrib.results())
 
-        other_train_metrics = {**{key: meter.avg for key, meter in meters_avg.items()}, **meters_other}
+        if self.teacher is not None:
+            agreement_rate = agreement_correct / max(agreement_total, 1)
+
+        other_train_metrics = {
+            **{key: meter.avg for key, meter in meters_avg.items()},
+            **meters_other,
+        }
+
+        if self.track_train_map:
+            computed_meters_map = meters_map.compute()
+            other_train_metrics |= {
+                key: computed_meters_map[key].item()
+                for key in ("map", "map_50", "map_75", "mar_100")
+            }
+
+        if self.teacher is not None:
+            other_train_metrics["agreement_rate"] = agreement_rate
 
         return train_loss_components, other_train_metrics
+
+    def _update_detection_meters_map(
+        self,
+        metric: MeanAveragePrecision,
+        student_outputs,
+        images,
+        targets,
+    ) -> None:
+        with torch.no_grad():
+
+            # LW-DETR использует несколько query-групп во время train.
+            # Для метрики берем только первую группу, как при inference.
+            config = getattr(self.student, "config", None)
+
+            if (
+                config is not None
+                and getattr(config, "group_detr", 1) > 1
+                and hasattr(student_outputs, "logits")
+                and hasattr(student_outputs, "pred_boxes")
+            ):
+                num_queries = config.num_queries
+
+                logits = student_outputs.logits[:, :num_queries]
+                pred_boxes = student_outputs.pred_boxes[:, :num_queries]
+
+                query_scores = logits.sigmoid().amax(dim=-1)
+
+                top_k = min(100, logits.shape[1])
+                topk_indices = torch.topk(query_scores, k=top_k, dim=1).indices
+                logits = torch.gather(logits, dim=1, index=topk_indices.unsqueeze(-1).expand(-1, -1, logits.shape[-1]))
+
+                pred_boxes = torch.gather(pred_boxes, dim=1, index=topk_indices.unsqueeze(-1).expand(-1, -1, 4))
+
+                student_outputs = SimpleNamespace(
+                    logits=logits.detach(),
+                    pred_boxes=pred_boxes.detach(),
+                )
+
+            if self.prediction_postprocessor is not None:
+                predictions = self.prediction_postprocessor(student_outputs, images)
+            else:
+                predictions = student_outputs
+
+            predictions_metric = []
+            targets_metric = []
+
+            for prediction, target in zip(predictions, targets):
+                boxes = prediction["boxes"]
+                scores = prediction["scores"]
+                labels = prediction["labels"]
+
+                # Оставляем максимум 100 лучших detections
+                if scores.numel() > 100:
+                    topk_indices = torch.topk(scores, k=100).indices
+
+                    boxes = boxes[topk_indices]
+                    scores = scores[topk_indices]
+                    labels = labels[topk_indices]
+
+                predictions_metric.append(
+                    {
+                        "boxes": boxes.detach().float().cpu(),
+                        "scores": scores.detach().float().cpu(),
+                        "labels": labels.detach().long().cpu(),
+                    }
+                )
+
+                metric_target = {
+                    "boxes": (target["boxes"].detach().float().cpu()),
+                    "labels": target["labels"].detach().long().cpu(),
+                }
+
+                if "area" in target:
+                    metric_target["area"] = (target["area"].detach().float().cpu())
+
+                targets_metric.append(metric_target)
+
+            metric.update(predictions_metric, targets_metric)
+
+    @torch.no_grad()
+    def _detection_agreement_rate(self, student_outputs, teacher_outputs, num_classes: int, teacher_topk: int=100, student_topk: int=1000) -> tuple[int, int]:
+        student_logits = student_outputs["kd_logits"]
+        student_boxes = student_outputs["kd_boxes"]
+        teacher_logits = teacher_outputs.logits
+        teacher_boxes = teacher_outputs.pred_boxes
+
+        if student_logits.shape[-1] != num_classes and student_logits.shape[1] == num_classes:
+            student_logits = student_logits.transpose(1, 2)
+
+        if student_boxes.shape[-1] != 4 and student_boxes.shape[1] == 4:
+            student_boxes = student_boxes.transpose(1, 2)
+
+        student_probs = torch.sigmoid(student_logits[..., :num_classes])
+        teacher_probs = F.softmax(teacher_logits, dim=-1)[..., :num_classes]
+
+        correct = 0
+        total = 0
+
+        for batch_idx in range(student_logits.shape[0]):
+            student_scores = student_probs[batch_idx].max(dim=-1).values
+            teacher_scores = teacher_probs[batch_idx].max(dim=-1).values
+
+            student_idx = torch.topk(student_scores, k=min(student_topk, student_scores.numel()), sorted=False).indices
+            teacher_idx = torch.topk(teacher_scores, k=min(teacher_topk, teacher_scores.numel()), sorted=False).indices
+
+            if student_idx.numel() == 0 or teacher_idx.numel() == 0:
+                continue
+
+            sp = student_probs[batch_idx, student_idx]
+            tp = teacher_probs[batch_idx, teacher_idx]
+            sb = student_boxes[batch_idx, student_idx]
+            tb = teacher_boxes[batch_idx, teacher_idx]
+
+            teacher_soft = tp[:, None, :]
+            student_soft = sp[None, :, :].clamp(1e-6, 1.0 - 1e-6)
+
+            cls_cost = -(teacher_soft * torch.log(student_soft) + (1.0 - teacher_soft) * torch.log(1.0 - student_soft)).mean(dim=-1)
+            l1_cost = torch.cdist(tb, sb, p=1)
+            giou_cost = -generalized_box_iou(self._cxcywh_to_xyxy(tb), self._cxcywh_to_xyxy(sb))
+
+            cost = cls_cost + 5.0 * l1_cost + 2.0 * giou_cost
+
+            teacher_match, student_match = linear_sum_assignment(cost.cpu().numpy())
+
+            teacher_match = torch.as_tensor(teacher_match, device=teacher_logits.device)
+            student_match = torch.as_tensor(student_match, device=student_logits.device)
+
+            matched_teacher_classes = tp[teacher_match].argmax(dim=-1)
+            matched_student_classes = sp[student_match].argmax(dim=-1)
+
+            correct += (matched_teacher_classes == matched_student_classes).sum().item()
+            total += matched_teacher_classes.numel()
+
+        return correct, total
+
+
+    def _cxcywh_to_xyxy(self, boxes: torch.Tensor) -> torch.Tensor:
+        cx, cy, w, h = boxes.unbind(-1)
+        return torch.stack((cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2), dim=-1)
+
+    @torch.no_grad()
+    def _report_detection_samples(self, epoch: int) -> None:
+
+        if self.metrics_callback_debug is None or not self.debug_indices:
+            return
+        # Последняя эпоха отправляется всегда: иначе итог прогона зависел бы от
+        # того, кратно ли число эпох периоду.
+        if not (self.debug_every_n_epochs > 0 and (epoch % self.debug_every_n_epochs == 0 or epoch == self.epochs)):
+            return
+
+        dataset = self.eval_loader.dataset
+        indices = self.debug_indices
+
+        samples = [dataset[i] for i in indices]
+
+        images_cpu = [image for image, _ in samples]
+        targets = [target for _, target in samples]
+
+        images = torch.stack(images_cpu, dim=0).to(self.device)
+
+        was_training = self.student.training
+        self.student.eval()
+        
+        outputs = self.student(images)
+
+        if self.prediction_postprocessor is not None:
+            predictions = self.prediction_postprocessor(outputs, images)
+        else:
+            predictions = outputs
+
+        for number, (image, target, prediction) in enumerate(zip(images_cpu, targets, predictions)):
+            debug_image = visualize_detection(
+                image=image,
+                target=target,
+                prediction=prediction,
+                label_to_name=dataset.label_to_name,
+                mean=self.normalize[0] if self.normalize else None,
+                std=self.normalize[1] if self.normalize else None,
+                score_threshold=0.3,
+            )
+
+            self.metrics_callback_debug(
+                image=debug_image,
+                series=f"sample_{number}",
+                iteration=epoch,
+            )
+
+        if was_training:
+            self.student.train()
+
+    def load_checkpoint(self, path: Path) -> None:
+        """Восстанавливает student/criterion/optimizer/scheduler/scaler из
+        чекпоинта и выставляет эпоху и лучший mAP, с которых продолжать fit().
+        """
+        checkpoint = torch.load(path, map_location=self.device, weights_only=True)
+        unwrap(self.student).load_state_dict(checkpoint["student_state"])
+        unwrap(self.criterion).load_state_dict(checkpoint["criterion_state"])
+        self.optimizer.load_state_dict(checkpoint["optimizer_state"])
+        if self.scheduler is not None and checkpoint.get("scheduler_state") is not None:
+            self.scheduler.load_state_dict(checkpoint["scheduler_state"])
+        self.scaler.load_state_dict(checkpoint["scaler_state"])
+        self.start_epoch = checkpoint["epoch"] + 1
+        self.best_map = checkpoint["best_map"]
+        self.best_epoch = checkpoint.get("best_epoch", checkpoint["epoch"])
 
     def _save_checkpoint(
         self,
         filename: str,
         epoch: int,
         best_map: float,
+        best_epoch: int,
     ) -> None:
         checkpoint = {
             "epoch": epoch,
             "best_map": best_map,
-            "student_state": self.student.state_dict(),
-            "criterion_state": self.criterion.state_dict(),
+            "best_epoch": best_epoch,
+            # unwrap: под DDP ключи иначе ушли бы с префиксом "module." (сейчас
+            # для detection DDP запрещён выше по стеку, так что unwrap() здесь
+            # no-op, но так чекпоинт останется совместим, если это снимут).
+            "student_state": unwrap(self.student).state_dict(),
+            "criterion_state": unwrap(self.criterion).state_dict(),
             "optimizer_state": self.optimizer.state_dict(),
             "scheduler_state": (
                 self.scheduler.state_dict()
@@ -1130,7 +1491,7 @@ class SegmentationTrainer:
         progress_bar: bool = True,
         find_unused_parameters: bool = False,
         broadcast_buffers: bool = True,
-        metrics_callback: tuple[Callable, Callable, Callable, Callable] | None = None,
+        metrics_callback: tuple[Callable, ...] | None = None,
         scalars: dict[str, float | int | str],
         ignore_index: int = 255,
         batch_augment: Callable | None = None,
@@ -1161,6 +1522,10 @@ class SegmentationTrainer:
         self.broadcast_buffers = broadcast_buffers
         self.output_dir = Path(output_dir)
         self.epochs = epochs
+        # Стартовая эпоха и лучший результат "с нуля"; load_checkpoint() их перезатрёт.
+        self.start_epoch = 1
+        self.best_miou = 0.0
+        self.best_epoch = 0
         self.grad_clip_norm = grad_clip_norm
         self.limit_train_batches = limit_train_batches
         self.limit_eval_batches = limit_eval_batches
@@ -1291,12 +1656,28 @@ class SegmentationTrainer:
         # учителя не оборачиваем в DDP, т.к. синхронизация между процессами не нужна
 
     def fit(self) -> dict:
-        history = MetricsHistory(self.output_dir / "history.csv") if self.dist.is_main else None
-        best_miou, best_epoch = 0.0, 0
+        history = (
+            MetricsHistory(self.output_dir / "history.csv", resume=self.start_epoch > 1)
+            if self.dist.is_main
+            else None
+        )
+        best_miou, best_epoch = self.best_miou, self.best_epoch
+
+        if history is not None and history.rows and self.metrics_callback_scalar is not None:
+            # history.csv пишется синхронно и пережил крэш целиком, а отчёт в
+            # ClearML асинхронный — часть уже посчитанных эпох могла не успеть
+            # долететь до сервера. Реплеим все локально сохранённые эпохи
+            # заново: те же title/series/iteration в ClearML — это перезапись
+            # той же точки графика, а не дубль, так что безопасно послать и то,
+            # что уже долетело.
+            for row in history.rows:
+                self.metrics_callback_scalar(row)
 
         # Срез до первого шага (iteration 0): у необученной модели предсказание
         # шумовое, и именно с ним потом сравниваются все последующие эпохи.
-        if self.plots_enabled and self.debug_indices:
+        # При resume это уже отправлено в прошлом запуске — повторный срез
+        # только задвоил бы iteration 0 на графике Debug Samples.
+        if self.plots_enabled and self.debug_indices and self.start_epoch == 1:
             self.metrics_callback_plots(self._debug_samples(), 0)
 
         # Разовый прогон учителя по eval_loader (родное разрешение, без кропа —
@@ -1336,7 +1717,7 @@ class SegmentationTrainer:
                 torch.cuda.empty_cache()
 
         try:
-            for epoch in range(1, self.epochs + 1):
+            for epoch in range(self.start_epoch, self.epochs + 1):
                 start = time.time()
                 lr = self.optimizer.param_groups[0]["lr"]
                 # Веса лосса выставляются ДО эпохи, чтобы её значения лосса
@@ -1393,9 +1774,9 @@ class SegmentationTrainer:
                 if is_best:
                     best_miou, best_epoch = eval_metrics["miou"], epoch
                     if self.save_best:
-                        self._save_checkpoint("best.pt", epoch, best_miou)
+                        self._save_checkpoint("best.pt", epoch, best_miou, best_epoch)
                 if self.save_last:
-                    self._save_checkpoint("last.pt", epoch, best_miou)
+                    self._save_checkpoint("last.pt", epoch, best_miou, best_epoch)
 
                 log.info(
                     "Эпоха %02d/%d | lr=%.6f | train loss=%.4f | train mIoU=%.4f | "
@@ -1704,11 +2085,29 @@ class SegmentationTrainer:
 
         return plots
 
+    def load_checkpoint(self, path: Path) -> None:
+        """Восстанавливает student/criterion/optimizer/scheduler/scaler из
+        чекпоинта и выставляет эпоху и лучший mIoU, с которых продолжать fit().
+        """
+        checkpoint = torch.load(path, map_location=self.device, weights_only=True)
+        unwrap(self.student).load_state_dict(checkpoint["student_state"])
+        unwrap(self.criterion).load_state_dict(checkpoint["criterion_state"])
+        self.optimizer.load_state_dict(checkpoint["optimizer_state"])
+        if self.scheduler is not None and checkpoint.get("scheduler_state") is not None:
+            self.scheduler.load_state_dict(checkpoint["scheduler_state"])
+        self.scaler.load_state_dict(checkpoint["scaler_state"])
+        self.start_epoch = checkpoint["epoch"] + 1
+        self.best_miou = checkpoint["best_miou"]
+        # get(): чекпоинты, сохранённые до появления resume, ключа не содержат —
+        # эпоха последнего сохранения (last.pt) в этом случае лучшее приближение.
+        self.best_epoch = checkpoint.get("best_epoch", checkpoint["epoch"])
+
     def _save_checkpoint(
         self,
         filename: str,
         epoch: int,
         best_miou: float,
+        best_epoch: int,
     ) -> None:
         if not self.dist.is_main:
             return
@@ -1716,6 +2115,7 @@ class SegmentationTrainer:
         checkpoint = {
             "epoch": epoch,
             "best_miou": best_miou,
+            "best_epoch": best_epoch,
             "world_size": self.dist.world_size,
             # unwrap: под DDP ключи иначе ушли бы с префиксом "module.",
             # и чекпоинт не встал бы в обычную модель.

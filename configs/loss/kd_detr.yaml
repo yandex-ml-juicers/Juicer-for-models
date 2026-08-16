@@ -1,0 +1,15 @@
+_target_: src.losses.KDDETRLoss
+
+num_classes: 8
+
+lambda_distill: 1.0
+
+lambda_cls: 1.0
+lambda_l1: 5.0
+lambda_giou: 2.0
+
+temperature: 2.0
+
+teacher_has_no_object: false
+
+eps: 1.0e-6

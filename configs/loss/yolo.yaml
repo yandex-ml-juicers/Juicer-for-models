@@ -1,0 +1,11 @@
+_target_: src.losses.YOLO
+
+num_classes: 8
+strides: [8, 16, 32]
+reg_max: 16
+
+box_gain: 7.5
+cls_gain: 0.5
+dfl_gain: 1.5
+
+return_all_components: true
