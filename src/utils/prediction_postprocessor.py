@@ -5,6 +5,9 @@ from torchvision.ops import box_convert
 from ultralytics.utils import nms
 from ultralytics.utils.tal import dist2bbox, make_anchors
 
+from ultralytics.utils import nms
+from ultralytics.utils.tal import dist2bbox, make_anchors
+
 @torch.no_grad()
 def lwdetr_prediction_postprocessor(
     outputs,

@@ -28,6 +28,7 @@ from src.training import (
 )
 from src.utils import distributed, resolve_device, seed_everything
 from src.utils.distributed import DistInfo
+from src.utils import resolve_device, seed_everything
 
 log = logging.getLogger(__name__)
 
@@ -249,6 +250,17 @@ def clearml_reporter(task):
             # что ученик догнал учителя.
             elif key.startswith("loss_weight_"):
                 _safe_report("loss_weights", key.removeprefix("loss_weight_"), value)
+
+        # 7a. Вклад компонентов лосса в градиент (только detection, только если
+        # включён clearml.plots.grad_contrib_every_n_steps — см.
+        # GradientContributionTracker). gradnorm — абсолютная норма ‖∂L_i/∂θ‖
+        # компонента ДО умножения на λ (сравнима 1-в-1 с loss_components выше),
+        # gradshare — её доля среди всех компонентов в %, сумма долей = 100.
+        for key, value in row.items():
+            if key.startswith("train_gradnorm_"):
+                _safe_report("grad_contribution", key.removeprefix("train_gradnorm_"), value)
+            elif key.startswith("train_gradshare_"):
+                _safe_report("grad_contribution_share_pct", key.removeprefix("train_gradshare_"), value)
 
         # 7a. Вклад компонентов лосса в градиент (только detection, только если
         # включён clearml.plots.grad_contrib_every_n_steps — см.
@@ -518,6 +530,11 @@ def main(cfg: DictConfig) -> float:
             loss_schedule = LossWeightScheduler(
                 criterion, _plain(cfg.loss_schedule), total_epochs=cfg.trainer.epochs
             )
+
+            params = list(student.parameters()) + list(criterion.parameters())
+
+        optimizer = instantiate(cfg.optimizer)(params)  
+        scheduler = instantiate(cfg.scheduler)(optimizer) if cfg.get("scheduler") is not None else None
 
         # cfg.get(...): при `prediction_postprocessors: null` Hydra ключ в struct не создаёт,
         # прямое обращение падает с ConfigAttributeError.

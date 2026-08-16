@@ -31,6 +31,7 @@ clearml:
 trainer:
   epochs: 100
   amp: true
+  grad_clip_norm: 10.0
 
 optimizer:
   lr: 0.01
