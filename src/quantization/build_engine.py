@@ -206,16 +206,42 @@ def _parse_onnx(trt: Any, network: Any, logger: Any, onnx_path: Path) -> None:
     )
 
 
+# Отчёт инспектора называет один и тот же тип по-разному в зависимости от
+# того, откуда он взят: у весов это "Half"/"Float", у тензоров — строка формата
+# вида "Channel major FP16 format where channel % 8 == 0", где кроме типа
+# закодирована ещё и раскладка. Сводим к одному словарю, иначе гистограмма
+# точностей смешивает точность с раскладкой и не читается.
+PRECISION_ALIASES = {
+    "half": "FP16", "fp16": "FP16",
+    "float": "FP32", "fp32": "FP32",
+    "int8": "INT8", "int32": "INT32", "uint8": "UINT8",
+    "bf16": "BF16", "fp8": "FP8", "bool": "BOOL",
+}
+
+
 def layer_precision(layer: dict) -> str:
-    """В какой точности собран слой, по отчёту EngineInspector"""
+    """В какой точности исполняется слой, по отчёту EngineInspector.
+
+    У слоёв с весами тип берётся из `Weights.Type`, у остальных (Reformat,
+    Pooling, поэлементные) — из формата выходного тензора: своих весов у них
+    нет, а считаются они в типе того, что производят.
+    """
     weights = layer.get("Weights")
     if isinstance(weights, dict) and weights.get("Type"):
-        return str(weights["Type"])
+        name = str(weights["Type"])
+        return PRECISION_ALIASES.get(name.lower(), name)
 
     for output in layer.get("Outputs", []):
         fmt = str(output.get("Format/Datatype", ""))
-        if fmt and "N/A" not in fmt:
-            return fmt
+        if not fmt or "N/A" in fmt:
+            continue
+        # Формат при статическом входе выглядит как
+        # "Channel major FP16 format where channel % 8 == 0" — раскладка нам
+        # здесь не нужна, только тип.
+        for token, precision in PRECISION_ALIASES.items():
+            if token in fmt.lower():
+                return precision
+        return fmt
 
     return f"без весов ({layer.get('LayerType', '?')})"
 

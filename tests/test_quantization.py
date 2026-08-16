@@ -356,15 +356,22 @@ def test_layer_precision_reads_weight_type():
         "Weights": {"Type": "Half", "Count": 9408},
         "Outputs": [{"Format/Datatype": "N/A due to dynamic shapes"}],
     }
-    assert layer_precision(conv) == "Half"
+    assert layer_precision(conv) == "FP16"
 
     # У Reformat весов нет — считать его вместе со свёртками нельзя.
     reformat = {"LayerType": "Reformat", "Outputs": [{"Format/Datatype": "N/A due to dynamic shapes"}]}
     assert layer_precision(reformat) == "без весов (Reformat)"
 
-    # Статические формы: формат тензора известен и годится как запасной источник.
-    pooling = {"LayerType": "Pooling", "Outputs": [{"Format/Datatype": "Half(64,1:8,...)"}]}
-    assert layer_precision(pooling).startswith("Half")
+    # У слоя без весов тип берётся из формата выходного тензора. Строка формата
+    # несёт и раскладку — в сводку должен попасть только тип, иначе гистограмма
+    # разъезжается на десяток категорий вида "Channel major FP16 format ...".
+    pooling = {
+        "LayerType": "Pooling",
+        "Outputs": [{"Format/Datatype": "Channel major FP16 format where channel % 8 == 0"}],
+    }
+    assert layer_precision(pooling) == "FP16"
+    assert layer_precision({"Weights": {"Type": "Float"}}) == "FP32"
+    assert layer_precision({"Outputs": [{"Format/Datatype": "Row major linear FP32"}]}) == "FP32"
 
 
 def test_batch_outside_engine_profile_is_caught_before_the_dataset(tmp_path):
