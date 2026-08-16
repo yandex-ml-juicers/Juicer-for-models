@@ -2,6 +2,7 @@ import torch
 from torch import Tensor
 from torchvision.ops import box_convert
 
+
 from ultralytics.utils import nms
 from ultralytics.utils.tal import dist2bbox, make_anchors
 

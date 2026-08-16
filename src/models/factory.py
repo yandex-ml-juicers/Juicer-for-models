@@ -10,15 +10,18 @@ configs/model/teacher/*.yaml и configs/model/student/*.yaml.
 """
 
 import timm
-import warnings
 from pathlib import Path
+import warnings
 
 import torch
+import torchvision
 from torch import nn
 from torchvision import models as tv_models
 from torchvision.models._api import WeightsEnum
 from torchvision.models import get_model
-
+from torchvision.models.detection import FasterRCNN
+from torchvision.models.detection.rpn import AnchorGenerator
+from torchvision.models import resnet18, ResNet18_Weights
 from transformers import LwDetrConfig, LwDetrForObjectDetection
 
 from ultralytics import YOLO
@@ -486,4 +489,40 @@ def yolo(
             stacklevel=2,
         )
 
+    return model
+
+def faster_rcnn_resnet18_for_detection(
+    num_classes: int = 8,
+) -> nn.Module:
+
+    backbone_model = resnet18(weights=None)
+    
+    
+    modules = list(backbone_model.children())[:-2]
+    backbone = nn.Sequential(*modules)
+    
+    
+    backbone.out_channels = 512
+    
+    
+    anchor_generator = AnchorGenerator(
+        sizes=((32, 64, 128, 256, 512),),
+        aspect_ratios=((0.5, 1.0, 2.0),)
+    )
+    
+    
+    roi_pooler = torchvision.ops.MultiScaleRoIAlign(
+        featmap_names=['0'],
+        output_size=7,
+        sampling_ratio=2
+    )
+    
+    
+    model = FasterRCNN(
+        backbone,
+        num_classes=num_classes + 1,
+        rpn_anchor_generator=anchor_generator,
+        box_roi_pool=roi_pooler
+    )
+    
     return model

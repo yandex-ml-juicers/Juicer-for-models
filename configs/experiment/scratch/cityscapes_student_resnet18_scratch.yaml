@@ -1,0 +1,32 @@
+# @package _global_
+defaults:
+  - override /data/dataset: cityscapes
+  - override /data/transform/train: cityscapes_augmented
+  - override /data/transform/eval: base_cityscapes_transform
+  - override /model/teacher: null
+  - override /model/student: faster_rcnn_resnet18
+  - override /loss: faster_rcnn_loss
+  - override /optimizer: adamw
+  - override /scheduler: warmup_cosine
+
+name: cityscapes_student_FasterRCNN_R18_scratch
+
+trainer:
+  epochs: 100
+  amp: true
+  accumulation_steps: 4
+  grad_clip_norm: 0.5
+
+optimizer:
+  lr: 0.0001
+  weight_decay: 0.1
+
+data:
+  dataset:
+    image_size: [512, 1024]
+    targets_format_mode: "standard"
+    build:
+      label_offset: 1
+  loader:
+    batch_size: 4
+    num_workers: 8

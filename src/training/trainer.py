@@ -306,6 +306,7 @@ class Trainer:
         self.metrics_callback_single = metrics_callback[1] if metrics_callback is not None else None
         self.metrics_callback_table = metrics_callback[2] if metrics_callback is not None else None
         self.scalars = scalars
+        self.accumulation_steps = accumulation_steps
         # metrics = {'loss.train_loss': }
         self.train_confmat: ConfusionMatrixAccumulator | None = None
         if {"precision", "recall", "f1"} & set(self.scalars):
@@ -970,6 +971,9 @@ class DetectionTrainer:
             leave=False,
         )
 
+        # Обнуляем градиенты ПЕРЕД началом эпохи
+        self.optimizer.zero_grad(set_to_none=True)
+
         for step, (images, targets) in enumerate(iterator):
             if self.limit_train_batches is not None and step >= self.limit_train_batches:
                 iterator.close()
@@ -1043,7 +1047,7 @@ class DetectionTrainer:
             self.scaler.scale(losses["total"]).backward()
             self.scaler.unscale_(self.optimizer)
 
-            clip_threshold = self.grad_clip_norm if self.grad_clip_norm is not None else float("inf")
+            clip_threshold = self.grad_clip_norm if self.grad_clip_norm is not None else float("inf") 
             grad_norm = torch.nn.utils.clip_grad_norm_(params, clip_threshold)
 
             self.scaler.step(self.optimizer)
