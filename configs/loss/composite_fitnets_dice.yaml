@@ -1,0 +1,41 @@
+# Несколько лоссов сразу: CE + FitNets (hint + логиты) + Dice.
+#
+# Как это устроено. CompositeLoss складывает total'ы своих слагаемых с весами
+# из weights; слагаемые — обычные лоссы проекта, поэтому в композицию так же
+# добавляются CWD, BPKD, Lovász, OHEM. Все ключи слагаемого уезжают в
+# history.csv с его именем ("kd_hint", "seg_dice"), так что видно, какая
+# часть суммы куда пошла.
+#
+# ГЛАВНОЕ ПРАВИЛО: кросс-энтропия должна остаться ровно в ОДНОМ слагаемом.
+# Почти каждый лосс проекта считает CE сам, и без обнуления ce_weight она
+# войдёт в сумму дважды с непонятным итоговым весом. Здесь CE живёт в seg.
+#
+# Веса можно менять по ходу обучения — см. loss_schedule в configs/config.yaml:
+#   loss_schedule:
+#     weights.kd: {schedule: cosine, start: 1.0, end: 0.0, start_epoch: 120}
+_target_: src.losses.CompositeLoss
+_convert_: all
+
+losses:
+  kd:
+    _target_: src.losses.FitNetsKD
+    ce_weight: 0.0
+    hint_weight: 1.0
+    logits_weight: 0.6
+    temperature: 1.0
+    normalize_features: false
+    layers:
+      taps.stage3: { student_channels: 112, teacher_channels: 320, weight: 1.0 }
+      taps.stage4: { student_channels: 320, teacher_channels: 512, weight: 0.6 }
+    ignore_index: ${data.dataset.ignore_index}
+
+  seg:
+    _target_: src.losses.DiceLoss
+    ce_weight: 1.0
+    dice_weight: 1.0
+    smooth: 1.0
+    ignore_index: ${data.dataset.ignore_index}
+
+weights:
+  kd: 0.7
+  seg: 0.3

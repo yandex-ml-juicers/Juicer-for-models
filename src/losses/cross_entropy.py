@@ -13,9 +13,14 @@ from src.losses.base import DistillationLoss
 class CrossEntropy(DistillationLoss):
     requires_teacher = False
 
-    def __init__(self, label_smoothing: float = 0.0) -> None:
+    def __init__(self, label_smoothing: float = 0.0, ignore_index: int = -100) -> None:
+        """ignore_index: метка, исключаемая из лосса. -100 (дефолт torch) — для
+        классификации; для сегментации на Cityscapes сюда идёт 255, иначе
+        void-пиксели превратились бы в 20-й «класс» и портили обучение.
+        """
         super().__init__()
         self.label_smoothing = label_smoothing
+        self.ignore_index = ignore_index
 
     def forward(
         self,
@@ -25,5 +30,13 @@ class CrossEntropy(DistillationLoss):
         student_features: dict | None = None,
         teacher_features: dict | None = None,
     ) -> dict[str, torch.Tensor]:
-        ce = F.cross_entropy(student_logits, labels, label_smoothing=self.label_smoothing)
+        # Работает и для [B, C] с метками [B], и для [B, C, H, W] с [B, H, W]:
+        # cross_entropy сам сворачивает пространственные оси.
+        ce = F.cross_entropy(
+            student_logits,
+            labels,
+            label_smoothing=self.label_smoothing,
+            ignore_index=self.ignore_index,
+        )
         return {"total": ce, "ce": ce}
+

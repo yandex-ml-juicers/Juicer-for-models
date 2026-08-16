@@ -1,0 +1,83 @@
+# @package _global_
+# SegNeXt-T с энкодером MSCAN с ImageNet, без дистилляции.
+#
+# Зачем этот прогон: он и бейзлайн для SegNeXt-ученика, и способ получить
+# собственного учителя, если чужие cityscapes-веса скачивать не хочется
+# (best.pt отсюда подставляется в model/teacher=segnext).
+#
+# Оптимизатор — AdamW с lr 6e-5 на батч 16, как в рецепте статьи
+# (там 160k итераций при батче 16; здесь то же самое в эпохах).
+defaults:
+  - override /data/dataset: cityscapes_seg
+  - override /data/transform/train: cityscapes_seg_strong_transform
+  - override /data/transform/eval: cityscapes_seg_transform
+  - override /model/teacher: null
+  - override /model/student: segnext
+  - override /loss: ce
+  - override /optimizer: adamw
+  - override /scheduler: warmup_cosine
+  - override /augment: cutmix_segmentation
+
+name: cityscapes_scratch_segnext_t
+device: cuda
+deterministic: false
+
+task_type: "segmentation"
+
+clearml:
+  enabled: True
+  tags: [cityscapes, student, scratch, segnext, segmentation]
+  scalars: []
+  plots:
+    enabled: true
+    every_n_epochs: 20
+  reuse_last_task_id: False
+  continue_last_task: False
+  output_uri: false
+
+trainer:
+  epochs: 150
+  # amp: false — НЕ опечатка. Под AMP градиент SegNeXt (LightHamHead/Hamburger,
+  # src/models/segnext.py) обнуляется полностью за 2-3 эпохи (train_avg_grad_norm
+  # и max падают ровно в 0.0, eval mIoU/pixel_acc замирают побитово) — NMF2D
+  # уже сам отключает autocast внутри себя, но что-то ЕЩЁ в модели нестабильно
+  # в fp16. Проверено диагностическим прогоном: без AMP градиент здоровый
+  # (~130-140) и eval mIoU растёт нормально уже со 2 эпохи. Пока не нашли
+  # точное место и не завели узкий autocast(enabled=False) — AMP везде
+  # выключен для студента SegNeXt.
+  amp: false
+  grad_clip_norm: 10.0
+
+loss:
+  ignore_index: ${data.dataset.ignore_index}
+  label_smoothing: 0.0
+
+optimizer:
+  lr: 6.0e-5
+  weight_decay: 1.0e-2
+
+# Раздельный lr энкодер/декодер (docs/param_groups.md): энкодер предобучен,
+# декодер/голова — с нуля, общий lr бил бы по предобучению в первые эпохи.
+# encoder_lr_mult=0.35 -> энкодеру lr в ~2.86 раза ниже optimizer.lr
+# (энкодер — большая доля весов модели, 0.2 было слишком консервативно).
+param_groups:
+  encoder_lr_mult: 0.35
+  no_decay_on_norm_and_bias: false
+
+scheduler:
+  warmup_epochs: 10
+  eta_min: 1.0e-6
+
+data:
+  loader:
+    batch_size: 16
+    eval_batch_size: 8
+    num_workers: 16
+    pin_memory: true
+    persistent_workers: true
+
+model:
+  student:
+    variant: t
+    pretrained: imagenet
+    dropout: 0.1

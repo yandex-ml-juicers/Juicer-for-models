@@ -1,0 +1,83 @@
+# @package _global_
+defaults:
+  - override /data/dataset: cityscapes
+  - override /data/transform/train: cityscapes_transform_for_yolo
+  - override /data/transform/eval: cityscapes_transform_for_yolo
+  - override /model/teacher: null
+  - override /model/student: yolo
+  - override /loss: yolo
+  - override /optimizer: yolo_sgd
+  - override /scheduler: warmup_cosine
+  - override /prediction_postprocessors: yolov8n
+
+name: cityscapes_finetune_yolov8n
+device: cuda
+deterministic: false
+
+task_type: "detection"
+
+clearml:
+  enabled: True
+  tags: [cityscapes, student, finetune, yolov8n]
+  output_uri: false
+  plots:
+    # 0 — Debug Samples не отправляются вовсе.
+    debug_samples: 0
+    # 0/не указано — зонд вклада компонентов лосса в градиент выключен;
+    # N>0 — считается раз в N шагов внутри эпохи (график grad_contribution
+    # в ClearML). См. GradientContributionTracker в src/utils/metrics.py.
+    grad_contrib_every_n_steps: 50
+
+trainer:
+  epochs: 100
+  amp: true
+  # Клиппинга нет. Реальная норма градиента здесь 150-230 (YOLO-лосс по
+  # конвенции ultralytics умножает лосс на batch_size), и порог 1.0 нормировал
+  # каждый шаг до единицы: длина шага переставала зависеть от градиента, а
+  # эффективный lr падал быстрее косинуса, потому что норма росла по ходу
+  # обучения. Прогон 2026-08-11_09-49-25 на сотой эпохе всё ещё рос.
+  grad_clip_norm: 10.0
+  # mAP на аугментированных батчах в train-режиме несравним с eval-mAP,
+  # а считается он с полным NMS каждые 5 шагов.
+  track_train_map: true
+
+optimizer:
+  # Референс ultralytics: lr0 0.01 при номинальном батче 64. Здесь лосс
+  # масштабируется batch_size, поэтому lr пересчитывается по батчу:
+  # 0.01 * 64 / 32 = 0.02. При смене batch_size lr надо пересчитать так же,
+  # иначе прогоны с разным батчем несравнимы.
+  lr: 0.02
+  momentum: 0.937
+  weight_decay: 0.0005
+
+scheduler:
+  # 3 эпохи, как в рецепте ultralytics: 10 при 100 эпохах съедали десятую
+  # часть бюджета на разогрев дообучения, которое стартует с COCO-весов.
+  warmup_epochs: 3
+  start_factor: 0.01
+  end_factor: 1.0
+  # lrf 0.01 от lr0, как у ultralytics.
+  eta_min: 2.0e-4
+
+data:
+  dataset:
+    image_size: [512, 1024]
+    targets_format_mode: "yolov8n"
+    # Выключено: ultralytics обучает на 0..1, COCO-веса приходят оттуда же.
+    # Отсюда же значение берут трансформ и денормализация Debug Samples.
+    normalize: null
+    build:
+      label_offset: 0
+  loader:
+    batch_size: 32
+    num_workers: 16
+    persistent_workers: true
+    pin_memory: true
+
+model:
+  student:
+    weights: null
+    backbone_dropout: 0.0
+    neck_dropout: 0.0
+    bbox_dropout: 0.0
+    cls_dropout: 0.0

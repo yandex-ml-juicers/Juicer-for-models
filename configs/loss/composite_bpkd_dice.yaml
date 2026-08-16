@@ -1,0 +1,29 @@
+# BPKD (граница + тело) + Dice. Попиксельную классификацию в экспериментах
+# берёт на себя третье слагаемое (OHEM), поэтому ce_weight здесь обнулён.
+_target_: src.losses.CompositeLoss
+_convert_: all
+
+losses:
+  bpkd:
+    _target_: src.losses.BPKDLoss
+    temperature: 1.0
+    ce_weight: 0.0
+    # Граничный член сравним с alpha у pixel-KD, телесный — с cwd_weight
+    # у CWD: у обоих та же нормировка. Числа 50/20 из статьи не переносятся,
+    # там суммы по кадру вместо средних.
+    edge_weight: 1.0
+    body_weight: 1.0
+    edge_width: 7
+    spatial_stride: 2
+    ignore_index: ${data.dataset.ignore_index}
+
+  seg:
+    _target_: src.losses.DiceLoss
+    ce_weight: 0.0
+    dice_weight: 1.0
+    smooth: 1.0
+    ignore_index: ${data.dataset.ignore_index}
+
+weights:
+  bpkd: 0.8
+  seg: 0.3

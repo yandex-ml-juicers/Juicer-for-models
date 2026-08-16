@@ -1,0 +1,28 @@
+# Cityscapes test-сплит в роли train — только для чистой дистилляции без
+# разметки (configs/experiment/segmentation/pretrain/, loss=distillation_only).
+# У test нет настоящей разметки: gtFine/test — официальная заглушка
+# Cityscapes (все пиксели вне маппинга trainId уходят в ignore_index), но
+# именно поэтому она и годится здесь — DistillationOnlyLoss labels не читает
+# вовсе, а изображения в test настоящие и модель их иначе не увидит.
+#
+# Валидация — как везде, val с gtFine: иначе eval_mIoU перестанет быть
+# сравнимым с остальными прогонами.
+build:
+  _target_: src.data.datasets.cityscapes_segmentation
+  root: data/raw/cityscapes
+  ignore_index: 255
+  train_splits: [test]
+  train_annotations: gtFine
+  val_splits: [val]
+  val_annotations: gtFine
+
+num_classes: 19
+ignore_index: 255
+
+image_size: [1024, 2048]
+crop_size: [512, 1024]
+scale_range: [0.5, 2.0]
+
+normalize:
+  mean: [0.485, 0.456, 0.406]
+  std: [0.229, 0.224, 0.225]

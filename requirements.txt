@@ -1,9 +1,3 @@
-# Требуется сборка PyTorch с CUDA >= 12.8: torch 2.7 — первая версия
-# с колёсами cu128. На GPU-машине ставить с правильным индексом
-# (см. README, раздел "Установка"):
-#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
-# ВАЖНО: саму опцию --index-url сюда писать нельзя — этот файл читает
-# pyproject.toml (dynamic dependencies), setuptools ждёт только спецификаторы.
 torch>=2.7
 torchvision>=0.22
 hydra-core>=1.3,<1.4
@@ -14,3 +8,8 @@ detectors>=0.1.4
 clearml>=1.16
 datasets>=2.20.0
 huggingface_hub>=1.24.0
+pycocotools>=2.0.11
+transformers>=5.14.1
+accelerate>=1.14.0
+torchmetrics>=1.9.0
+ultralytics>=8.4.116

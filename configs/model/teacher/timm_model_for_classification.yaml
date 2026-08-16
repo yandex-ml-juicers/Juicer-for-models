@@ -1,0 +1,7 @@
+_target_: src.models.factory.timm_model_for_classification
+model_name: tiny_vit_5m_224
+num_classes: 100
+
+# Учитель заморожен и всегда в eval — stochastic depth на нём не срабатывает.
+# null означает "оставить дефолт архитектуры".
+drop_path_rate: null

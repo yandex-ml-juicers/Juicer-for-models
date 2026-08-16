@@ -1,0 +1,10 @@
+_target_: src.utils.lwdetr_prediction_postprocessor
+_partial_: true
+
+# Низкий порог: COCO-метрике полезен хвост слабых детекций, он даёт
+# правый край PR-кривой.
+score_threshold: 0.001
+label_offset: ${data.dataset.build.label_offset}
+
+# Столько же детекций учитывает mAR@100 в torchmetrics.
+max_detections: 100

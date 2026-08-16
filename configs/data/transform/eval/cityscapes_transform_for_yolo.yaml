@@ -1,0 +1,9 @@
+_target_: src.data.transforms.build_transforms_for_yolo
+
+# null, если в эксперименте data.dataset.normalize выключен: YOLO обучается
+# на входе 0..1, и COCO-веса приходят из того же распределения.
+mean: ${oc.select:data.dataset.normalize.mean,null}
+std: ${oc.select:data.dataset.normalize.std,null}
+
+train: False
+image_size: ${data.dataset.image_size}

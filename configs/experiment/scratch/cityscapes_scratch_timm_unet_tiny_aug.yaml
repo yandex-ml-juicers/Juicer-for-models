@@ -1,0 +1,85 @@
+# @package _global_
+# U-Net с предобученным энкодером из timm, без дистилляции.
+defaults:
+  - override /data/dataset: cityscapes_seg
+  - override /data/transform/train: cityscapes_seg_strong_transform_for_segmentation
+  - override /data/transform/eval: cityscapes_seg_transform
+  - override /model/teacher: null
+  - override /model/student: timm_unet
+  - override /loss: composite_base
+  - override /optimizer: adamw
+  - override /scheduler: warmup_cosine
+  - override /augment: cutmix_segmentation
+
+name: cityscapes_scratch_timm_unet_tiny_aug
+device: cuda
+
+# max_pool2d.backward и nll_loss2d на CUDA не имеют детерминированных ядер —
+# при deterministic=true запуск падает с RuntimeError.
+deterministic: false
+
+task_type: "segmentation"
+
+clearml:
+  enabled: True
+  tags: [cityscapes, student, scratch, timm_unet, segmentation, aug]
+  scalars: ['KL_divergence', 'agreement_rate']
+  plots:
+    enabled: false
+    every_n_epochs: 20
+  reuse_last_task_id: True
+  continue_last_task: False
+  output_uri: false
+
+trainer:
+  epochs: 100
+  amp: true
+  grad_clip_norm: 5.0
+
+loss:
+  losses:
+    dice:
+      _target_: src.losses.DiceLoss
+      ce_weight: 1.5
+      dice_weight: 2.5
+    lovasz:
+      _target_: src.losses.LovaszSoftmax
+      ce_weight: 0.0
+      lovasz_weight: 3.5
+      pixel_stride: 2
+      label_smoothing: 0.05
+      ignore_index: ${data.dataset.ignore_index}
+
+  weights:
+    dice: 1.0
+    lovasz: 0.5
+
+loss_schedule:
+  weights.dice: {schedule: cosine, start: 1.0, end: 0.50, start_epoch: 75}
+  weights.lovasz: {schedule: cosine, start: 0.5, end: 1.25, start_epoch: 75}
+
+optimizer:
+  lr: 2.0e-3
+  weight_decay: 3.0e-2
+
+param_groups:
+  encoder_lr_mult: 0.35
+  no_decay_on_norm_and_bias: false
+
+scheduler:
+  warmup_epochs: 10
+  eta_min: 1.5e-4
+
+data:
+  loader:
+    batch_size: 20
+    eval_batch_size: 12
+    num_workers: 20
+    pin_memory: true
+    persistent_workers: true
+
+model:
+  student:
+    variant: mobilenetv2
+    pretrained: true
+    dropout: 0.1

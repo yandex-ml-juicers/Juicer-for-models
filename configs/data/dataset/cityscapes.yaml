@@ -1,0 +1,21 @@
+build:
+  _target_: src.data.datasets.cityscapes
+  root: data/raw/cityscapes/leftImg8bit
+  annotation_dir: data/raw/cityscapes/annotations
+  label_offset: 0
+
+num_classes: 8
+image_size: [512, 1024]
+
+# ОСТАВЬ ТОЛЬКО ОДНУ ЭТУ СТРОКУ, УДАЛИ ДУБЛИКАТЫ
+targets_format_mode: "lw-detr-small"
+
+normalize:
+  mean: [0.485, 0.456, 0.406]
+  std: [0.229, 0.224, 0.225]
+
+loader:
+  batch_size: 64
+  num_workers: 16
+  pin_memory: true
+  persistent_workers: true

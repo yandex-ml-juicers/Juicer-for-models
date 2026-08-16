@@ -1,0 +1,10 @@
+# Focal Loss (arXiv:1708.02002): та же идея, что у OHEM, но непрерывным весом
+# вместо жёсткого top-K. Замена обычной CE.
+_target_: src.losses.FocalLoss
+
+# gamma=2 — значение из статьи; 0 превращает focal обратно в CE.
+gamma: 2.0
+# Веса классов: null или список длины num_classes.
+alpha: null
+
+ignore_index: ${data.dataset.ignore_index}

@@ -1,0 +1,12 @@
+# CWD — Channel-wise Knowledge Distillation (arXiv:2011.13256, ICCV 2021).
+# total = ce_weight*CE + cwd_weight*T^2/C*sum_c KL(phi(t_c) || phi(s_c)),
+# где phi — softmax по ПРОСТРАНСТВУ внутри канала (а не по классам внутри пикселя).
+_target_: src.losses.ChannelWiseKD
+
+# T=4 и вес 3 — значения из статьи для плотных задач (раздел с Cityscapes).
+temperature: 4.0
+ce_weight: 1.0
+cwd_weight: 3.0
+
+ignore_index: ${data.dataset.ignore_index}
+label_smoothing: 0.0

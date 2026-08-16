@@ -1,0 +1,12 @@
+_target_: src.optimizers.yolo_sgd
+_partial_: true
+
+# Референс ultralytics: lr0 0.01 при номинальном батче 64. YOLO-лосс
+# масштабирует лосс на batch_size, поэтому lr пересчитывается по батчу:
+# 0.01 * 64 / 32 = 0.02. При смене batch_size в эксперименте lr надо
+# пересчитать так же, иначе прогоны с разным батчем несравнимы.
+lr: 0.02
+
+momentum: 0.937
+weight_decay: 5.0e-4
+nesterov: true

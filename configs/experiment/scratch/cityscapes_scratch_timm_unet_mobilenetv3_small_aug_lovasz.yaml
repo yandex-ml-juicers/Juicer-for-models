@@ -1,0 +1,97 @@
+# @package _global_
+# Наносайз-ученик (0.5-2M параметров): timm-U-Net с энкодером
+# mobilenetv3_small_100 — 1.25M параметров целиком (0.93M энкодер + 0.32M
+# декодер, см. src/models/timm_unet.py::TIMM_UNET_VARIANTS). Ни один
+# прошедший прогон эту размерность не проверял — все KD-эксперименты были на
+# unet_small (efficientnet_b0, 4.24M) или unet_tiny.
+#
+# Рецепт — точная копия текущего лучшего scratch-бейзлайна
+# (cityscapes_scratch_timm_unet_small_aug_lovasz.yaml: composite CE+Lovász,
+# lr 1e-3, warmup 20) с одной заменой — model.student.variant. Так разница
+# между этим прогоном и unet_small-бейзлайном — ТОЛЬКО размер модели, а не
+# рецепт обучения заодно.
+defaults:
+  - override /data/dataset: cityscapes_seg
+  - override /data/transform/train: cityscapes_seg_strong_transform_for_segmentation
+  - override /data/transform/eval: cityscapes_seg_transform
+  - override /model/teacher: null
+  - override /model/student: timm_unet
+  - override /loss: composite_base
+  - override /optimizer: adamw
+  - override /scheduler: warmup_cosine
+  - override /augment: cutmix_segmentation
+
+
+name: cityscapes_scratch_timm_unet_mobilenetv3_small_aug_lovasz
+device: cuda
+deterministic: false
+
+task_type: "segmentation"
+
+clearml:
+  enabled: True
+  tags: [cityscapes, student, scratch, timm_unet, nano, segmentation, aug, lovasz]
+  scalars: []
+  plots:
+    enabled: false
+    every_n_epochs: 20
+  reuse_last_task_id: False
+  continue_last_task: False
+  output_uri: false
+
+trainer:
+  epochs: 100
+  amp: true
+  grad_clip_norm: 2.5
+
+loss:
+  losses:
+    dice:
+      _target_: src.losses.DiceLoss
+      ce_weight: 1.5
+      dice_weight: 2.5
+    lovasz:
+      _target_: src.losses.LovaszSoftmax
+      ce_weight: 0.0
+      lovasz_weight: 3.5
+      pixel_stride: 2
+      label_smoothing: 0.05
+      ignore_index: ${data.dataset.ignore_index}
+
+  weights:
+    dice: 1.0
+    lovasz: 0.5
+
+loss_schedule:
+  weights.dice: {schedule: cosine, start: 1.0, end: 0.50, start_epoch: 75}
+  weights.lovasz: {schedule: cosine, start: 0.5, end: 1.25, start_epoch: 75}
+
+optimizer:
+  lr: 2.0e-3
+  weight_decay: 3.0e-2
+
+# Раздельный lr энкодер/декодер (docs/param_groups.md): энкодер предобучен,
+# декодер/голова — с нуля, общий lr бил бы по предобучению в первые эпохи.
+# encoder_lr_mult=0.35 -> энкодеру lr в ~2.86 раза ниже optimizer.lr
+# (энкодер — большая доля весов модели, 0.2 было слишком консервативно).
+param_groups:
+  encoder_lr_mult: 0.35
+  no_decay_on_norm_and_bias: false
+
+scheduler:
+  warmup_epochs: 20
+  eta_min: 2.0e-6
+
+data:
+  loader:
+    batch_size: 20
+    eval_batch_size: 12
+    num_workers: 20
+    pin_memory: true
+    persistent_workers: true
+
+model:
+  student:
+    variant: mobilenetv3_small
+    pretrained: true
+    dropout: 0.1

@@ -4,19 +4,25 @@
 import zipfile
 import random
 from collections import defaultdict
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Callable
 
-import torchvision
+import numpy as np
 from datasets import DownloadConfig, concatenate_datasets, load_dataset
 from huggingface_hub import hf_hub_download
 from hydra.utils import to_absolute_path
+from PIL import Image
+
+import torch
+import torchvision
+from torch import Tensor
 from torch.utils.data import Dataset
+from torchvision.datasets import CocoDetection
+from torchvision.transforms.functional import pil_to_tensor
 
 
 class HFImageNet(Dataset):
-    IMAGENET100_REPO = "asafaa/imagent100"
-
     def __init__(
         self,
         root: str,
@@ -55,6 +61,317 @@ class HFImageNet(Dataset):
 
         return image, label
 
+def get_raw_item(
+    dataset,
+    index: int
+) -> tuple[Image.Image, dict[str, Tensor]]:
+    image, annotations = CocoDetection.__getitem__(dataset, index)
+
+    image_id = dataset.ids[index]
+    image_width, image_height = image.size
+
+    boxes = []
+    labels = []
+    areas = []
+    crowds = []
+
+    for annotation in annotations:
+        x, y, width, height = annotation["bbox"]
+
+        boxes.append([x, y, x + width, y + height])
+        labels.append(dataset.category_id_to_label[annotation["category_id"]])
+        areas.append(annotation.get("area", width * height))
+        crowds.append(annotation.get("iscrowd", 0))
+
+    boxes = (
+        torch.tensor(boxes, dtype=torch.float32)
+        if boxes
+        else torch.empty((0, 4), dtype=torch.float32)
+    )
+
+    target = {
+        "boxes": boxes,
+        "labels": torch.tensor(labels, dtype=torch.long),
+        "area": torch.tensor(areas, dtype=torch.float32),
+        "iscrowd": torch.tensor(crowds, dtype=torch.long),
+        "image_id": torch.tensor(image_id, dtype=torch.long),
+        "size": torch.tensor([image_height, image_width], dtype=torch.int64),
+    }
+
+    return image, target
+
+class CityscapesDetection(CocoDetection):
+    def __init__(
+        self,
+        image_dir: str | Path,
+        annotation_file: str | Path,
+        transform: Callable | None = None,
+        label_offset: int = 1,
+    ) -> None:
+        super().__init__(
+            root=str(image_dir),
+            annFile=str(annotation_file),
+        )
+
+        self.transform = transform
+        self.label_offset = label_offset
+
+        category_ids = sorted(self.coco.getCatIds())
+        self.category_id_to_label = {
+            category_id: index + label_offset
+            for index, category_id in enumerate(category_ids)
+        }
+
+        self.label_to_name = {
+            index + label_offset: self.coco.cats[category_id]["name"]
+            for index, category_id in enumerate(category_ids)
+        }
+
+        self.num_classes = len(category_ids)
+
+    def __getitem__(
+        self,
+        index: int,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        image, annotations = super().__getitem__(index)
+
+        image_id = self.ids[index]
+        image_width, image_height = image.size
+
+        boxes = []
+        labels = []
+        areas = []
+        crowds = []
+
+        for annotation in annotations:
+            x, y, width, height = annotation["bbox"]
+
+            x = float(x)
+            y = float(y)
+            width = float(width)
+            height = float(height)
+
+            if width <= 0 or height <= 0:
+                continue
+
+            boxes.append([x, y, x + width, y + height])
+            labels.append(self.category_id_to_label[annotation["category_id"]])
+            areas.append(float(annotation.get("area", width * height)))
+            crowds.append(int(annotation.get("iscrowd", 0)))
+
+        target = {
+            "boxes": torch.tensor(boxes, dtype=torch.float32).reshape(-1, 4),
+            "labels": torch.tensor(labels, dtype=torch.int64),
+            "image_id": torch.tensor(image_id, dtype=torch.int64),
+            "area": torch.tensor(areas, dtype=torch.float32),
+            "iscrowd": torch.tensor(crowds, dtype=torch.int64),
+            "orig_size": torch.tensor([image_height, image_width], dtype=torch.int64),
+            "size": torch.tensor([image_height, image_width], dtype=torch.int64),
+        }
+
+        if self.transform is not None:
+            image, target = self.transform(image, target)
+        else:
+            image = pil_to_tensor(image).float() / 255.0
+
+        return image, target
+
+CITYSCAPES_SEGMENTATION_CLASSES = (
+    "road",
+    "sidewalk",
+    "building",
+    "wall",
+    "fence",
+    "pole",
+    "traffic light",
+    "traffic sign",
+    "vegetation",
+    "terrain",
+    "sky",
+    "person",
+    "rider",
+    "car",
+    "truck",
+    "bus",
+    "train",
+    "motorcycle",
+    "bicycle",
+)
+# Официальные цвета Cityscapes в порядке trainId — те же, что в публикациях
+# и в notebooks/segmentation_predictions_visualization.ipynb. Держим рядом с
+# именами классов, чтобы предсказания везде раскрашивались одинаково.
+CITYSCAPES_SEGMENTATION_PALETTE = (
+    (128, 64, 128),   # road
+    (244, 35, 232),   # sidewalk
+    (70, 70, 70),     # building
+    (102, 102, 156),  # wall
+    (190, 153, 153),  # fence
+    (153, 153, 153),  # pole
+    (250, 170, 30),   # traffic light
+    (220, 220, 0),    # traffic sign
+    (107, 142, 35),   # vegetation
+    (152, 251, 152),  # terrain
+    (70, 130, 180),   # sky
+    (220, 20, 60),    # person
+    (255, 0, 0),      # rider
+    (0, 0, 142),      # car
+    (0, 0, 70),       # truck
+    (0, 60, 100),     # bus
+    (0, 80, 100),     # train
+    (0, 0, 230),      # motorcycle
+    (119, 11, 32),    # bicycle
+)
+
+# Канонический маппинг Cityscapes labelId -> trainId (19 оценочных классов).
+
+CITYSCAPES_LABEL_ID_TO_TRAIN_ID = {
+    7: 0,    # road
+    8: 1,    # sidewalk
+    11: 2,   # building
+    12: 3,   # wall
+    13: 4,   # fence
+    17: 5,   # pole
+    19: 6,   # traffic light
+    20: 7,   # traffic sign
+    21: 8,   # vegetation
+    22: 9,   # terrain
+    23: 10,  # sky
+    24: 11,  # person
+    25: 12,  # rider
+    26: 13,  # car
+    27: 14,  # truck
+    28: 15,  # bus
+    31: 16,  # train
+    32: 17,  # motorcycle
+    33: 18,  # bicycle
+}
+
+
+class CityscapesSegmentation(Dataset):
+    """
+    Ожидаемая структура:
+
+        root/leftImg8bit/<split>/<city>/<name>_leftImg8bit.png
+        root/<annotations>/<split>/<city>/<name>_<annotations>_labelIds.png
+
+    Возвращает (image, mask); mask — uint8 [H, W] с trainIds 0..18
+    и ignore_index там, где класс не входит в оценочные. В int64 маску
+    переводит SegmentationToTensor в конце трансформа.
+
+    Если трансформ отдаёт ещё и вид для учителя (см.
+    SegmentationTeacherViewCompose), то возвращается тройка
+    (кадр ученика, кадр учителя, маска).
+
+    splits — список, а не строка, ради train_extra: 20k дополнительных кадров
+    с грубой разметкой (gtCoarse) подмешиваются к train одним конфигом,
+    без второго класса датасета.
+    """
+
+    IMAGE_SUFFIX = "_leftImg8bit.png"
+    ANNOTATIONS = ("gtFine", "gtCoarse")
+    # Кадр из train_extra, лежащий в архиве полностью чёрным (об этом сказано
+    # прямо на странице загрузки Cityscapes). Учить на нём нечему.
+    BROKEN_IMAGES = frozenset({"troisdorf_000000_000073_leftImg8bit.png"})
+
+    def __init__(
+        self,
+        root: str | Path,
+        splits: str | Sequence[str],
+        transform: Callable | None = None,
+        ignore_index: int = 255,
+        annotations: str = "gtFine",
+    ) -> None:
+        if isinstance(splits, str):
+            splits = [splits]
+        # test-разметка в Cityscapes — заглушка (все пиксели уходят в
+        # ignore_index, см. label_id_to_train_id ниже): использовать test как
+        # обычный labeled-сплит нельзя, но для чистой дистилляции без разметки
+        # (configs/experiment/segmentation/pretrain/) она и не нужна —
+        # изображения там настоящие, только вместо gt никто не читает.
+        allowed_splits = {"train", "val", "train_extra", "test"}
+        unknown = set(splits) - allowed_splits
+        if unknown:
+            raise ValueError(f"splits принимает только {sorted(allowed_splits)}, получено {sorted(unknown)}")
+        if annotations not in self.ANNOTATIONS:
+            raise ValueError(
+                f"annotations должно быть одним из {list(self.ANNOTATIONS)}, получено {annotations!r}"
+            )
+        if "train_extra" in splits and annotations != "gtCoarse":
+            raise ValueError(
+                "У сплита train_extra есть только грубая разметка: "
+                "задайте annotations='gtCoarse' (нужен архив gtCoarse.zip)"
+            )
+
+        root = Path(root)
+        mask_suffix = f"_{annotations}_labelIds.png"
+
+        self.image_paths: list[Path] = []
+        self.mask_paths: list[Path] = []
+
+        for split in splits:
+            image_dir = root / "leftImg8bit" / split
+            mask_dir = root / annotations / split
+
+            if not image_dir.is_dir():
+                raise FileNotFoundError(f"Cannot find image directory: {image_dir}")
+            if not mask_dir.is_dir():
+                raise FileNotFoundError(f"Cannot find mask directory: {mask_dir}")
+
+            image_paths = [
+                path
+                for path in sorted(image_dir.glob(f"*/*{self.IMAGE_SUFFIX}"))
+                if path.name not in self.BROKEN_IMAGES
+            ]
+            if not image_paths:
+                raise FileNotFoundError(f"No images were found in {image_dir}")
+
+            for image_path in image_paths:
+                base_name = image_path.name.removesuffix(self.IMAGE_SUFFIX)
+                mask_path = mask_dir / image_path.parent.name / f"{base_name}{mask_suffix}"
+
+                if not mask_path.is_file():
+                    raise FileNotFoundError(
+                        f"Mask for image {image_path} was not found: {mask_path}"
+                    )
+
+                self.image_paths.append(image_path)
+                self.mask_paths.append(mask_path)
+
+        # Таблица подстановки на все 256 возможных значений uint8: всё, чего нет
+        # в маппинге (включая мусорные значения вроде license plate), падает в ignore_index
+        self.label_id_to_train_id = np.full(256, ignore_index, dtype=np.uint8)
+        for label_id, train_id in CITYSCAPES_LABEL_ID_TO_TRAIN_ID.items():
+            self.label_id_to_train_id[label_id] = train_id
+
+        self.transform = transform
+        self.ignore_index = ignore_index
+        self.classes = CITYSCAPES_SEGMENTATION_CLASSES
+        self.palette = CITYSCAPES_SEGMENTATION_PALETTE
+        self.num_classes = len(CITYSCAPES_SEGMENTATION_CLASSES)
+
+    def __len__(self) -> int:
+        return len(self.image_paths)
+
+    def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor]:
+        image = Image.open(self.image_paths[index]).convert("RGB")
+
+        raw_mask = np.array(Image.open(self.mask_paths[index]))
+        if raw_mask.dtype != np.uint8:
+            raise TypeError(
+                f"Ожидалась 8-битная маска labelIds, получено {raw_mask.dtype} "
+                f"в {self.mask_paths[index]}"
+            )
+
+        mask = torch.from_numpy(self.label_id_to_train_id[raw_mask])
+
+        if self.transform is None:
+            return pil_to_tensor(image).float() / 255.0, mask.to(torch.int64)
+
+        # Трансформ с видом для учителя отдаёт тройку — она так и уходит
+        # в даталоадер: default_collate собирает батч поэлементно, а тренер
+        # разбирает её обратно (см. split_segmentation_batch).
+        return self.transform(image, mask)
+
 
 def cifar10(
     root: str,
@@ -89,6 +406,74 @@ def imagenet(
         transform=transform,
         download=download,
     )
+
+
+def cityscapes(
+    root: str | Path,
+    annotation_dir: str | Path,
+    train: bool,
+    transform: Callable | None = None,
+    label_offset: int = 1
+) -> Dataset:
+    """Create a Cityscapes detection dataset."""
+
+    root = Path(to_absolute_path(root))
+    annotation_dir = Path(to_absolute_path(annotation_dir))
+
+    if train:
+        image_dir = root / "train"
+        annotation_file = annotation_dir / "train.json"
+    else:
+        image_dir = root / "val"
+        annotation_file = annotation_dir / "val.json"
+
+    if not image_dir.exists():
+        raise FileNotFoundError(f"Cannot find image directory: {image_dir}")
+
+    if not annotation_file.is_file():
+        raise FileNotFoundError(
+            f"Cannot find annotation file: {annotation_file}"
+        )
+
+    return CityscapesDetection(
+        image_dir=image_dir,
+        annotation_file=annotation_file,
+        transform=transform,
+        label_offset=label_offset,
+    )
+
+
+def cityscapes_segmentation(
+    root: str | Path,
+    train: bool,
+    transform: Callable | None = None,
+    ignore_index: int = 255,
+    train_splits: Sequence[str] = ("train",),
+    val_splits: Sequence[str] = ("val",),
+    train_annotations: str = "gtFine",
+    val_annotations: str = "gtFine",
+) -> Dataset:
+    """Create a Cityscapes semantic segmentation dataset.
+
+    root указывает на каталог, где рядом лежат leftImg8bit/ и gtFine/
+    (в отличие от детекционной cityscapes(), которой передаётся сам
+    leftImg8bit/ плюс отдельный каталог с COCO-аннотациями).
+
+    train_splits/train_annotations нужны для дополнительных данных: 20k кадров
+    train_extra размечены только грубо (gtCoarse), поэтому сплит и тип
+    разметки задаются отдельно от валидации, которая обязана остаться на
+    gtFine — иначе mIoU перестанет быть сравнимым с публичными числами.
+    """
+    root = Path(to_absolute_path(str(root)))
+
+    return CityscapesSegmentation(
+        root=root,
+        splits=train_splits if train else val_splits,
+        transform=transform,
+        ignore_index=ignore_index,
+        annotations=train_annotations if train else val_annotations,
+    )
+
 
 def fake_cifar10(
     train: bool,

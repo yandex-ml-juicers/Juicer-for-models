@@ -1,0 +1,22 @@
+# @package _global_
+defaults:
+  - override /data/dataset: imagenet100
+  - override /model/teacher: timm_model_for_classification
+  - override /model/student: timm_model_for_classification
+  - override /loss: sp_distill
+
+name: imagenet100_sp_tinyvit
+
+loss:
+  lambda_sp: 1000.0
+
+trainer:
+  epochs: 100
+  amp: true
+
+model:
+  student:
+    model_name: tiny_vit_5m_224
+  teacher:
+    model_name: tiny_vit_5m_224
+    checkpoint_path: data/weights/tiny-ViT5m-finetune-on-imagenet100/best.pt

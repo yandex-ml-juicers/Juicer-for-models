@@ -1,0 +1,81 @@
+# @package _global_
+# Тот же бейзлайн, что cityscapes_scratch_unet_base, но с усиленной
+# аугментацией и регуляризацией. Пара к нему нужна именно как пара: всё
+# остальное (lr, расписание, батч, число эпох) совпадает, поэтому разница
+# в mIoU относится к аугментациям, а не к чему-то ещё.
+#
+# Что добавлено относительно базового прогона:
+#   data/transform/train=cityscapes_seg_strong_transform
+#       cat_max_ratio, hue, gaussian blur, random erasing;
+#   augment=cutmix_segmentation
+#       CutMix по батчу (маска переносится вместе с куском изображения);
+#   model.student.dropout
+#       Dropout2d на боттлнеке U-Net — stochastic depth туда не ставится,
+#       residual-блоков в U-Net нет;
+#   loss.label_smoothing
+#       оставлен как в базовом прогоне (0.08), чтобы отличий было меньше.
+#
+# Расписание длиннее базовых 100 эпох: сильная аугментация замедляет
+# сходимость, и на прежней длине её эффект систематически недооценивается.
+defaults:
+  - override /data/dataset: cityscapes_seg
+  - override /data/transform/train: cityscapes_seg_strong_transform
+  - override /data/transform/eval: cityscapes_seg_transform
+  - override /model/teacher: null
+  - override /model/student: unet
+  - override /loss: ce
+  - override /optimizer: adamw
+  - override /scheduler: warmup_cosine
+  # Батч на карту мал, поэтому BatchNorm считаем глобально (см. конфиг группы).
+  - override /distributed: sync_bn
+  - override /augment: cutmix_segmentation
+
+name: cityscapes_scratch_unet_strong_aug
+device: cuda
+deterministic: false
+
+task_type: "segmentation"
+
+clearml:
+  enabled: True
+  tags: [cityscapes, student, scratch, unet, segmentation, strong-aug]
+  scalars: ['KL_divergence', 'agreement_rate']
+  plots:
+    enabled: true
+    every_n_epochs: 20
+  reuse_last_task_id: True
+  continue_last_task: False
+  output_uri: false
+
+trainer:
+  epochs: 100
+  amp: true
+  grad_clip_norm: 1.0
+
+loss:
+  ignore_index: ${data.dataset.ignore_index}
+  label_smoothing: 0.05
+
+optimizer:
+  lr: 7.5e-4
+  weight_decay: 4.0e-2
+
+scheduler:
+  warmup_epochs: 10
+  eta_min: 1.0e-6
+
+data:
+  loader:
+    batch_size: 8
+    eval_batch_size: 4
+    num_workers: 8
+    pin_memory: true
+    persistent_workers: true
+
+model:
+  student:
+    variant: small
+    # Dropout2d на боттлнеке. 0.1 — осторожное значение: U-Net учится с нуля,
+    # и агрессивный dropout на 7.8M параметров тормозит сходимость сильнее,
+    # чем помогает.
+    dropout: 0.1
