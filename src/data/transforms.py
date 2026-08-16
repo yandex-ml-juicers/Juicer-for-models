@@ -2,6 +2,7 @@
 
 from collections.abc import Sequence
 from torchvision import transforms
+
 from src.utils import detection_transforms, segmentation_transforms
 
 
@@ -155,21 +156,130 @@ def build_transform_tinyvit_eval(
 def build_base_transform_for_cityscapes(
     mean: Sequence[float],
     std: Sequence[float],
+    train: bool = True,
     image_size: tuple[int, int] | None = None,
-) -> transforms.Compose:
+    horizontal_flip: float = 0.0,
+) -> detection_transforms.DetectionCompose:
     ops: list = []
-    if image_size is not None:
-        ops.append(detection_transforms.DetectionResize(image_size))
+    if train:
+        # Флип идёт первым: он не меняет геометрию кадра, а кроп ниже
+        # рассчитывает свои параметры уже по итоговому изображению.
+        if horizontal_flip > 0.0:
+            ops.append(detection_transforms.DetectionRandomHorizontalFlip(p=horizontal_flip))
+
+        ops.append(
+                detection_transforms.DetectionRandomResizedCrop(
+                    size=image_size,
+                    scale=(0.6, 1.0),
+                    ratio=(1.7, 2.3),
+                )
+            )
+        ops.append(detection_transforms.DetectionColorJitter(
+            brightness=0.2,
+            contrast=0.2,
+            saturation=0.2,
+            hue=0.05,
+        ))
+        ops.append(
+            detection_transforms.DetectionGaussianBlur(
+                kernel_size=5,
+                sigma=(0.1, 2.0),
+                p=0.2,
+            )
+        )
+    else:
+        if image_size is not None:
+            ops.append(detection_transforms.DetectionResize(image_size))
+
     ops.append(detection_transforms.DetectionToTensor())
     ops.append(detection_transforms.DetectionNormalize(mean, std))
     return detection_transforms.DetectionCompose(ops)
 
+def build_transforms_for_yolo(
+    mean: Sequence[float] | None,
+    std: Sequence[float] | None,
+    train: bool = True,
+    image_size: tuple[int, int] | None = None,
+) -> detection_transforms.DetectionCompose:
+    ops: list = []
+
+    if train:
+        # Флип первым: он не меняет геометрию кадра, а кроп ниже считает свои
+        # параметры уже по итоговому изображению.
+        ops.append(detection_transforms.DetectionRandomHorizontalFlip(p=0.5))
+
+        # Единственная геометрия: кроп задаёт и сдвиг, и масштаб сразу.
+        # ratio держится около аспекта Cityscapes (2048/1024 = 2.0). При
+        # прежних (0.8, 1.25) кроп был почти квадратным и растягивался до
+        # 512x1024, тогда как eval делал честный resize, — train и eval
+        # видели кадры разной геометрии.
+        ops.append(
+            detection_transforms.DetectionRandomResizedCrop(
+                size=image_size,
+                scale=(0.5, 1.0),
+                ratio=(1.8, 2.2),
+            )
+        )
+
+        # Одна фотометрия вместо трёх, параметры из рецепта ultralytics.
+        ops.append(
+            detection_transforms.DetectionRandomHSV(
+                hgain=0.015,
+                sgain=0.7,
+                vgain=0.4,
+                p=1.0,
+            )
+        )
+        ops.append(
+            detection_transforms.DetectionGaussianBlur(
+                kernel_size=5,
+                sigma=(0.1, 2.0),
+                p=0.1,
+            )
+        )
+
+        # После кропа у объектов на границе кадра остаются вырожденные рамки.
+        ops.append(detection_transforms.DetectionFilterBoxes(min_size=2.0))
+
+    else:
+        if image_size is not None:
+            ops.append(detection_transforms.DetectionResize(image_size))
+
+    ops.append(detection_transforms.DetectionToTensor())
+
+    # mean/std = null — вход остаётся в 0..1, как обучает ultralytics и как
+    # приходят COCO-веса. ImageNet-нормализация сдвигала бы распределение
+    # входа относительно предобученной части.
+    if mean is not None and std is not None:
+        ops.append(detection_transforms.DetectionNormalize(mean, std))
+
+    return detection_transforms.DetectionCompose(ops)
 # def build_eval_transform_for_cityscapes(
 #     mean: Sequence[float],
 #     std: Sequence[float],
 #     image_size: tuple[int, int] | None = None,
 # ) -> transforms.Compose:
 
+def build_train_transform_for_cityscapes(
+    mean: Sequence[float],
+    std: Sequence[float],
+    image_size: tuple[int, int] | None = None,
+    flip_prob: float = 0.5,
+) -> detection_transforms.DetectionCompose:
+    ops: list = []
+    
+    # Сначала ресайз (чтобы все картинки были одного размера)
+    if image_size is not None:
+        ops.append(detection_transforms.DetectionResize(image_size))
+        
+    # Затем случайное отражение
+    ops.append(detection_transforms.DetectionHorizontalFlip(p=flip_prob))
+    
+    # В конце перевод в тензор и нормализация
+    ops.append(detection_transforms.DetectionToTensor())
+    ops.append(detection_transforms.DetectionNormalize(mean, std))
+    
+    return detection_transforms.DetectionCompose(ops)
 
 def build_segmentation_transform_train(
     mean: Sequence[float],
@@ -190,6 +300,7 @@ def build_segmentation_transform_train(
     random_erasing_ratio: Sequence[float] = (0.3, 3.3),
     random_erasing_value: float | str = 0.0,
     random_erasing_erases_labels: bool = False,
+    teacher_skips: Sequence[str] = (),
 ) -> segmentation_transforms.SegmentationCompose:
     """Стандартный train-рецепт семантической сегментации Cityscapes.
 
@@ -220,7 +331,28 @@ def build_segmentation_transform_train(
         blur_p: вероятность гауссова размытия.
         random_erasing_p: вероятность стереть прямоугольник.
         random_erasing_erases_labels: помечать ли стёртое как ignore_index.
+        teacher_skips: какие из фотометрических аугментаций НЕ должен видеть
+            учитель дистилляции — подмножество {"jitter", "blur", "erasing"}.
+            Непустой список включает второй вид кадра: датасет начинает
+            отдавать (кадр ученика, кадр учителя, маска), и учитель считает
+            таргеты по кадру без перечисленных аугментаций. Геометрию
+            (масштаб/кроп/отражение) пропустить нельзя: она общая для обоих
+            видов, иначе таргет перестал бы совпадать с маской попиксельно.
     """
+    known_skips = {"jitter", "blur", "erasing"}
+    teacher_skips = set(teacher_skips)
+    if not teacher_skips <= known_skips:
+        raise ValueError(
+            f"teacher_skips принимает только {sorted(known_skips)}, "
+            f"получено {sorted(teacher_skips - known_skips)}"
+        )
+
+    def student_only(name: str, transform):
+        """Помечает аугментацию как невидимую учителю, если она в teacher_skips."""
+        if name in teacher_skips:
+            return segmentation_transforms.StudentOnly(transform)
+        return transform
+
     ops: list = [
         segmentation_transforms.SegmentationRandomScale(
             scale_range=(float(scale_range[0]), float(scale_range[1])),
@@ -235,21 +367,27 @@ def build_segmentation_transform_train(
 
     if color_jitter > 0 or hue > 0:
         ops.append(
-            segmentation_transforms.SegmentationColorJitter(
-                brightness=color_jitter,
-                contrast=color_jitter,
-                saturation=color_jitter,
-                hue=hue,
-                p=color_jitter_p,
+            student_only(
+                "jitter",
+                segmentation_transforms.SegmentationColorJitter(
+                    brightness=color_jitter,
+                    contrast=color_jitter,
+                    saturation=color_jitter,
+                    hue=hue,
+                    p=color_jitter_p,
+                ),
             )
         )
 
     if blur_p > 0:
         ops.append(
-            segmentation_transforms.SegmentationGaussianBlur(
-                p=blur_p,
-                kernel_size=blur_kernel_size,
-                sigma=blur_sigma,
+            student_only(
+                "blur",
+                segmentation_transforms.SegmentationGaussianBlur(
+                    p=blur_p,
+                    kernel_size=blur_kernel_size,
+                    sigma=blur_sigma,
+                ),
             )
         )
 
@@ -258,15 +396,21 @@ def build_segmentation_transform_train(
 
     if random_erasing_p > 0:
         ops.append(
-            segmentation_transforms.SegmentationRandomErasing(
-                p=random_erasing_p,
-                scale=random_erasing_scale,
-                ratio=random_erasing_ratio,
-                value=random_erasing_value,
-                erase_labels=random_erasing_erases_labels,
-                ignore_index=ignore_index,
+            student_only(
+                "erasing",
+                segmentation_transforms.SegmentationRandomErasing(
+                    p=random_erasing_p,
+                    scale=random_erasing_scale,
+                    ratio=random_erasing_ratio,
+                    value=random_erasing_value,
+                    erase_labels=random_erasing_erases_labels,
+                    ignore_index=ignore_index,
+                ),
             )
         )
+
+    if any(isinstance(op, segmentation_transforms.StudentOnly) for op in ops):
+        return segmentation_transforms.SegmentationTeacherViewCompose(ops)
 
     return segmentation_transforms.SegmentationCompose(ops)
 

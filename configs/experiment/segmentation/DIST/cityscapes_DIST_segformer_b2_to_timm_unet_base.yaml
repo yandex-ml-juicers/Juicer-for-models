@@ -7,7 +7,7 @@
 # Бейзлайн для этого прогона — scratch/cityscapes_scratch_unet_base.
 defaults:
   - override /data/dataset: cityscapes_seg
-  - override /data/transform/train: cityscapes_seg_strong_transform
+  - override /data/transform/train: cityscapes_seg_strong_transform_for_segmentation
   - override /data/transform/eval: cityscapes_seg_transform
   - override /model/teacher: segformer
   - override /model/student: timm_unet
@@ -15,9 +15,8 @@ defaults:
   - override /optimizer: adamw
   - override /scheduler: warmup_cosine
   - override /augment: cutmix_segmentation
-  - override /distributed: sync_bn
 
-name: cityscapes_DIST_segformer_b2_to_timm_unet_base
+name: cityscapes_DIST_segformer_b5_to_timm_unet_base
 device: cuda
 deterministic: false
 
@@ -31,14 +30,14 @@ clearml:
   scalars: ['KL_divergence', 'agreement_rate']
   plots:
     enabled: true
-    every_n_epochs: 20
-  reuse_last_task_id: True
+    every_n_epochs: 10
+  reuse_last_task_id: False
   continue_last_task: False
   output_uri: false
 
 trainer:
-  epochs: 150
-  amp: true
+  epochs: 200
+  amp: trueё
   grad_clip_norm: 1.0
 
 loss:
@@ -70,6 +69,6 @@ model:
     pretrained: true
     dropout: 0.1
   teacher:
-    variant: b2
+    variant: b5
     pretrained: cityscapes
     checkpoint_path: null

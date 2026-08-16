@@ -33,4 +33,5 @@ python_files = ["test_*.py"]
 
 markers = [
     "distributed: поднимает несколько процессов (gloo, CPU)",
+    "integration: тянет реальные веса из сети (Hugging Face и т.п.)",
 ]

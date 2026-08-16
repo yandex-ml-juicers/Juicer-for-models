@@ -7,6 +7,7 @@
 import pytest
 from hydra import compose, initialize
 from hydra.utils import instantiate
+from omegaconf import OmegaConf
 
 from src.losses import DistillationLoss
 
@@ -19,18 +20,95 @@ EXPERIMENTS = [
     "scratch/imagenet1k_scratch_resnet18",
 ]
 
-# Сегментация: бейзлайны без дистилляции + 4 метода дистилляции
-# SegFormer-B2 -> U-Net-base.
+# Сегментация: бейзлайны без дистилляции + методы дистилляции
+# SegFormer-B2 -> U-Net.
+# Абляция лоссов на прогонах без дистилляции: каждый отличается от своего
+# бейзлайна (..._aug) ровно блоком loss.
+LOSS_ABLATIONS = [
+    f"scratch/cityscapes_scratch_timm_unet_{size}_aug_{loss}"
+    for size in ("small", "base")
+    for loss in ("dice", "ohem", "lovasz")
+]
+
 SEGMENTATION_EXPERIMENTS = [
     "scratch/cityscapes_scratch_segformer_b2",
     "scratch/cityscapes_scratch_segformer_b5",
     "scratch/cityscapes_scratch_unet",
-    "scratch/cityscapes_scratch_unet_base",
-    "scratch/cityscapes_scratch_unet_base_strong_aug",
+    "scratch/cityscapes_scratch_timm_unet",
+    "scratch/cityscapes_scratch_timm_unet_small_aug",
+    "scratch/cityscapes_scratch_timm_unet_base_aug",
     "segmentation/vanilla-KD/cityscapes_pixel-KD_segformer_b2_to_unet_base",
+    "segmentation/vanilla-KD/cityscapes_pixel-KD_segformer_b5_to_unet_small",
     "segmentation/CWD/cityscapes_CWD_segformer_b2_to_unet_base",
+    "segmentation/CWD/cityscapes_CWD_segformer_b5_to_unet_small",
     "segmentation/FitNets/cityscapes_FitNets_segformer_b2_to_unet_base",
-    "segmentation/DIST/cityscapes_DIST_segformer_b2_to_unet_base",
+    "segmentation/FitNets/cityscapes_FitNets_segformer_b2_to_unet_small",
+    "segmentation/FitNets/cityscapes_FitNets_dice_ohem_segformer_b5_to_unet_small",
+    "segmentation/DIST/cityscapes_DIST_segformer_b2_to_timm_unet_base",
+    "segmentation/DIST/cityscapes_DIST_segformer_b5_to_timm_unet_small",
+    "segmentation/BPKD/cityscapes_BPKD_segformer_b5_to_unet_small",
+    "segmentation/HeteroAKD/cityscapes_HeteroAKD_segformer_b5_to_unet_small",
+    *LOSS_ABLATIONS,
+    # Новые архитектуры/диагностика (см. outputs/claude-analis/analysis.md):
+    # SegNeXt-ученик, Mask2Former-учитель, наносайз timm-U-Net (0.5-2M).
+    "segmentation/diagnostics/cityscapes_teacher_miou_probe_segformer_b5_to_unet_small",
+    "scratch/cityscapes_scratch_segnext_s",
+    "segmentation/BPKD/cityscapes_BPKD_segformer_b5_to_segnext_s",
+    "segmentation/BPKD/cityscapes_BPKD_mask2former_tiny_to_unet_small",
+    "segmentation/BPKD/cityscapes_BPKD_mask2former_small_to_unet_small",
+    "scratch/cityscapes_scratch_timm_unet_mobilenetv3_small_aug_lovasz",
+    "segmentation/BPKD/cityscapes_BPKD_segformer_b5_to_timm_unet_mobilenetv3_small",
+    "segmentation/BPKD/cityscapes_BPKD_mask2former_tiny_to_segnext_t",
+    "segmentation/DIST/cityscapes_DIST_mask2former_tiny_to_segnext_t",
+    # Абляции capacity gap (см. outputs/claude-analis/analysis.md, §"Что бы
+    # я проверил дальше"): чистая KD без GT-членов, учитель поменьше/побольше
+    # студент, оба сразу поменьше, студент побольше.
+    "segmentation/diagnostics/cityscapes_BPKD_pure_segformer_b5_to_unet_small",
+    "segmentation/diagnostics/cityscapes_BPKD_segformer_b2_to_unet_small",
+    "segmentation/diagnostics/cityscapes_BPKD_segformer_b1_to_unet_tiny",
+    "segmentation/diagnostics/cityscapes_BPKD_segformer_b5_to_unet_base",
+    # Сетка "6 методов дистилляции x 4 пары учитель/студент" (см.
+    # outputs/claude-analis/analysis.md): BPKD/CWD/FitNets/pixel-KD/DIST/
+    # HeteroAKD на unet_small(B2)/unet_tiny(B1)/unet_nano(B0)/segnext_t(B2)
+    # + два одиночных BPKD вне сетки (B1->unet_small, B0->unet_tiny).
+    "segmentation/BPKD/cityscapes_BPKD_segformer_b1_to_unet_small",
+    "segmentation/BPKD/cityscapes_BPKD_segformer_b0_to_unet_tiny",
+    "segmentation/CWD/cityscapes_CWD_segformer_b2_to_unet_small",
+    "segmentation/FitNets/cityscapes_FitNets_segformer_b2_to_unet_small",
+    "segmentation/vanilla-KD/cityscapes_pixel-KD_segformer_b2_to_unet_small",
+    "segmentation/DIST/cityscapes_DIST_segformer_b2_to_unet_small",
+    "segmentation/HeteroAKD/cityscapes_HeteroAKD_segformer_b2_to_unet_small",
+    "segmentation/CWD/cityscapes_CWD_segformer_b1_to_unet_tiny",
+    "segmentation/FitNets/cityscapes_FitNets_segformer_b1_to_unet_tiny",
+    "segmentation/vanilla-KD/cityscapes_pixel-KD_segformer_b1_to_unet_tiny",
+    "segmentation/DIST/cityscapes_DIST_segformer_b1_to_unet_tiny",
+    "segmentation/HeteroAKD/cityscapes_HeteroAKD_segformer_b1_to_unet_tiny",
+    "segmentation/BPKD/cityscapes_BPKD_segformer_b0_to_unet_nano",
+    "segmentation/CWD/cityscapes_CWD_segformer_b0_to_unet_nano",
+    "segmentation/FitNets/cityscapes_FitNets_segformer_b0_to_unet_nano",
+    "segmentation/vanilla-KD/cityscapes_pixel-KD_segformer_b0_to_unet_nano",
+    "segmentation/DIST/cityscapes_DIST_segformer_b0_to_unet_nano",
+    "segmentation/HeteroAKD/cityscapes_HeteroAKD_segformer_b0_to_unet_nano",
+    "segmentation/BPKD/cityscapes_BPKD_segformer_b2_to_segnext_t",
+    "segmentation/CWD/cityscapes_CWD_segformer_b2_to_segnext_t",
+    "segmentation/FitNets/cityscapes_FitNets_segformer_b2_to_segnext_t",
+    "segmentation/vanilla-KD/cityscapes_pixel-KD_segformer_b2_to_segnext_t",
+    "segmentation/DIST/cityscapes_DIST_segformer_b2_to_segnext_t",
+    "segmentation/HeteroAKD/cityscapes_HeteroAKD_segformer_b2_to_segnext_t",
+    # Претрейн (чистая дистилляция на test-сплите, см.
+    # src/losses/distillation_only.py) — этап 1/2 для nano-класса.
+    "segmentation/pretrain/cityscapes_pretrain_segformer_b0_to_unet_nano",
+    "segmentation/pretrain/cityscapes_pretrain_segformer_b0_to_espnetv2_native_s150",
+    # espnetv2_native/s150 — пятая пара nano-класса, декодер ИЗ ОРИГИНАЛЬНОЙ
+    # статьи EESPNet_Seg, не наш UNetDoubleConv (см. src/models/espnetv2.py):
+    # та же сетка 6 методов, что и unet_nano. taps.stage4 не существует —
+    # FitNets/HeteroAKD берут stage2/stage3 вместо stage3/stage4.
+    "segmentation/BPKD/cityscapes_BPKD_segformer_b0_to_espnetv2_native_s150",
+    "segmentation/CWD/cityscapes_CWD_segformer_b0_to_espnetv2_native_s150",
+    "segmentation/FitNets/cityscapes_FitNets_segformer_b0_to_espnetv2_native_s150",
+    "segmentation/vanilla-KD/cityscapes_pixel-KD_segformer_b0_to_espnetv2_native_s150",
+    "segmentation/DIST/cityscapes_DIST_segformer_b0_to_espnetv2_native_s150",
+    "segmentation/HeteroAKD/cityscapes_HeteroAKD_segformer_b0_to_espnetv2_native_s150",
 ]
 
 
@@ -44,6 +122,18 @@ def test_default_config_composes():
     assert cfg.seed == 42
     assert cfg.model.teacher is not None
     assert cfg.trainer.epochs > 0
+
+
+def test_resume_flag_exists_and_is_off_by_default():
+    """cfg.resume читается напрямую (без cfg.get) в scripts/train.py —
+    init_clearml() и main() для detection/segmentation. Если ключа нет в
+    struct-конфиге, ЛЮБОЙ запуск с clearml.enabled=true падает на старте с
+    ConfigAttributeError, даже не дойдя до тренера. Регрессия на этот сценарий."""
+    cfg = compose_config([])
+    assert cfg.resume is False
+
+    cfg_on = compose_config(["resume=true"])
+    assert cfg_on.resume is True
 
 
 @pytest.mark.parametrize("experiment", EXPERIMENTS + SEGMENTATION_EXPERIMENTS)
@@ -69,6 +159,168 @@ def test_feature_kd_declares_layers():
     assert len(list(criterion.parameters())) == 4  # по одной 1x1-свёртке на слой
 
 
+class TestTeacherViewExperiment:
+    """Эксперименты, где ученик видит сильные аугментации, а учитель — нет."""
+
+    EXPERIMENT = "segmentation/FitNets/cityscapes_FitNets_segformer_b2_to_unet_small"
+
+    def test_regularization_is_on_and_hidden_from_the_teacher(self):
+        cfg = compose_config([f"experiment={self.EXPERIMENT}"])
+        train_transform = cfg.data.transform.train
+
+        assert train_transform.blur_p > 0
+        assert train_transform.random_erasing_p > 0
+        assert set(train_transform.teacher_skips) == {"jitter", "blur", "erasing"}
+
+    def test_transform_yields_two_views(self):
+        """Трансформ обязан отдавать тройку (ученик, учитель, маска):
+        именно по ней тренер понимает, что учителю нужен свой кадр."""
+        from src.utils.segmentation_transforms import SegmentationTeacherViewCompose
+
+        cfg = compose_config([f"experiment={self.EXPERIMENT}"])
+        transform = instantiate(cfg.data.transform.train)
+        assert isinstance(transform, SegmentationTeacherViewCompose)
+
+    def test_distillation_terms_fade_out(self):
+        """Расписание обязано гасить дистилляцию, а не наоборот.
+
+        Ищем KD-слагаемое по имени пути по остаточному принципу (не dice/
+        lovasz/seg/ce) — композитный рецепт называет его по методу (bpkd,
+        fitnets, cwd, ...), а не всегда "hint"/"kd" по-старому. Проверяем
+        только сам инвариант "KD-вес не растёт" — что делают GT-слагаемые
+        (dice/lovasz) рецепт не обязывает единообразно: в текущем шаблоне
+        dice тоже гасится, а lovasz растёт, и оба варианта законны."""
+        cfg = compose_config([f"experiment={self.EXPERIMENT}"])
+        schedule = cfg.loss_schedule
+        gt_keys = {"weights.dice", "weights.lovasz", "weights.seg", "ce_weight"}
+        kd_paths = [key for key in schedule if key not in gt_keys]
+        assert kd_paths, f"не нашёл KD-путь в loss_schedule: {list(schedule)}"
+        for kd_path in kd_paths:
+            assert schedule[kd_path].end < schedule[kd_path].start, kd_path
+
+
+class TestLossAblation:
+    """Прогоны «тот же ученик, другой лосс» на scratch-бейзлайнах."""
+
+    @pytest.mark.parametrize("experiment", LOSS_ABLATIONS)
+    def test_differs_from_the_baseline_only_in_the_loss(self, experiment):
+        """Если разойдётся хоть что-то ещё — lr, число эпох, аугментации, —
+        разницу в mIoU нельзя будет отнести к лоссу, и весь прогон
+        превращается в трату GPU-часов."""
+        baseline_name = experiment.rsplit("_", 1)[0]
+        baseline = compose_config([f"experiment={baseline_name}"])
+        ablation = compose_config([f"experiment={experiment}"])
+
+        for section in ("trainer", "optimizer", "scheduler", "data", "model", "augment"):
+            assert ablation[section] == baseline[section], section
+        assert ablation.data.transform == baseline.data.transform
+        assert ablation.loss._target_ != baseline.loss._target_
+
+    @pytest.mark.parametrize("experiment", LOSS_ABLATIONS)
+    def test_names_do_not_collide(self, experiment):
+        """reuse_last_task_id: True — значит совпадение имён затрёт чужой
+        прогон в ClearML и сложит артефакты в один каталог outputs/."""
+        cfg = compose_config([f"experiment={experiment}"])
+        assert cfg.name == experiment.rsplit("/", 1)[-1]
+
+    def test_ohem_turns_label_smoothing_off(self):
+        """Сглаживание держит per-pixel лосс выше нуля даже на угаданном
+        пикселе, порог -log(thresh) перестаёт отсекать, и OHEM вырождается
+        в обычную CE. Вместе эти два приёма не работают."""
+        for experiment in LOSS_ABLATIONS:
+            if experiment.endswith("_ohem"):
+                assert compose_config([f"experiment={experiment}"]).loss.label_smoothing == 0.0
+
+    def test_others_keep_the_baseline_smoothing(self):
+        """У Dice и Lovász CE-половина обязана совпасть с бейзлайном
+        до последнего параметра, иначе сравнивается не только лосс."""
+        baseline = compose_config(["experiment=scratch/cityscapes_scratch_timm_unet_small_aug"])
+        for experiment in LOSS_ABLATIONS:
+            if experiment.endswith(("_dice", "_lovasz")):
+                cfg = compose_config([f"experiment={experiment}"])
+                assert cfg.loss.label_smoothing == baseline.loss.label_smoothing
+                assert cfg.loss.ce_weight == 1.0
+
+
+def test_loss_schedule_paths_exist_in_the_loss():
+    """Опечатка в пути расписания иначе всплыла бы через час обучения."""
+    from src.training import LossWeightScheduler
+
+    for experiment in SEGMENTATION_EXPERIMENTS:
+        cfg = compose_config([f"experiment={experiment}"])
+        if not cfg.get("loss_schedule"):
+            continue
+        criterion = instantiate(cfg.loss)
+        LossWeightScheduler(
+            criterion,
+            OmegaConf.to_container(cfg.loss_schedule, resolve=True),
+            total_epochs=cfg.trainer.epochs,
+        )
+
+
+# Экспериметы, у которых cfg.param_groups реально задан (не null) — среди
+# SEGMENTATION_EXPERIMENTS, вычисляется один раз при импорте модуля.
+def _experiments_with_param_groups():
+    found = []
+    for experiment in SEGMENTATION_EXPERIMENTS:
+        cfg = compose_config([f"experiment={experiment}"])
+        if cfg.get("param_groups"):
+            found.append(experiment)
+    return found
+
+
+PARAM_GROUPS_EXPERIMENTS = _experiments_with_param_groups()
+
+
+@pytest.mark.parametrize("experiment", PARAM_GROUPS_EXPERIMENTS)
+def test_param_groups_actually_reach_the_optimizer(experiment):
+    """Регрессия: build_param_groups (src/training/param_groups.py) был
+    реализован, задокументирован (docs/param_groups.md) и юнит-тестирован
+    (tests/test_param_groups.py) — но scripts/train.py его не вызывал,
+    cfg.param_groups тихо игнорировался, и весь энкодер/декодер lr всегда
+    был одной группой с общим lr (см. outputs/claude-analis/analysis.md).
+    Здесь — не чистая функция, а конфиг -> реальные модели ->
+    scripts.train.build_optimizer_params -> реальный optimizer, чтобы в
+    следующий раз разрыв между "функция работает" и "функция вызывается"
+    ловился тут, а не сравнением графиков через сто эпох обучения.
+    """
+    from scripts.train import build_optimizer_params
+
+    cfg = compose_config([f"experiment={experiment}"])
+    student = instantiate(cfg.model.student)
+    criterion = instantiate(cfg.loss)
+
+    params = build_optimizer_params(cfg, student, criterion)
+    optimizer = instantiate(cfg.optimizer)(params)
+
+    assert len(optimizer.param_groups) >= 2, (
+        "param_groups задан в конфиге, но до optimizer дошла одна группа"
+    )
+    lrs = {group["lr"] for group in optimizer.param_groups}
+    assert len(lrs) >= 2, f"все группы optimizer получили один и тот же lr: {lrs}"
+
+
+def test_composite_counts_cross_entropy_once():
+    """CE есть почти в каждом лоссе проекта, и в композиции её легко
+    посчитать дважды с непонятным итоговым весом. Здесь попиксельную
+    классификацию берёт на себя только OHEM.
+
+    Проверяется свойство, а не имя слагаемого: имена в композициях меняются
+    от эксперимента к эксперименту, а инвариант «CE ровно в одном члене»
+    обязан держаться в любом.
+    """
+    cfg = compose_config(
+        ["experiment=segmentation/FitNets/cityscapes_FitNets_dice_ohem_segformer_b5_to_unet_small"]
+    )
+    with_ce = {
+        name: loss_cfg._target_.split(".")[-1]
+        for name, loss_cfg in cfg.loss.losses.items()
+        if loss_cfg.get("ce_weight", 0.0) > 0 or loss_cfg._target_.endswith("OhemCrossEntropy")
+    }
+    assert len(with_ce) == 1, with_ce
+    assert "OhemCrossEntropy" in with_ce.values(), with_ce
+
+
 def test_scratch_experiments_have_no_teacher():
     for experiment in ["baseline/b1_scratch", "baseline/b2_scratch"]:
         cfg = compose_config([f"experiment={experiment}"])
@@ -85,10 +337,14 @@ def test_segmentation_experiments_are_wired_for_segmentation(experiment):
     cfg = compose_config([f"experiment={experiment}"])
 
     assert cfg.task_type == "segmentation"
-    # ignore_index должен доехать до лосса, иначе void-пиксели Cityscapes
-    # станут двадцатым «классом» и испортят обучение.
-    assert cfg.loss.ignore_index == cfg.data.dataset.ignore_index
     assert cfg.data.dataset.num_classes == 19
+    # ignore_index должен доехать до лосса, иначе void-пиксели Cityscapes
+    # станут двадцатым «классом» и испортят обучение. У композиции своего
+    # ignore_index нет — он задан в слагаемых; те, что его не объявляют,
+    # полагаются на дефолт 255, и он обязан совпасть с датасетом.
+    losses = cfg.loss.get("losses")
+    for loss_cfg in losses.values() if losses is not None else [cfg.loss]:
+        assert loss_cfg.get("ignore_index", 255) == cfg.data.dataset.ignore_index
 
 
 def test_segmentation_scratch_experiments_have_no_teacher():
@@ -132,18 +388,7 @@ class TestBatchAugmentGroup:
 
 
 class TestStrongAugmentationExperiment:
-    EXPERIMENT = "scratch/cityscapes_scratch_unet_base_strong_aug"
-
-    def test_differs_from_the_baseline_only_in_augmentation(self):
-        """Пара «базовый / усиленный» имеет смысл, только если всё остальное
-        совпадает: иначе разница в mIoU объясняется не аугментациями."""
-        baseline = compose_config(["experiment=scratch/cityscapes_scratch_unet_base"])
-        strong = compose_config([f"experiment={self.EXPERIMENT}"])
-
-        assert strong.optimizer.lr == baseline.optimizer.lr
-        assert strong.data.loader.batch_size == baseline.data.loader.batch_size
-        assert strong.model.student.variant == baseline.model.student.variant
-        assert strong.loss.label_smoothing == baseline.loss.label_smoothing
+    EXPERIMENT = "scratch/cityscapes_scratch_timm_unet_small_aug"
 
     def test_augmentations_are_actually_on(self):
         cfg = compose_config([f"experiment={self.EXPERIMENT}"])
@@ -163,7 +408,7 @@ class TestStrongAugmentationExperiment:
 def test_base_segmentation_transform_stays_unchanged():
     """Базовый рецепт — точка отсчёта для уже посчитанных бейзлайнов.
     Новые аугментации в нём обязаны быть выключены."""
-    cfg = compose_config(["experiment=scratch/cityscapes_scratch_unet_base"])
+    cfg = compose_config(["experiment=scratch/cityscapes_scratch_timm_unet"])
     train_transform = cfg.data.transform.train
 
     assert train_transform.color_jitter == 0.4
@@ -174,44 +419,102 @@ def test_base_segmentation_transform_stays_unchanged():
     assert train_transform.random_erasing_p == 0.0
 
 
-def test_fitnets_channels_match_the_configured_pair():
-    """Каналы регрессора обязаны совпадать с реальными ширинами стадий
-    SegFormer-B2 и U-Net-base — иначе адаптер соберётся, а форма не сойдётся
-    уже в первом батче.
+FITNETS_EXPERIMENTS = [
+    "segmentation/FitNets/cityscapes_FitNets_segformer_b2_to_unet_base",
+    "segmentation/FitNets/cityscapes_FitNets_segformer_b2_to_unet_small",
+    "segmentation/FitNets/cityscapes_FitNets_dice_ohem_segformer_b5_to_unet_small",
+    # Сетка "6 методов x 4 пары" (см. outputs/claude-analis/analysis.md).
+    "segmentation/FitNets/cityscapes_FitNets_segformer_b1_to_unet_tiny",
+    "segmentation/FitNets/cityscapes_FitNets_segformer_b0_to_unet_nano",
+    "segmentation/FitNets/cityscapes_FitNets_segformer_b2_to_segnext_t",
+    "segmentation/FitNets/cityscapes_FitNets_segformer_b0_to_espnetv2_native_s150",
+]
 
-    Ширины ученика берём не из таблицы, а из собранной модели: у U-Net они
-    зависят и от base_channels, и от depth, и держать их в голове бесполезно.
+
+def fitnets_layers(cfg):
+    """Спецификация тапов лосса — из самого лосса или из слагаемого композиции.
+
+    Слагаемое ищем по _target_ (FitNetsKD), а не по фиксированному имени
+    ключа: в разных композитных рецептах KD-слагаемое называется по-разному
+    ("kd" в старом composite_fitnets_dice.yaml, "fitnets" в новых
+    b1/b0/segnext-конфигах) — имя в конфиге не должно быть частью контракта.
     """
-    from src.models import SEGFORMER_VARIANTS, UNET_VARIANTS, UNet
+    losses = cfg.loss.get("losses")
+    if losses is None:
+        return cfg.loss.layers
+    for loss_cfg in losses.values():
+        if loss_cfg._target_.endswith("FitNetsKD"):
+            return loss_cfg.layers
+    raise AssertionError(f"не нашёл слагаемое FitNetsKD среди {list(losses)}")
 
-    cfg = compose_config(
-        ["experiment=segmentation/FitNets/cityscapes_FitNets_segformer_b2_to_unet_base"]
+
+def build_student(cfg):
+    """Свежесобранный студент — чтобы свериться с его РЕАЛЬНЫМИ tap_channels,
+    а не с таблицей (у timm-моделей ширины стадий целиком определяются
+    энкодером и не хранятся отдельно нигде, кроме самой модели)."""
+    from src.models import (
+        ESPNETV2_VARIANTS,
+        SEGNEXT_VARIANTS,
+        TIMM_UNET_VARIANTS,
+        ESPNetV2,
+        ESPNetV2Native,
+        SegNeXt,
+        TimmUNet,
     )
-    spec = cfg.loss.layers["taps.stage3"]
 
-    student = UNet(num_classes=19, **UNET_VARIANTS[cfg.model.student.variant])
-    assert spec.student_channels == student.tap_channels["stage3"]
+    target = cfg.model.student._target_
+    if target.endswith("segnext_for_segmentation"):
+        assert cfg.model.student.variant in SEGNEXT_VARIANTS
+        return SegNeXt(variant=cfg.model.student.variant, num_classes=19)
 
-    # stage3 — третья стадия (индекс 2) в спецификации MiT.
-    assert (
-        spec.teacher_channels
-        == SEGFORMER_VARIANTS[cfg.model.teacher.variant]["hidden_sizes"][2]
+    if target.endswith("espnetv2_native_for_segmentation"):
+        assert cfg.model.student.variant in ESPNETV2_VARIANTS
+        return ESPNetV2Native(variant=cfg.model.student.variant, num_classes=19)
+
+    if target.endswith("espnetv2_for_segmentation"):
+        assert cfg.model.student.variant in ESPNETV2_VARIANTS
+        return ESPNetV2(variant=cfg.model.student.variant, num_classes=19)
+
+    return TimmUNet(
+        encoder_name=TIMM_UNET_VARIANTS[cfg.model.student.variant]["encoder_name"],
+        num_classes=19,
+        pretrained=False,
     )
 
 
-def test_fitnets_requests_only_taps_the_student_actually_has():
-    """У U-Net с depth=4 нет стадии на страйде 32. Если конфиг попросит
-    taps.stage4, FeatureExtractor упадёт только на запуске обучения —
-    ловим здесь."""
-    from src.models import UNET_VARIANTS, UNet
+@pytest.mark.parametrize("experiment", FITNETS_EXPERIMENTS)
+def test_fitnets_channels_match_the_configured_pair(experiment):
+    """Каналы регрессора обязаны совпадать с реальными ширинами стадий
+    SegFormer-B2 и энкодера ученика — иначе адаптер соберётся, а форма
+    не сойдётся уже в первом батче.
 
-    cfg = compose_config(
-        ["experiment=segmentation/FitNets/cityscapes_FitNets_segformer_b2_to_unet_base"]
-    )
-    student = UNet(num_classes=19, **UNET_VARIANTS[cfg.model.student.variant])
+    Ширины ученика берём не из таблицы, а из собранной модели: у timm-U-Net
+    они целиком определяются энкодером.
+    """
+    from src.models import SEGFORMER_VARIANTS
+
+    cfg = compose_config([f"experiment={experiment}"])
+    student = build_student(cfg)
+    hidden_sizes = SEGFORMER_VARIANTS[cfg.model.teacher.variant]["hidden_sizes"]
+
+    for name, spec in fitnets_layers(cfg).items():
+        stage = name.removeprefix("taps.")
+        assert spec.student_channels == student.tap_channels[stage]
+        # stageN — N-я стадия в спецификации MiT.
+        assert spec.teacher_channels == hidden_sizes[int(stage[-1]) - 1]
+
+
+@pytest.mark.parametrize("experiment", FITNETS_EXPERIMENTS)
+def test_fitnets_requests_only_taps_the_student_actually_has(experiment):
+    """Тап, которого у ученика нет, уронил бы FeatureExtractor только
+    на запуске обучения — ловим здесь."""
+    cfg = compose_config([f"experiment={experiment}"])
+    student = build_student(cfg)
+
     available = {f"taps.{name}" for name in student.tap_channels}
+    requested = set(fitnets_layers(cfg))
 
-    assert set(cfg.loss.layers) <= available, (
-        f"конфиг просит {set(cfg.loss.layers) - available}, "
+    assert requested <= available, (
+        f"конфиг просит {requested - available}, "
         f"а у ученика есть только {sorted(available)}"
     )

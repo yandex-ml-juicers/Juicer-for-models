@@ -3,6 +3,8 @@
 from torch import nn
 from torch.nn.parallel import DataParallel, DistributedDataParallel
 
+from src.models.multi_scale import MultiScaleInference
+
 
 def unwrap_model(model: nn.Module) -> nn.Module:
     """Разворачивает модель из-под обёрток DDP / DataParallel / torch.compile.
@@ -22,7 +24,9 @@ def unwrap_model(model: nn.Module) -> nn.Module:
     и наоборот).
     """
     while True:
-        if isinstance(model, (DataParallel, DistributedDataParallel)):
+        # MultiScaleInference — такая же обёртка: она держит модель в .module
+        # и добавляет свой уровень в named_modules().
+        if isinstance(model, (DataParallel, DistributedDataParallel, MultiScaleInference)):
             model = model.module
             continue
 

@@ -6,8 +6,10 @@
 разбирались в одном месте.
 """
 
+import argparse
 import shutil
 import urllib.request
+from collections.abc import Callable
 from pathlib import Path
 
 import torch
@@ -117,5 +119,58 @@ def load_checkpoint_into(
     state_dict = {key.removeprefix("module."): value for key, value in state_dict.items()}
 
     model.load_state_dict(state_dict, strict=strict)
+    print(f"Weights for {model_name} has been loaded: {weights_path}")
+    return model
+
+
+def load_converted_checkpoint(
+    model: nn.Module,
+    checkpoint_path: str,
+    convert: Callable[[dict], dict],
+    model_name: str,
+    strict: bool = True,
+    expected_prefix: str | None = None,
+) -> nn.Module:
+    """То же, что load_checkpoint_into, но с переименованием ключей.
+
+    Нужно для чужих чекпоинтов: имена модулей у mmsegmentation свои, и без
+    перевода в наши load_state_dict сообщил бы, что не совпало вообще ничего.
+
+    Чекпоинт нашего собственного тренера (ключ student_state) конвертер
+    оставляет как есть — это распознаётся по тому, что после перевода
+    не осталось ни одного ключа.
+
+    Args:
+        convert: {чужое имя: тензор} -> {наше имя: тензор}.
+        expected_prefix: если задан, при strict=False проверяется, что все
+            параметры модели с этим префиксом чекпоинт всё-таки покрыл.
+            Так частичная загрузка (только энкодер) не превращается молча
+            в «не загрузилось ничего».
+    """
+    weights_path = Path(to_absolute_path(checkpoint_path))
+    if not weights_path.is_file():
+        raise FileNotFoundError(f"Checkpoint file was not found: {weights_path}")
+
+    # weights_only=True остаётся включённым, но чекпоинты OpenMMLab кладут
+    # рядом с весами свою мету, в том числе argparse.Namespace, и загрузка
+    # падает на неразрешённом глобале. safe_globals разрешает ровно этот тип,
+    # а не отключает проверку целиком.
+    with torch.serialization.safe_globals([argparse.Namespace]):
+        checkpoint = torch.load(weights_path, map_location="cpu", weights_only=True)
+
+    state_dict = extract_state_dict(checkpoint)
+    state_dict = {key.removeprefix("module."): value for key, value in state_dict.items()}
+
+    converted = convert(state_dict) or state_dict
+
+    incompatible = model.load_state_dict(converted, strict=strict)
+    if expected_prefix is not None:
+        missing = [key for key in incompatible.missing_keys if key.startswith(expected_prefix)]
+        if missing:
+            raise RuntimeError(
+                f"В чекпоинте {weights_path} не нашлось {len(missing)} весов с префиксом "
+                f"{expected_prefix!r} (первый: {missing[0]}). Похоже, это чекпоинт другой модели."
+            )
+
     print(f"Weights for {model_name} has been loaded: {weights_path}")
     return model

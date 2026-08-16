@@ -1,0 +1,102 @@
+# @package _global_
+# DIST (arXiv:2205.10536): SegFormer-B2 -> U-Net-base.
+# Вместо точного совпадения вероятностей требуется совпадение ПОРЯДКА —
+# метод рассчитан ровно на случай большого разрыва между учителем и учеником,
+# а разрыв "предобученный трансформер против U-Net с нуля" здесь максимальный
+# из всей сетки.
+# Бейзлайн для этого прогона — scratch/cityscapes_scratch_unet_base.
+defaults:
+  - override /data/dataset: cityscapes_seg
+  - override /data/transform/train: cityscapes_seg_strong_transform_for_segmentation
+  - override /data/transform/eval: cityscapes_seg_transform
+  - override /model/teacher: segformer
+  - override /model/student: timm_unet
+  - override /loss: composite_dist_dice
+  - override /optimizer: adamw
+  - override /scheduler: warmup_cosine
+  - override /augment: cutmix_segmentation
+
+name: cityscapes_DIST_segformer_b5_to_timm_unet_small
+device: cuda
+deterministic: false
+
+task_type: "segmentation"
+
+clearml:
+  enabled: True
+  tags: [cityscapes, KD, DIST, segformer-b2, unet-smal, segmentation]
+  # Схожесть ученика с учителем по пикселям: KL и доля совпавших argmax'ов.
+  # Считаются по подвыборке пикселей на probe-батчах, цена — доли процента эпохи.
+  scalars: ['KL_divergence', 'agreement_rate']
+  plots:
+    enabled: true
+    every_n_epochs: 10
+  reuse_last_task_id: True
+  continue_last_task: False
+  output_uri: false
+
+trainer:
+  epochs: 200
+  amp: true
+  grad_clip_norm: 2.5
+
+loss:
+  losses:
+    dist:
+      _target_: src.losses.DISTLoss
+      temperature: 1.0
+      ce_weight: 0.0
+      beta: 2.3
+      gamma: 1.5
+      spatial_stride: 2
+      ignore_index: ${data.dataset.ignore_index}
+    dice:
+      _target_: src.losses.DiceLoss
+      ce_weight: 1.5
+      dice_weight: 2.5
+    lovasz:
+      _target_: src.losses.LovaszSoftmax
+      ce_weight: 0.0
+      lovasz_weight: 3.5
+      pixel_stride: 2
+      label_smoothing: 0.05
+      ignore_index: ${data.dataset.ignore_index}
+
+  weights:
+    dist: 3.5
+    dice: 1.0
+    lovasz: 0.5
+
+loss_schedule:
+  weights.dist: {schedule: cosine, start: 3.5, end: 2.00, start_epoch: 75}
+  weights.dice: {schedule: cosine, start: 1.0, end: 0.50, start_epoch: 75}
+  weights.lovasz: {schedule: cosine, start: 0.5, end: 1.25, start_epoch: 75}
+
+optimizer:
+  lr: 5.0e-4
+  weight_decay: 3.0e-2
+
+scheduler:
+  warmup_epochs: 30
+  eta_min: 1.0e-4
+
+data:
+  loader:
+    batch_size: 16
+    eval_batch_size: 10
+    num_workers: 16
+    pin_memory: true
+    persistent_workers: true
+
+model:
+  student:
+    variant: efficientnet_b0
+    pretrained: true
+    dropout: 0.1
+  teacher:
+    variant: b5
+    pretrained: cityscapes
+    checkpoint_path: null
+#  teacher_inference:
+#    scales: [1.0, 1.25]
+#    flip: true

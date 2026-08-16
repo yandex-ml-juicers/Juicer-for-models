@@ -22,9 +22,15 @@ class MetricsHistory:
     посреди обучения и позволяет столбцам появляться в любой момент.
     """
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, resume: bool = False) -> None:
         self.path = Path(path)
         self.rows: list[dict] = []
+        # При resume в тот же output_dir файл уже содержит эпохи до крэша —
+        # без подгрузки первый же _flush() переписал бы CSV только новыми
+        # строками и стёр историю.
+        if resume and self.path.exists():
+            with self.path.open(newline="") as f:
+                self.rows = list(csv.DictReader(f))
 
     def append(self, row: dict) -> None:
         self.rows.append(dict(row))

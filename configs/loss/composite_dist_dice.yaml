@@ -1,0 +1,21 @@
+_target_: src.losses.CompositeLoss
+_convert_: all
+
+losses:
+  dist:
+    _target_: src.losses.DISTLoss
+    temperature: 1.0
+    ce_weight: 0.0
+    beta: 1.0    # вес межклассового члена
+    gamma: 1.0   # вес внутриклассового члена
+
+  seg:
+    _target_: src.losses.DiceLoss
+    ce_weight: 1.0
+    dice_weight: 1.0
+    smooth: 1.0
+    ignore_index: ${data.dataset.ignore_index}
+
+weights:
+  dist: 0.7
+  seg: 0.3

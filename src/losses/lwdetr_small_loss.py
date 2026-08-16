@@ -11,7 +11,7 @@ class LWDETRLoss(DistillationLoss):
 
     def __init__(
         self,
-        return_all_components: bool = False,
+        return_all_components: bool = True,
     ) -> None:
         super().__init__()
 

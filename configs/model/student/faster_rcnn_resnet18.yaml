@@ -1,0 +1,2 @@
+_target_: src.models.factory.faster_rcnn_resnet18_for_detection
+num_classes: 8

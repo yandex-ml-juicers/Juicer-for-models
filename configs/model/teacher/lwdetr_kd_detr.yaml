@@ -1,0 +1,3 @@
+_target_: src.models.factory.lwdetr_small_for_detection
+num_classes: 8
+num_probe_points: 300

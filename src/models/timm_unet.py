@@ -167,6 +167,8 @@ class TimmUNet(nn.Module):
 # Числа замерены и проверяются тестом test_variant_sizes_match_the_table.
 #
 #   вариант                     всего   энкодер  ~парный U-Net
+#   mobilenetv3_small             1.25M    0.93M   наносайз (0.5-2M), см. ниже
+#   edgenext_xxs                  1.53M    1.16M   наносайз (0.5-2M), см. ниже
 #   mobilenetv2                  2.33M    1.81M   tiny  (1.94M)
 #   efficientnet_b0              4.24M    3.60M   small (4.37M)
 #   convnext_femto               6.58M    4.83M
@@ -177,12 +179,23 @@ class TimmUNet(nn.Module):
 #   convnext_nano_in12k         19.79M   14.95M   large (17.46M)
 #   resnet34                    24.50M   21.28M
 #
+# mobilenetv3_small/edgenext_xxs — под задачу "модели 0.5-2M параметров":
+# оба энкодера иерархические, с весами ImageNet-1k в timm
+# (mobilenetv3_small_100.lamb_in1k, edgenext_xx_small.in1k) и вместе с
+# декодером укладываются в 0.5-2M — специально подбирались по этому бюджету
+# (сравнивались реальные params-counts нескольких кандидатов: ghostnet_100,
+# mobilevit_xxs, lcnet_*, repghostnet_050 — у части из них декодер на широких
+# skip-каналах сам по себе не вписывается в бюджет, эти два — вписываются
+# с запасом и оба обучены на ImageNet).
+#
 # Про ImageNet-21k. Среди чистых CNN такого размера весов на полном 21k
 # практически нет: публично доступны либо in1k, либо ImageNet-12k (подмножество
 # 21k на 11821 класс) — и то лишь у двух моделей из списка. Тег весов timm
 # читает прямо из имени, после точки.
 TIMM_UNET_VARIANTS: dict[str, dict] = {
     # ImageNet-1k
+    "mobilenetv3_small": {"encoder_name": "mobilenetv3_small_100"},
+    "edgenext_xxs": {"encoder_name": "edgenext_xx_small"},
     "mobilenetv2": {"encoder_name": "mobilenetv2_100"},
     "efficientnet_b0": {"encoder_name": "efficientnet_b0"},
     "convnext_femto": {"encoder_name": "convnext_femto"},

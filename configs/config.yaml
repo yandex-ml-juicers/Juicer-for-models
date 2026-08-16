@@ -16,6 +16,7 @@ defaults:
   - augment: null
   - distributed: default
   - quantize: null
+  - prediction_postprocessors: null
   - experiment: null
 
 name: default # имя таски
@@ -29,7 +30,75 @@ deterministic_warn_only: false # лучше держать false
 device: auto  # auto | cuda | cuda:N | cpu
 
 ckpt_path: null
-task_type: 'classification' # Доступны опции ['classification', 'detection', 'segmentation'] 
+# Только для scripts/eval.py: какую модель конфига оценивать — student или
+# teacher. Учителю ckpt_path не нужен, он собирается уже с весами.
+eval_slot: student
+task_type: 'classification' # Доступны опции ['classification', 'detection', 'segmentation']
+
+# Продолжить упавший/остановленный запуск с последнего чекпоинта
+# (student/criterion/optimizer/scheduler/scaler/эпоха/лучшая метрика — см.
+# DetectionTrainer.load_checkpoint, SegmentationTrainer.load_checkpoint).
+# Поддержано для detection и segmentation
+#
+# Чтобы найти чекпоинт, output_dir нового запуска должен совпасть с output_dir
+# упавшего: hydra.run.dir строится из ${oc.env:JUICER_RUN_ID,...}, поэтому
+# нужно передать ТОТ ЖЕ JUICER_RUN_ID, что был у упавшего запуска, а не менять
+# hydra.run.dir напрямую — иначе трейнер молча стартует с нуля (см. warning
+# "resume=true, но .../last.pt не найден"):
+#   JUICER_RUN_ID=<run_id упавшего запуска> python scripts/train.py \
+#       experiment=<тот же эксперимент> resume=true
+resume: False # true — продолжить с output_dir/last.pt текущего запуска (см. JUICER_RUN_ID). Пока поддержано только для task_type=detection.
+
+model:
+  # Учителя апсемплить до разрешения, на котором его мерили/дообучали, и
+  # даунсемплить его логиты обратно к разрешению кропа СТУДЕНТА (только
+  # сегментация) — см. src/models/native_resolution_teacher.py. Лечит
+  # конкретно "учитель видит не то разрешение, на котором его меряли"
+  # (например SegFormer-B5-cityscapes дообучен на 1024x1024, а во время
+  # дистилляции получает кроп 512x1024) — не путать с teacher_inference ниже,
+  # тот ансамблирует масштабы ВОКРУГ текущего разрешения кропа, а не
+  # дотягивается до родного. null — обычный одиночный forward без апсемпла.
+  # НЕ совместим с feature-based KD (FitNets/HeteroAKD) — см. докстринг модуля.
+  #   teacher_native_resolution: {scale_factor: 2.0}
+  teacher_native_resolution: null
+
+  # Мультимасштабный прогон УЧИТЕЛЯ (только сегментация): таргеты считаются
+  # усреднением предсказаний по нескольким масштабам и отражению. null —
+  # обычный одиночный forward. Стоит по лишнему прогону учителя на масштаб.
+  # Компонуется с teacher_native_resolution (если задано, применяется первым).
+  #   teacher_inference: {scales: [0.75, 1.0, 1.25], flip: true}
+  teacher_inference: null
+
+  # Считать forward учителя КУСКАМИ батча вместо одного большого прогона
+  # (только сегментация) — см. src/models/chunked_teacher.py. У учителя нет
+  # градиентов, поэтому чанкинг даёт МАТЕМАТИЧЕСКИ ТОТ ЖЕ результат, просто
+  # экономнее по памяти — не приближение. Развязывает batch_size, под
+  # который тюнились lr/расписание оптимизатора (студент, criterion, шаг
+  # optimizer.step() используют batch_size целиком), от того, сколько влезает
+  # в ОДИН forward тяжёлого учителя. Особенно нужно вместе с
+  # teacher_native_resolution: апсемпленный батч целиком легко упирается в
+  # память или в лимит CUDA-ядра на число элементов тензора (проверено:
+  # SegFormer-B5 на входе 1024x2048 при батче 24 падает уже на этом лимите,
+  # не на памяти). null — без чанкинга, как раньше.
+  #   teacher_micro_batch_size: 4
+  teacher_micro_batch_size: null
+
+# Группы параметров оптимизатора: свой lr и weight decay энкодеру, декодеру
+# и обучаемым частям лосса. null — одна группа на всё, как раньше.
+# Все значения — МНОЖИТЕЛИ от optimizer.lr / optimizer.weight_decay, поэтому
+# перебор lr не ломает соотношение частей. Подробности — в
+# src/training/param_groups.py и docs/param_groups.md.
+#   param_groups:
+#     encoder_lr_mult: 0.1          # предобученному энкодеру — десятую долю lr
+#     no_decay_on_norm_and_bias: true
+param_groups: null
+
+# Расписание весов слагаемых лосса по эпохам; null — веса постоянны.
+# Ключ — путь к весу внутри лосса, значение — правило (см.
+# src/training/loss_schedule.py):
+#   loss_schedule:
+#     hint_weight: {schedule: linear, start: 0.7, end: 0.0, start_epoch: 120}
+loss_schedule: null
 
 # Трекинг в ClearML
 # Выключен по умолчанию, чтобы тесты работали оффлайн
@@ -39,13 +108,27 @@ clearml:
   tags: []  # теги для фильтрации экспериментов
   # Дополнительные метрики, которые надо ПОСЧИТАТЬ (базовые логируются всегда):
   # 'precision'/'recall'/'f1' — confusion matrix на train;
-  # 'KL_divergence'/'agreement_rate' — схожесть с учителем.
+  # 'KL_divergence'/'agreement_rate' — схожесть ученика с учителем (по пикселям);
+  # 'teacher_miou' — СОБСТВЕННОЕ качество учителя (сегментация, требует
+  #   model.teacher != null), train_teacher_mIoU по эпохам: на тех же
+  #   кропах/масштабе/аугментациях, что ПРЯМО СЕЙЧАС видит ученик при
+  #   дистилляции (почти бесплатно — teacher_logits и так считаются каждый
+  #   шаг ради KD-лосса, здесь только argmax+bincount). Отвечает на вопрос
+  #   "насколько сильные таргеты учитель выдаёт ученику прямо сейчас".
+  # 'teacher_native_miou' — НЕЗАВИСИМЫЙ флаг, разовый прогон на eval_loader
+  #   (родное разрешение, без кропа и без аугментаций — тот же путь, что
+  #   scripts/eval.py eval_slot=teacher), ~1-2 минуты один раз в начале
+  #   обучения, дальше просто повторяется как плоская линия-ориентир. Не
+  #   меняется по эпохам и обычно и так известно заранее — включайте вместе
+  #   с 'teacher_miou' только если хотите готовую линию сравнения на том же
+  #   графике. Разница между train_teacher_mIoU и teacher_native_mIoU —
+  #   диагностика "не сажаем ли мы учителя не в его разрешение", см. docs/clearML.md.
   scalars: []
   # Раздел Plots: per-class IoU, матрица ошибок, распределения норм и KL.
   # Строятся из уже накопленных агрегатов, поэтому почти бесплатны;
   # платная часть — только сравнение с учителем (probe_*).
   plots:
-    enabled: true
+    enabled: False
     every_n_epochs: 5   # период тяжёлых графиков (матрица ошибок); последняя эпоха всегда
     probe_batches: 20   # сколько батчей за эпоху идёт на сравнение ученика с учителем
     probe_pixels: 8192  # сколько пикселей берётся с каждого такого батча
@@ -54,11 +137,25 @@ clearml:
     debug_samples: 4          # сколько кадров показывать (0 — выключить картинки)
     debug_every_n_epochs: 10  # период отправки; последняя эпоха всегда
     debug_width: 512          # ширина одной панели, px (кадр 1024x2048 иначе весит мегабайты)
+    # Батч разового прогона teacher_native_miou (clearml.scalars: [teacher_miou]).
+    # НЕ путать с data.loader.eval_batch_size: тот подобран под студента,
+    # а тяжёлый учитель (SegFormer-B5 и т.п.) на родном разрешении 1024x2048
+    # в нём легко не поместится (проверено: OOM на batch=14). 4 — консервативно.
+    teacher_native_eval_batch_size: 4
   reuse_last_task_id: False # перезаписывать ли таску с таким же именем
   continue_last_task: False # подхватывать ли предыдущий ID и продолжать логирование
   output_uri: True # складывать ли артефакты/модели и если не куда-то базово, то url
   auto_connect_frameworks: {"pytorch": False,} # авто-перехват фреймворков
   auto_connect_arg_parser: False # авто-перехват аргументов из argparse
+  # Фоновый поток ClearML, который сам (без report_scalar от нас) шлёт
+  # графики :monitor:gpu/:monitor:machine (загрузка GPU/CPU/память/диск/сеть).
+  # Мы это не используем и не смотрим, а на старте он ждёт первую метрику,
+  # чтобы понять, что считать "итерацией", не находит (report_scalar у нас —
+  # раз в эпоху, не каждый шаг) и падает в "seconds-from-start" с задержкой
+  # ("ClearML Monitor: Could not detect iteration reporting..."). false —
+  # выключает монитор целиком (CPU-графики тоже, отдельного тумблера
+  # "только GPU" в ClearML нет).
+  auto_resource_monitoring: False
 
 # Настройка самой Hydra (подробнее описано в документации)
 hydra:

@@ -1,0 +1,118 @@
+# @package _global_
+# Сетка "6 методов дистилляции x 4 пары учитель/студент" (см.
+# outputs/claude-analis/analysis.md), пятая пара для nano-класса. Учитель
+# SegFormer-B0 (eval mIoU~0.7444) -> espnetv2_native/s150 — декодер ИЗ
+# ОРИГИНАЛЬНОЙ статьи EESPNet_Seg (0.72M целиком: энкодер 0.43M + декодер
+# 0.29M), а не наш UNetDoubleConv (тот при том же энкодере даёт 8M+ —
+# декодер статьи работает в num_classes-мерном пространстве, см. докстринг
+# ESPNetV2Native в src/models/espnetv2.py). Веса — ImageNet-классификатор
+# (официальный чекпоинт sacmehta/ESPNetv2), НЕ готовая Cityscapes-сборка —
+# ученик проходит весь KD-рецепт с нуля, как и остальные модели сетки.
+#
+# taps.stage4 у этой модели не существует (сегментации хватает страйда 16,
+# level5 энкодера не считается вовсе) — BPKD тапы не нужны, не влияет.
+#
+# Структура (dice+lovasz рядом с KD-членом, форма loss_schedule,
+# оптимизатор/батч/трейнер) — БЕЗ ИЗМЕНЕНИЙ из
+# segmentation/BPKD/cityscapes_BPKD_segformer_b0_to_unet_nano.yaml — меняется
+# только student.
+#
+# BPKD (arXiv:2306.08075): edge/body KL по логитам, тапы не нужны.
+defaults:
+  - override /data/dataset: cityscapes_seg
+  - override /data/transform/train: cityscapes_seg_strong_transform_for_segmentation
+  - override /data/transform/eval: cityscapes_seg_transform
+  - override /model/teacher: segformer
+  - override /model/student: espnetv2_native
+  - override /loss: composite_base
+  - override /optimizer: adamw
+  - override /scheduler: warmup_cosine
+  - override /augment: cutmix_segmentation
+
+name: cityscapes_BPKD_segformer_b0_to_espnetv2_native_s150
+device: cuda
+deterministic: false
+
+task_type: "segmentation"
+
+clearml:
+  enabled: True
+  tags: [cityscapes, KD, BPKD, segformer-b0, espnetv2-native-s150, segmentation]
+  scalars: ['KL_divergence', 'agreement_rate', 'teacher_miou']
+  plots:
+    enabled: False
+    every_n_epochs: 10
+  reuse_last_task_id: False
+  continue_last_task: False
+  output_uri: false
+
+trainer:
+  epochs: 100
+  amp: true
+  grad_clip_norm: 3.0
+
+loss:
+  losses:
+    bpkd:
+      _target_: src.losses.BPKDLoss
+      temperature: 2.0
+      ce_weight: 0.0
+      edge_weight: 1.3
+      body_weight: 0.5
+      edge_width: 7
+      spatial_stride: 2
+    dice:
+      _target_: src.losses.DiceLoss
+      ce_weight: 1.5
+      dice_weight: 2.5
+    lovasz:
+      _target_: src.losses.LovaszSoftmax
+      ce_weight: 0.0
+      lovasz_weight: 3.5
+      pixel_stride: 2
+      label_smoothing: 0.05
+      ignore_index: ${data.dataset.ignore_index}
+
+  weights:
+    bpkd: 1.0
+    dice: 1.0
+    lovasz: 0.5
+
+loss_schedule:
+  weights.bpkd: {schedule: cosine, start: 1.0, end: 0.50, start_epoch: 75}
+  weights.dice: {schedule: cosine, start: 1.0, end: 0.50, start_epoch: 75}
+  weights.lovasz: {schedule: cosine, start: 0.5, end: 1.25, start_epoch: 75}
+
+optimizer:
+  lr: 2.0e-3
+  weight_decay: 3.0e-2
+
+# Раздельный lr энкодер/декодер (docs/param_groups.md): энкодер предобучен,
+# декодер/голова — с нуля, общий lr бил бы по предобучению в первые эпохи.
+# encoder_lr_mult=0.35 -> энкодеру lr в ~2.86 раза ниже optimizer.lr
+# (энкодер — большая доля весов модели, 0.2 было слишком консервативно).
+param_groups:
+  encoder_lr_mult: 0.35
+  no_decay_on_norm_and_bias: false
+
+scheduler:
+  warmup_epochs: 10
+  eta_min: 1.5e-4
+
+data:
+  loader:
+    batch_size: 20
+    eval_batch_size: 12
+    num_workers: 20
+    pin_memory: true
+    persistent_workers: true
+
+model:
+  student:
+    variant: s150
+    pretrained: imagenet
+    dropout: 0.2
+  teacher:
+    variant: b0
+    pretrained: cityscapes
+    checkpoint_path: null

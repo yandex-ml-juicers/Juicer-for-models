@@ -1,0 +1,80 @@
+# @package _global_
+# Абляция лосса: OHEM Cross-Entropy вместо чистой CE.
+# Бейзлайн — scratch/cityscapes_scratch_timm_unet_small_aug; отличие ровно
+# одно, блок loss.
+#
+# Что должен показать прогон: CE усредняется по всем пикселям, а большинство
+# из них — уверенно предсказанная середина дороги и неба. Они почти не дают
+# градиента, но задают среднее, и шаг оптимизатора определяется лёгкими
+# пикселями. OHEM просто выбрасывает их из среднего.
+#
+# За чем следить в логах: train_loss_ohem против train_loss_ce. Сейчас они
+# совпадают (у необученной модели трудные все), и разойтись обязаны эпохе
+# к 30-50. Если к середине обучения разрыва так и нет — thresh слишком
+# мягкий, поднимайте отбор (thresh ниже, keep_ratio меньше).
+defaults:
+  - override /data/dataset: cityscapes_seg
+  - override /data/transform/train: cityscapes_seg_strong_transform
+  - override /data/transform/eval: cityscapes_seg_transform
+  - override /model/teacher: null
+  - override /model/student: timm_unet
+  - override /loss: ohem
+  - override /optimizer: adamw
+  - override /scheduler: warmup_cosine
+  - override /augment: cutmix_segmentation
+  - override /distributed: sync_bn
+
+name: cityscapes_scratch_timm_unet_small_aug_ohem
+device: cuda
+deterministic: false
+
+task_type: "segmentation"
+
+clearml:
+  enabled: True
+  tags: [cityscapes, student, scratch, timm_unet, segmentation, aug, ohem]
+  scalars: []
+  plots:
+    enabled: true
+    every_n_epochs: 20
+  reuse_last_task_id: True
+  continue_last_task: False
+  output_uri: false
+
+trainer:
+  epochs: 150
+  amp: true
+  grad_clip_norm: 1.0
+
+# label_smoothing здесь 0.0, а не 0.05 как в бейзлайне, и это НЕ описка.
+# Сглаживание держит per-pixel лосс выше нуля даже на идеально угаданном
+# пикселе, поэтому порог отбора -log(thresh) перестаёт что-либо отсекать
+# и OHEM вырождается в обычную CE. Два приёма против переуверенности
+# модели плохо совместимы; здесь выбран отбор.
+loss:
+  thresh: 0.7
+  keep_ratio: 0.1
+  label_smoothing: 0.0
+  ignore_index: ${data.dataset.ignore_index}
+
+optimizer:
+  lr: 3.25e-4
+  weight_decay: 3.0e-2
+
+scheduler:
+  warmup_epochs: 10
+  eta_min: 1.0e-6
+
+data:
+  loader:
+    batch_size: 16
+    eval_batch_size: 10
+    num_workers: 16
+    pin_memory: true
+    persistent_workers: true
+
+model:
+  student:
+    variant: efficientnet_b0
+    pretrained: true
+    dropout: 0.1

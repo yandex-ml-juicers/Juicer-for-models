@@ -1,0 +1,41 @@
+# ESPNetv2 — ученик семантической сегментации, декодер ИЗ ОРИГИНАЛЬНОЙ
+# статьи (EESPNet_Seg), а не наш UNetDoubleConv (см. configs/model/student/espnetv2.yaml).
+# Декодер работает в num_classes-мерном пространстве, а не в широких
+# каналах энкодера — на порядок легче нашего UNet-декодера при том же
+# энкодере, ценой того, что не подходит для "чистой абляции энкодера"
+# (декодер меняется вместе с архитектурой, не держится постоянным).
+#
+# Размеры (итого / из них энкодер), замерены тестом:
+#   s050   0.10M / 0.06M
+#   s100   0.34M / 0.21M
+#   s125   0.52M / 0.31M
+#   s150   0.73M / 0.44M
+#   s200   1.25M / 0.75M   <- пара к espnetv2.yaml/s050 (0.92M) и unet_nano (1.25M)
+#
+# pretrained: imagenet качает ТОТ ЖЕ официальный ImageNet-чекпоинт
+# EESPNet, что и espnetv2.yaml (level5/level5_0 в файле есть, но этой
+# модели не нужны — лишние ключи молча отбрасываются). Декодер всегда
+# случайный — у ESPNetv2 нет отдельных весов декодера без всей сборки на
+# Cityscapes целиком.
+#
+# Тапы — ТОЛЬКО stage1..stage3: у этой модели физически нет страйда 32
+# (сегментации хватает страйда 16, см. src/models/espnetv2.py). FitNets/
+# HeteroAKD на taps.stage4 с этим студентом несовместимы.
+_target_: src.models.factory.espnetv2_native_for_segmentation
+variant: s200
+num_classes: ${data.dataset.num_classes}
+in_channels: 3
+
+pretrained: imagenet
+# align_corners: true — как в оригинале (sacmehta/ESPNetv2), в отличие от
+# false у остальных моделей проекта. Влияет только на собственный апсемпл
+# этой модели, не на сравнение с учителем (align_logits — отдельный шаг).
+align_corners: true
+
+# Dropout2d перед project_l3/project_l1 (в оригинале 0.1 при s<=0.5, иначе 0.2).
+dropout: 0.2
+
+# Чекпоинт нашего тренера (ключ student_state). Если задан, pretrained
+# игнорируется.
+checkpoint_path: null
+weights_dir: data/weights

@@ -1,0 +1,80 @@
+# @package _global_
+# Абляция лосса: CE + Lovász-Softmax вместо чистой CE.
+# Бейзлайн — scratch/cityscapes_scratch_timm_unet_small_aug; отличие ровно
+# одно, блок loss.
+#
+# Что должен показать прогон: Lovász — точное выпуклое расширение (1 - IoU),
+# то есть единственный из трёх лоссов абляции, который минимизирует ровно ту
+# величину, которой меряется качество, а не её суррогат. Из всей тройки
+# именно на него разумно ставить, если цель — общий mIoU, а не отдельные
+# редкие классы.
+#
+# Цена: Lovász сортирует все пиксели по каждому присутствующему классу,
+# и это самая дорогая часть шага. pixel_stride=2 режет объём вчетверо;
+# если эпоха всё равно вырастет заметно против бейзлайна, поднимайте до 4 —
+# оценка Jaccard от этого не меняется.
+defaults:
+  - override /data/dataset: cityscapes_seg
+  - override /data/transform/train: cityscapes_seg_strong_transform
+  - override /data/transform/eval: cityscapes_seg_transform
+  - override /model/teacher: null
+  - override /model/student: timm_unet
+  - override /loss: composite_base
+  - override /optimizer: adamw
+  - override /scheduler: warmup_cosine
+  - override /augment: cutmix_segmentation
+  - override /distributed: sync_bn
+
+name: cityscapes_scratch_timm_unet_tiny_aug_lovasz
+device: cuda
+deterministic: false
+
+task_type: "segmentation"
+
+clearml:
+  enabled: True
+  tags: [cityscapes, student, scratch, timm_unet, segmentation, aug, lovasz]
+  scalars: []
+  plots:
+    enabled: true
+    every_n_epochs: 20
+  reuse_last_task_id: True
+  continue_last_task: False
+  output_uri: false
+
+trainer:
+  epochs: 100
+  amp: true
+  grad_clip_norm: 2.5
+
+loss:
+  losses:
+    lovasz:
+      _target_: src.losses.LovaszSoftmax
+      ce_weight: 1.0
+      lovasz_weight: 3.5
+      pixel_stride: 2
+      label_smoothing: 0.05
+      ignore_index: ${data.dataset.ignore_index}
+
+optimizer:
+  lr: 1.0e-3
+  weight_decay: 3.0e-2
+
+scheduler:
+  warmup_epochs: 20
+  eta_min: 2.0e-6
+
+data:
+  loader:
+    batch_size: 16
+    eval_batch_size: 10
+    num_workers: 16
+    pin_memory: true
+    persistent_workers: true
+
+model:
+  student:
+    variant: mobilenetv2
+    pretrained: true
+    dropout: 0.1
