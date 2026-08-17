@@ -322,6 +322,7 @@ def stage_build(cfg, onnx_path, artifacts, report) -> dict:
         verbose=bool(settings.verbose),
         detailed_layers=bool(settings.get("detailed_layers", True)),
         fp32_layers=list(settings.get("fp32_layers") or []),
+        fp32_margin=int(settings.get("fp32_margin") or 0),
     )
     report.stage("build", result.meta)
     return result.meta

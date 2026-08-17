@@ -364,6 +364,23 @@ def test_acceptance_uses_the_noise_floor_when_the_model_is_stochastic():
     assert aware["noise_agreement"] == 0.99783
 
 
+def test_acceptance_catches_nan_metrics_that_l1_missed():
+    """Редкий NaN не виден на десяти кадрах L1, но виден на всей выборке L2.
+
+    Реальный случай: `nonfinite=0` на сравнении, `loss=NaN` на валидации.
+    mIoU при этом почти не просела — argmax от NaN молча возвращает класс.
+    """
+    verdict = check_acceptance(
+        {"miou": 0.8079, "loss": 0.134},
+        {"miou": 0.8052, "loss": float("nan")},
+        {"argmax_agreement": 0.9979, "nonfinite": 0.0},
+        task_type="segmentation", max_metric_drop=0.005, min_agreement=0.999,
+        noise_floor={"argmax_agreement": 0.9978},
+    )
+    assert not verdict["passed"]
+    assert "NaN/Inf" in verdict["violations"][0] and "loss" in verdict["violations"][0]
+
+
 def test_acceptance_catches_silent_prediction_drift():
     """Метрика та же, а предсказания поменялись — приёмка обязана падать."""
     verdict = check_acceptance(

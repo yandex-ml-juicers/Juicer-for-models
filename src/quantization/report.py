@@ -1,6 +1,7 @@
 """Отчёт PTQ-запуска: report.json и таблицы рядом с ним"""
 
 import json
+import math
 import logging
 from pathlib import Path
 from typing import Any
@@ -88,6 +89,21 @@ def check_acceptance(
         violations.append(
             f"кандидат выдаёт NaN/Inf на {nonfinite * 100:.2f}% выходов — движок сломан, "
             f"а не потерял точность"
+        )
+
+    # L1 считается на нескольких батчах, L2 — на всей выборке, и редкий NaN
+    # виден только во втором. Проверено на SegNeXt: nonfinite=0 на десяти
+    # кадрах при loss=NaN на пятистах. mIoU при этом почти не страдает, потому
+    # что argmax от NaN молча возвращает класс, — так что метрику надо
+    # проверять на конечность отдельно, а не полагаться на её величину.
+    broken = sorted(
+        key for key, value in candidate.items()
+        if isinstance(value, float) and not math.isfinite(value)
+    )
+    if broken:
+        violations.append(
+            f"метрики кандидата содержат NaN/Inf: {', '.join(broken)}. На части выборки "
+            f"движок считает мусор, хотя на сравнении L1 это не проявилось"
         )
     if drop > max_metric_drop:
         violations.append(

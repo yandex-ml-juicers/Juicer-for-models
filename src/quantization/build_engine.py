@@ -196,7 +196,7 @@ def _apply_precision(trt: Any, builder: Any, config: Any, network: Any, precisio
 
 
 def constrain_layer_precision(
-    trt: Any, network: Any, patterns: Sequence[str], span: bool = True
+    trt: Any, network: Any, patterns: Sequence[str], span: bool = True, margin: int = 0
 ) -> dict:
     """Заставляет TensorRT считать выбранные слои в fp32.
 
@@ -232,7 +232,16 @@ def constrain_layer_precision(
 
     matched = [index for index, name in enumerate(names)
                if any(pattern in name for pattern in patterns)]
-    selected = range(min(matched), max(matched) + 1) if span else matched
+    if span:
+        # margin — запас по краям диапазона. Нужен потому, что опасны не только
+        # операции между якорями, но и границы: каст результата обратно в fp16
+        # стоит сразу ЗА последним якорем, и если значение вылезло за 65504,
+        # получается Inf. Подобрать имя такого слоя нельзя — он безымянный
+        # служебный, а вот отступить от якоря на несколько слоёв можно.
+        selected = range(max(0, min(matched) - margin),
+                         min(len(names), max(matched) + margin + 1))
+    else:
+        selected = matched
 
     constrained, skipped = [], []
     for index in selected:
@@ -248,6 +257,7 @@ def constrain_layer_precision(
     summary = {
         "patterns": list(patterns),
         "span": span,
+        "margin": margin,
         "layers_total": len(names),
         "layers_matched": len(matched),
         "layers_constrained": len(constrained),
@@ -360,6 +370,7 @@ def build_engine(
     verbose: bool = False, # поднять INFO-поток TRT из DEBUG в INFO
     detailed_layers: bool = True, # хранить в движке разбор слоёв (иначе не узнать, что ушло в fp16)
     fp32_layers: Sequence[str] | None = None, # шаблоны имён слоёв, которые обязаны остаться в fp32
+    fp32_margin: int = 0, # запас по краям диапазона: границы (касты) тоже бывают опасны
 ) -> BuildResult:
     """Собирает `.engine` из `.onnx` и пишет рядом паспорт сборки"""
 
@@ -410,7 +421,9 @@ def build_engine(
         if precision == "fp32":
             log.info("fp32_layers не нужны: движок и так целиком в fp32.")
         else:
-            precision_constraints = constrain_layer_precision(trt, network, list(fp32_layers))
+            precision_constraints = constrain_layer_precision(
+                trt, network, list(fp32_layers), margin=fp32_margin
+            )
             # OBEY, а не PREFER: PREFER при невозможности соблюсти ограничение
             # тихо откатывается — то есть возвращает ровно тот NaN, от которого
             # мы защищаемся, и молча. Пусть лучше падает сборка.
