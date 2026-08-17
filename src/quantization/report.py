@@ -11,6 +11,11 @@ log = logging.getLogger(__name__)
 
 TARGET_METRIC = {"classification": "accuracy", "segmentation": "miou"}
 
+# Запас при сравнении кандидата с собственным шумом модели: обе величины —
+# измерения на конечной выборке, и требовать строгого «не хуже» значило бы
+# ловить их взаимный разброс.
+NOISE_SLACK = 0.001
+
 class QuantizationReport:
     def __init__(self, output_dir: str | Path, name: str = "report.json") -> None:
         self.output_dir = Path(output_dir)
@@ -54,6 +59,7 @@ def check_acceptance(
     task_type: str = "classification",
     max_metric_drop: float = 0.005,
     min_agreement: float = 0.99,
+    noise_floor: dict | None = None,
 ) -> dict:
     metric_key = TARGET_METRIC.get(task_type)
     if metric_key is None:
@@ -62,6 +68,17 @@ def check_acceptance(
     drop = baseline[metric_key] - candidate[metric_key]
     agreement = comparison.get("argmax_agreement", 0.0)
     nonfinite = comparison.get("nonfinite", 0.0)
+
+    # Порог совпадения предсказаний недостижим, если модель не сходится сама с
+    # собой: SegNeXt даёт 0.9978 против самого себя при пороге 0.9990, и
+    # исправный fp32-движок браковался наравне со сломанным fp16. Когда шум
+    # измерен, требование становится осмысленным: кандидат не должен быть хуже,
+    # чем модель сама себе. NOISE_SLACK — на то, что обе величины сами измерены
+    # с погрешностью.
+    effective_min_agreement = min_agreement
+    noise_agreement = (noise_floor or {}).get("argmax_agreement")
+    if noise_agreement is not None and noise_agreement < min_agreement:
+        effective_min_agreement = noise_agreement - NOISE_SLACK
 
     violations = []
     # Первым делом и отдельной строкой: NaN на выходе — это не «просела
@@ -77,9 +94,14 @@ def check_acceptance(
             f"{metric_key} просела на {drop:.4f} при допуске {max_metric_drop:.4f} "
             f"({baseline[metric_key]:.4f} -> {candidate[metric_key]:.4f})"
         )
-    if agreement < min_agreement:
+    if agreement < effective_min_agreement:
+        relaxed = (
+            f" (порог опущен до собственного шума модели {noise_agreement:.4f})"
+            if effective_min_agreement != min_agreement else ""
+        )
         violations.append(
-            f"совпадение предсказаний с fp32 {agreement:.4f} ниже порога {min_agreement:.4f}"
+            f"совпадение предсказаний с fp32 {agreement:.4f} ниже порога "
+            f"{effective_min_agreement:.4f}{relaxed}"
         )
 
     verdict = {
@@ -91,6 +113,8 @@ def check_acceptance(
         "max_metric_drop": max_metric_drop,
         "argmax_agreement": agreement,
         "min_agreement": min_agreement,
+        "min_agreement_effective": effective_min_agreement,
+        "noise_agreement": noise_agreement,
         "violations": violations,
     }
 

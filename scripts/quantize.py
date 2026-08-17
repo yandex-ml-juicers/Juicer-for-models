@@ -321,6 +321,7 @@ def stage_build(cfg, onnx_path, artifacts, report) -> dict:
         timing_cache_path=engine_path.parent / "timing.cache" if settings.timing_cache else None,
         verbose=bool(settings.verbose),
         detailed_layers=bool(settings.get("detailed_layers", True)),
+        fp32_layers=list(settings.get("fp32_layers") or []),
     )
     report.stage("build", result.meta)
     return result.meta
@@ -398,6 +399,7 @@ def stage_validate(cfg, reference, candidate, loader, device, report) -> dict:
         task_type=task_type,
         max_metric_drop=float(settings.max_metric_drop),
         min_agreement=float(settings.min_agreement),
+        noise_floor=noise_floor,
     )
 
     payload = {

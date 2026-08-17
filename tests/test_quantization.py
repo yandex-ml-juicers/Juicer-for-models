@@ -292,6 +292,78 @@ def test_acceptance_names_nan_a_breakage_not_a_metric_drop():
     assert "NaN/Inf" in verdict["violations"][0]
 
 
+class _ConstraintLayer:
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.num_outputs = 1
+        self.precision = None
+        self.output_types: list = []
+
+    def set_output_type(self, index: int, dtype) -> None:
+        self.output_types.append((index, dtype))
+
+
+class _ConstraintNetwork:
+    def __init__(self, names: list[str]) -> None:
+        self.layers = [_ConstraintLayer(name) for name in names]
+        self.num_layers = len(names)
+
+    def get_layer(self, index: int) -> _ConstraintLayer:
+        return self.layers[index]
+
+
+def test_precision_constraints_cover_the_whole_chain():
+    """Опасна цепочка, а не отдельная операция: между якорями всё в fp32.
+
+    Реальный случай: `bmm` в fp32, а следующее за ним деление в fp16 — и
+    результат всё равно NaN, потому что знаменатель там почти ноль.
+    """
+    from src.quantization.build_engine import constrain_layer_precision
+
+    trt = type("trt", (), {"float32": "FP32"})
+    network = _ConstraintNetwork([
+        "node_conv2d_1", "node_relu_2",           # энкодер, остаётся в fp16
+        "node_bmm_1", "node_div_5", "node_bmm_2",  # NMF: якоря и то, что между
+        "node_conv2d_9",                           # снова fp16
+    ])
+
+    summary = constrain_layer_precision(trt, network, ["bmm"])
+
+    assert summary["index_range"] == [2, 4]
+    assert summary["layers_constrained"] == 3, "деление между bmm обязано попасть в fp32"
+    assert network.get_layer(3).precision == "FP32"
+    assert network.get_layer(0).precision is None and network.get_layer(5).precision is None
+
+
+def test_precision_constraints_fail_loudly_on_stale_pattern():
+    """Не нашедший ничего шаблон = молча отключённая защита. Это хуже, чем её нет."""
+    from src.quantization.build_engine import constrain_layer_precision
+
+    trt = type("trt", (), {"float32": "FP32"})
+    with pytest.raises(ValueError, match="не нашли ни одного слоя"):
+        constrain_layer_precision(trt, _ConstraintNetwork(["node_conv2d_1"]), ["bmm"])
+
+
+def test_acceptance_uses_the_noise_floor_when_the_model_is_stochastic():
+    """Порог 0.999 недостижим, если модель даёт 0.9978 сама с собой.
+
+    На этом реально забраковался исправный fp32-движок: 0.9979 против порога
+    0.9990 при шуме 0.9978.
+    """
+    metrics = ({"miou": 0.8079}, {"miou": 0.8076})
+    comparison = {"argmax_agreement": 0.99788, "nonfinite": 0.0}
+
+    strict = check_acceptance(*metrics, comparison, task_type="segmentation",
+                              max_metric_drop=0.005, min_agreement=0.999)
+    assert not strict["passed"], "без замера шума порог остаётся абсолютным"
+
+    aware = check_acceptance(*metrics, comparison, task_type="segmentation",
+                             max_metric_drop=0.005, min_agreement=0.999,
+                             noise_floor={"argmax_agreement": 0.99783})
+    assert aware["passed"], "кандидат не хуже, чем модель сама себе"
+    assert aware["noise_agreement"] == 0.99783
+
+
 def test_acceptance_catches_silent_prediction_drift():
     """Метрика та же, а предсказания поменялись — приёмка обязана падать."""
     verdict = check_acceptance(

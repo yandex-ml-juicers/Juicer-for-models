@@ -195,6 +195,73 @@ def _apply_precision(trt: Any, builder: Any, config: Any, network: Any, precisio
     return "типы графа (strongly typed)"
 
 
+def constrain_layer_precision(
+    trt: Any, network: Any, patterns: Sequence[str], span: bool = True
+) -> dict:
+    """Заставляет TensorRT считать выбранные слои в fp32.
+
+    Зачем. Защита точности, написанная в модели на уровне PyTorch
+    (`torch.autocast(enabled=False)`, `x.float()`), до движка не доезжает: в
+    ONNX она становится обычными узлами `Cast`, а билдер в слабо
+    типизированном режиме вправе их игнорировать. Проверено на SegNeXt —
+    NMF-разложение уехало в fp16 и выдало NaN. Требовать точность надо здесь,
+    у билдера.
+
+    `span=True` — ключевой режим. Опасны не отдельные операции, а цепочка:
+    если `bmm` посчитан в fp32, а следующее за ним деление осталось в fp16,
+    результат всё равно уедет в NaN, потому что знаменатель там почти ноль по
+    построению. Поэтому шаблоны работают якорями: берётся диапазон от первого
+    совпадения до последнего, и всё между ними уходит в fp32.
+
+    Имена слоёв здесь — ДО слияния (то, что дал парсер ONNX), а не те, что
+    видны в `<движок>.layers.json` после сборки. Совпадают только исходные
+    имена узлов вроде `node_bmm_7`; myelin-идентификаторов (`myl309`) на этом
+    этапе ещё не существует.
+    """
+    names = [network.get_layer(index).name for index in range(network.num_layers)]
+
+    missing = [pattern for pattern in patterns
+               if not any(pattern in name for name in names)]
+    if missing:
+        raise ValueError(
+            f"Шаблоны {missing} не нашли ни одного слоя из {len(names)}. Молча оставить "
+            f"это нельзя: значит защита точности не действует, а движок соберётся и будет "
+            f"выдавать NaN. Проверь имена в <движок>.layers.json — они могли измениться "
+            f"после переэкспорта."
+        )
+
+    matched = [index for index, name in enumerate(names)
+               if any(pattern in name for pattern in patterns)]
+    selected = range(min(matched), max(matched) + 1) if span else matched
+
+    constrained, skipped = [], []
+    for index in selected:
+        layer = network.get_layer(index)
+        try:
+            layer.precision = trt.float32
+            for output in range(layer.num_outputs):
+                layer.set_output_type(output, trt.float32)
+            constrained.append(layer.name)
+        except Exception as error:  # noqa: BLE001 — часть типов слоёв точность не принимает
+            skipped.append(f"{layer.name}: {error}")
+
+    summary = {
+        "patterns": list(patterns),
+        "span": span,
+        "layers_total": len(names),
+        "layers_matched": len(matched),
+        "layers_constrained": len(constrained),
+        "index_range": [min(selected), max(selected)] if constrained else None,
+        "skipped": skipped[:5],
+    }
+    log.info(
+        "В fp32 переведено %d слоёв из %d (якорей %d, диапазон %s)%s",
+        len(constrained), len(names), len(matched), summary["index_range"],
+        f", пропущено {len(skipped)}" if skipped else "",
+    )
+    return summary
+
+
 def _parse_onnx(trt: Any, network: Any, logger: Any, onnx_path: Path) -> None:
     parser = trt.OnnxParser(network, logger)
     if parser.parse_from_file(str(onnx_path)):
@@ -292,6 +359,7 @@ def build_engine(
     timing_cache_path: str | Path | None = None, # файл кэша замеров тактик. Общий на все сборки. Ускоряет повторные сборки
     verbose: bool = False, # поднять INFO-поток TRT из DEBUG в INFO
     detailed_layers: bool = True, # хранить в движке разбор слоёв (иначе не узнать, что ушло в fp16)
+    fp32_layers: Sequence[str] | None = None, # шаблоны имён слоёв, которые обязаны остаться в fp32
 ) -> BuildResult:
     """Собирает `.engine` из `.onnx` и пишет рядом паспорт сборки"""
 
@@ -336,6 +404,17 @@ def build_engine(
     config = builder.create_builder_config()
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, workspace_bytes)
     precision_route = _apply_precision(trt, builder, config, network, precision)
+
+    precision_constraints = None
+    if fp32_layers:
+        if precision == "fp32":
+            log.info("fp32_layers не нужны: движок и так целиком в fp32.")
+        else:
+            precision_constraints = constrain_layer_precision(trt, network, list(fp32_layers))
+            # OBEY, а не PREFER: PREFER при невозможности соблюсти ограничение
+            # тихо откатывается — то есть возвращает ровно тот NaN, от которого
+            # мы защищаемся, и молча. Пусть лучше падает сборка.
+            config.set_flag(trt.BuilderFlag.OBEY_PRECISION_CONSTRAINTS)
 
     if detailed_layers:
         # По умолчанию TensorRT хранит в движке только имена слоёв, и инспектор
@@ -393,6 +472,7 @@ def build_engine(
         "sha256": sha256_file(output_path),
         "precision": precision,
         "precision_route": precision_route,
+        "precision_constraints": precision_constraints,
         "graph_precisions": sorted(graph_precisions(network)),
         "source_onnx": str(onnx_path),
         "source_onnx_sha256": sha256_file(onnx_path),
