@@ -424,16 +424,8 @@ def yolo(
 
     if weights != "random":
         if weights is None:
-            # null — канонический претрейн. Путь ниже отдаётся в YOLO(...)
-            # как есть: если файла там нет, ultralytics сама докачает его
-            # туда (attempt_download_asset по имени файла), так что
-            # повторный запуск уже ничего не тянет из сети.
             weights_path = resolve_weights_dir(weights_dir) / f"{model_name}.pt"
         else:
-            # hydra.job.chdir=True: CWD — это каталог запуска, поэтому путь из
-            # конфига разворачивается в абсолютный. Явная ошибка лучше молчаливой
-            # докачки для явно заданного пути: иначе прогон стартует не с тех
-            # весов, что в конфиге.
             weights_path = Path(to_absolute_path(str(weights)))
             if not weights_path.is_file():
                 raise FileNotFoundError(
@@ -444,10 +436,6 @@ def yolo(
         pretrained_model = YOLO(str(weights_path)).model
         model.load(pretrained_model, verbose=True)
 
-    # Dropout2d(p=0) — не бесплатный no-op: это лишний Sequential и лишний
-    # CUDA-кернел на каждый C2f/SPPF/Detect-branch, на каждом шаге forward и
-    # backward. При дообучении дропауты часто выключены (p=0), поэтому слои
-    # оборачиваются только когда дропаут реально используется.
     dropout_applied = {"backbone": False, "neck": False, "bbox": False, "cls": False}
 
     for layer in model.model:
