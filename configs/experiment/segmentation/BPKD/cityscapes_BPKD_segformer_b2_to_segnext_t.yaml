@@ -78,10 +78,8 @@ loss_schedule:
   weights.lovasz: {schedule: cosine, start: 0.5, end: 1.25, start_epoch: 75}
 
 optimizer:
-  # lr/wd — НЕ из шаблона (тот 1.5e-3 подобран под U-Net-декодер): SegNeXt
-  # использует свою, заметно более низкую lr (см. scratch/cityscapes_scratch_segnext_t.yaml).
-  lr: 6.0e-5
-  weight_decay: 1.0e-2
+  lr: 2.0e-3
+  weight_decay: 3.0e-2
 
 # Раздельный lr энкодер/декодер (docs/param_groups.md): энкодер предобучен,
 # декодер/голова — с нуля, общий lr бил бы по предобучению в первые эпохи.
@@ -93,7 +91,7 @@ param_groups:
 
 scheduler:
   warmup_epochs: 10
-  eta_min: 1.0e-6
+  eta_min: 1.5e-4
 
 data:
   loader:
@@ -101,7 +99,7 @@ data:
     # означает, что и учитель считается в fp32, а не fp16 — заметно больше
     # памяти. Не проверял точное значение под каждую пару — если не влезет,
     # убавляйте дальше или добавляйте +model.teacher_micro_batch_size=N.
-    batch_size: 12
+    batch_size: 16  
     eval_batch_size: 10
     num_workers: 16
     pin_memory: true

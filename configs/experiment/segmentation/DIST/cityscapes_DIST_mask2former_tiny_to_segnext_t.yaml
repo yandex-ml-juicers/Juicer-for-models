@@ -1,5 +1,5 @@
 # @package _global_
-# Тестовый прогон: Mask2Former-tiny (Swin-T, 47M) -> SegNeXt-T (4.3M) с DIST
+# Полное обучение: Mask2Former-tiny (Swin-T, 47M) -> SegNeXt-T (4.3M) с DIST
 # (arXiv:2205.10536) — пара к
 # segmentation/BPKD/cityscapes_BPKD_mask2former_tiny_to_segnext_t.yaml, тот
 # же учитель/студент, другой метод дистилляции. DIST вместо точного
@@ -8,9 +8,9 @@
 # класса (intra). Тоже не требует тапов признаков.
 #
 # Лосс — целиком group `loss/composite_dist_dice` без переопределений
-# (dist 0.7 + dice 0.3, дефолтные temperature/beta/gamma) — для теста
-# нарочно не тюнил веса, как в более отлаженном
-# segmentation/DIST/cityscapes_DIST_segformer_b5_to_timm_unet_small.yaml.
+# (dist 0.7 + dice 0.3, дефолтные temperature/beta/gamma), как в
+# segmentation/DIST/cityscapes_DIST_segformer_b2_to_segnext_t.yaml. Остальные
+# гиперпараметры (lr/batch/schedule) — оттуда же, SegNeXt-специфичные.
 defaults:
   - override /data/dataset: cityscapes_seg
   - override /data/transform/train: cityscapes_seg_strong_transform_for_segmentation
@@ -30,7 +30,7 @@ task_type: "segmentation"
 
 clearml:
   enabled: True
-  tags: [cityscapes, KD, DIST, mask2former-tiny, segnext-t, segmentation, test]
+  tags: [cityscapes, KD, DIST, mask2former-tiny, segnext-t, segmentation]
   scalars: ['KL_divergence', 'agreement_rate', 'teacher_miou']
   plots:
     enabled: False
@@ -42,15 +42,13 @@ clearml:
 trainer:
   epochs: 100
   # amp: false — НЕ опечатка, см. scratch/cityscapes_scratch_segnext_t.yaml:
-  # под AMP градиент SegNeXt-студента обнуляется за 2-3 эпохи (проверено
-  # диагностикой на этом же студенте), выключен до тех пор, пока не найдено
-  # точное нестабильное место в src/models/segnext.py.
+  # под AMP градиент SegNeXt-студента обнуляется за 2-3 эпохи.
   amp: false
   grad_clip_norm: 10.0
 
 optimizer:
-  lr: 6.0e-5
-  weight_decay: 1.0e-2
+  lr: 2.0e-3
+  weight_decay: 3.0e-2
 
 # Раздельный lr энкодер/декодер (docs/param_groups.md): энкодер предобучен,
 # декодер/голова — с нуля, общий lr бил бы по предобучению в первые эпохи.
@@ -62,15 +60,11 @@ param_groups:
 
 scheduler:
   warmup_epochs: 10
-  eta_min: 1.0e-6
+  eta_min: 1.5e-4
 
 data:
   loader:
-    # batch_size снижен вдвое (24 -> 12): amp:false означает, что и учитель
-    # Mask2Former-tiny теперь считается в fp32, а не в fp16, как в версии,
-    # которая была смоук-тестирована при 24. Не перепроверял — если не
-    # влезет, убавляйте дальше.
-    batch_size: 12
+    batch_size: 16
     eval_batch_size: 10
     num_workers: 16
     pin_memory: true

@@ -1,10 +1,16 @@
 # @package _global_
-# Полное обучение: Mask2Former-tiny (Swin-T, 47M) -> SegNeXt-T (4.3M) с BPKD.
-# Гиперпараметры — от отлаженного
-# segmentation/BPKD/cityscapes_BPKD_segformer_b2_to_segnext_t.yaml (тот же
-# студент, SegNeXt-специфичные lr/batch/schedule), меняется только учитель.
-# BPKD не требует тапов признаков (requires_teacher=True, required_features=()
-# в src/losses/bpkd.py), архитектура студента лоссу безразлична.
+# Полное обучение: Mask2Former-tiny (Swin-T, 47M) -> SegNeXt-T (4.3M) с
+# FitNets. Гиперпараметры — от отлаженного
+# segmentation/FitNets/cityscapes_FitNets_segformer_b2_to_segnext_t.yaml (тот
+# же студент, SegNeXt-специфичные lr/batch/schedule), меняется учитель и
+# teacher_channels тапов.
+#
+# FitNets (arXiv:1412.6550): hint по stage3+stage4. Student (SegNeXt-T,
+# без изменений от b2-версии): stage3=160, stage4=256. Teacher — Swin-T
+# энкодер Mask2Former-tiny (encoder_hidden_states, см. докстринг
+# src/models/mask2former.py): канонические каналы Swin-Tiny по стадиям —
+# 96/192/384/768, то есть stage3=384, stage4=768 (та же цифра, что уже
+# используется в HeteroAKD-паре с этим учителем — согласовано).
 defaults:
   - override /data/dataset: cityscapes_seg
   - override /data/transform/train: cityscapes_seg_strong_transform_for_segmentation
@@ -16,7 +22,7 @@ defaults:
   - override /scheduler: warmup_cosine
   - override /augment: cutmix_segmentation
 
-name: cityscapes_BPKD_mask2former_tiny_to_segnext_t
+name: cityscapes_FitNets_mask2former_tiny_to_segnext_t
 device: cuda
 deterministic: false
 
@@ -24,7 +30,7 @@ task_type: "segmentation"
 
 clearml:
   enabled: True
-  tags: [cityscapes, KD, BPKD, mask2former-tiny, segnext-t, segmentation]
+  tags: [cityscapes, KD, FitNets, mask2former-tiny, segnext-t, segmentation]
   scalars: ['KL_divergence', 'agreement_rate', 'teacher_miou']
   plots:
     enabled: False
@@ -42,14 +48,18 @@ trainer:
 
 loss:
   losses:
-    bpkd:
-      _target_: src.losses.BPKDLoss
-      temperature: 2.0
+    fitnets:
+      _target_: src.losses.FitNetsKD
+      _convert_: all
       ce_weight: 0.0
-      edge_weight: 1.3
-      body_weight: 0.5
-      edge_width: 7
-      spatial_stride: 2
+      hint_weight: 1.0
+      logits_weight: 0.6
+      temperature: 2.0
+      normalize_features: false
+      layers:
+        taps.stage3: { student_channels: 160, teacher_channels: 384, weight: 1.4 }
+        taps.stage4: { student_channels: 256, teacher_channels: 768, weight: 0.8 }
+      ignore_index: ${data.dataset.ignore_index}
     dice:
       _target_: src.losses.DiceLoss
       ce_weight: 1.5
@@ -63,12 +73,12 @@ loss:
       ignore_index: ${data.dataset.ignore_index}
 
   weights:
-    bpkd: 1.0
+    fitnets: 2.0
     dice: 1.0
     lovasz: 0.5
 
 loss_schedule:
-  weights.bpkd: {schedule: cosine, start: 1.0, end: 0.50, start_epoch: 75}
+  weights.fitnets: {schedule: cosine, start: 2.0, end: 1.00, start_epoch: 75}
   weights.dice: {schedule: cosine, start: 1.0, end: 0.50, start_epoch: 75}
   weights.lovasz: {schedule: cosine, start: 0.5, end: 1.25, start_epoch: 75}
 

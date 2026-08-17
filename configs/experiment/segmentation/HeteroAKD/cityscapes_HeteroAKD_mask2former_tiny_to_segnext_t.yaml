@@ -1,15 +1,13 @@
 # @package _global_
-# Сетка "6 методов дистилляции x 4 пары учитель/студент" (см.
-# outputs/claude-analis/analysis.md, ответ на вопросы про capacity gap и
-# набор лоссов). Учитель Mask2Former-tiny ->
-# segnext_t (segnext/t, ~4.3M).
+# Полное обучение: Mask2Former-tiny (Swin-T, 47M) -> SegNeXt-T (4.3M) с
+# HeteroAKD. Гиперпараметры — от отлаженного
+# segmentation/HeteroAKD/cityscapes_HeteroAKD_segformer_b2_to_segnext_t.yaml
+# (тот же студент, SegNeXt-специфичные lr/batch/schedule), меняется учитель и
+# teacher_channels проекции.
 #
-# Структура (dice+lovasz рядом с KD-членом, форма loss_schedule,
-# оптимизатор/батч/трейнер) — БЕЗ ИЗМЕНЕНИЙ из
-# segmentation/diagnostics/cityscapes_BPKD_segformer_b2_to_unet_small.yaml
-# (так просили) — меняется учитель/студент и KD-слагаемое.
-#
-# HeteroAKD (arXiv:2504.07691): проекция в пространство классов на stage4 (student 256, teacher 768 — Swin-tiny, не MiT-b2). Обучаемые параметры (2 проектора) уходят в optimizer автоматически.
+# HeteroAKD (arXiv:2504.07691): проекция в пространство классов на stage4
+# (student 256, teacher 768 — Swin-tiny, не MiT-b2). Обучаемые параметры
+# (2 проектора) уходят в optimizer автоматически.
 defaults:
   - override /data/dataset: cityscapes_seg
   - override /data/transform/train: cityscapes_seg_strong_transform_for_segmentation
@@ -86,10 +84,8 @@ loss_schedule:
   weights.lovasz: {schedule: cosine, start: 0.5, end: 1.25, start_epoch: 75}
 
 optimizer:
-  # lr/wd — НЕ из шаблона (тот 1.5e-3 подобран под U-Net-декодер): SegNeXt
-  # использует свою, заметно более низкую lr (см. scratch/cityscapes_scratch_segnext_t.yaml).
-  lr: 1.0e-3
-  weight_decay: 1.0e-2
+  lr: 2.0e-3
+  weight_decay: 3.0e-2
 
 # Раздельный lr энкодер/декодер (docs/param_groups.md): энкодер предобучен,
 # декодер/голова — с нуля, общий lr бил бы по предобучению в первые эпохи.
@@ -105,11 +101,7 @@ scheduler:
 
 data:
   loader:
-    # batch_size снижен относительно шаблона (20 -> 12): amp:false выше
-    # означает, что и учитель считается в fp32, а не fp16 — заметно больше
-    # памяти. Не проверял точное значение под каждую пару — если не влезет,
-    # убавляйте дальше или добавляйте +model.teacher_micro_batch_size=N.
-    batch_size: 12
+    batch_size: 16
     eval_batch_size: 10
     num_workers: 16
     pin_memory: true
