@@ -407,9 +407,23 @@ def main(cfg: DictConfig) -> float:
                 + [(f"criterion.{name}", param) for name, param in criterion.named_parameters()]
             )
         else:
-            params = list(student.parameters()) + list(criterion.parameters())
+            all_params = list(student.parameters()) + list(criterion.parameters())
+            adapter = getattr(criterion, "feature_adapter", None)
+            if adapter is not None:
+                # feature_adapter — единственный путь градиента для hokfd/lcmd,
+                # чей вклад в градиент ничтожен (0.15%/0.0000022% — см. анализ
+                # grad_contribution_share_pct). Без этой развязки weight_decay
+                # ничем не уравновешен и методично тянет веса адаптера к нулю —
+                # self-reinforcing collapse: подтверждено на чекпоинте DCKD
+                # (std весов адаптера в 10-17 раз ниже здоровой инициализации).
+                adapter_ids = {id(p) for p in adapter.parameters()}
+                other = [p for p in all_params if id(p) not in adapter_ids]
+                adapter_params = [p for p in all_params if id(p) in adapter_ids]
+                params = [{"params": other}, {"params": adapter_params, "weight_decay": 0.0}]
+            else:
+                params = all_params
 
-        optimizer = instantiate(cfg.optimizer)(params)  
+        optimizer = instantiate(cfg.optimizer)(params)
         scheduler = instantiate(cfg.scheduler)(optimizer) if cfg.get("scheduler") is not None else None
 
         # cfg.get(...): при `prediction_postprocessors: null` Hydra ключ в struct не создаёт,
