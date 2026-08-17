@@ -3,14 +3,14 @@ defaults:
   - override /data/dataset: cityscapes
   - override /data/transform/train: cityscapes_transform_for_yolo
   - override /data/transform/eval: cityscapes_transform_for_yolo
-  - override /model/teacher: lwdetr_clockdistill
+  - override /model/teacher: null
   - override /model/student: yolo
-  - override /loss: clockdistill
-  - override /optimizer: SGD
+  - override /loss: yolo
+  - override /optimizer: yolo_sgd
   - override /scheduler: warmup_cosine
   - override /prediction_postprocessors: yolov8n
 
-name: cityscapes_CLoCKDistill_LWDETR_small_to_yolov8n
+name: cityscapes_finetune_yolov9s
 device: cuda
 deterministic: false
 
@@ -18,7 +18,7 @@ task_type: "detection"
 
 clearml:
   enabled: True
-  tags: [cityscapes, CLoCKDistill, LW-DETR-small, yolov8n]
+  tags: [cityscapes, student, finetune, yolov9s]
   output_uri: false
   plots:
     # 0 — Debug Samples не отправляются вовсе.
@@ -31,66 +31,47 @@ clearml:
 trainer:
   epochs: 100
   amp: true
+  # Как и для yolov9t: YOLO-лосс умножает лосс на batch_size, поэтому
+  # реальная норма градиента - десятки-сотни, а не единицы. Клиппинг
+  # 1.0 нормировал бы каждый шаг и эффективно гасил lr сильнее косинуса.
   grad_clip_norm: 10.0
+  track_train_map: true
 
 optimizer:
-  lr: 0.01
+  # Тот же рецепт ultralytics: lr0 0.01 при номинальном батче 64, здесь
+  # батч 32 -> 0.01 * 64 / 32 = 0.02. Формула не зависит от размера модели,
+  # только от batch_size.
+  lr: 0.02
   momentum: 0.937
-  weight_decay: 0.005
+  weight_decay: 0.0005
 
 scheduler:
-  warmup_epochs: 5
+  warmup_epochs: 3
   start_factor: 0.01
   end_factor: 1.0
-  eta_min: 1.0e-4
+  eta_min: 2.0e-4
 
 data:
   dataset:
     image_size: [512, 1024]
     targets_format_mode: "yolov8n"
+    normalize: null
     build:
       label_offset: 0
   loader:
     batch_size: 32
-    num_workers: 8
+    num_workers: 16
     persistent_workers: true
     pin_memory: true
 
 model:
   student:
+    model_name: yolov9s
+    # null — докачать канонический COCO-претрейн (yolov9s.pt) в data/weights.
     weights: null
-    backbone_dropout: 0.02
+    # RepNCSPELAN4/ELAN1/SPPELAN у yolov9-семейства (нет C2f/SPPF), поэтому
+    # backbone/neck/bbox/cls-дропаут из yolo() — no-op, как и для yolov9t.
+    backbone_dropout: 0.0
     neck_dropout: 0.0
     bbox_dropout: 0.0
     cls_dropout: 0.0
-  teacher:
-    checkpoint_path: "data/weights/lw-detr-small/best.pt"
-
-loss:
-  num_classes: 8
-
-  student_feature_key: model.21
-  teacher_feature_key: model.model.backbone.projector
-
-  student_channels: 256
-  teacher_channels: 256
-  d_model: 256
-
-  lambda_det: 0.31
-  lambda_lcmd: 1.0
-  lambda_tcld: 11.7
-
-  alpha: 1686.5
-  beta: 3.373
-
-  lambda_cls: 1.0
-  lambda_l1: 5.0
-  lambda_giou: 2.0
-
-  temperature: 2.0
-
-  teacher_has_no_object: false
-
-  max_target_queries: 300
-
-  eps: 1.0e-6

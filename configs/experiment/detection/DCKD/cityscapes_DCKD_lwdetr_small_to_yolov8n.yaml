@@ -62,15 +62,15 @@ model:
     backbone_dropout: 0.02
     neck_dropout: 0.0
     bbox_dropout: 0.0
-    cls_dropout: 0.08
+    cls_dropout: 0.0
   teacher:
     checkpoint_path: "data/weights/lw-detr-small/best.pt"
 
 loss:
   num_classes: 8
 
-  lambda_det: 0.1
-  lambda_hekld: 10.0
+  lambda_det: 0.044
+  lambda_hekld: 11.0
   lambda_hokfd: 11.0
 
   temperature: 2.0

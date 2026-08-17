@@ -34,7 +34,7 @@ trainer:
   grad_clip_norm: 10.0
 
 optimizer:
-  lr: 0.01
+  lr: 0.02
   momentum: 0.937
   weight_decay: 0.005
 
@@ -84,12 +84,12 @@ loss:
   teacher_channels: 256
   d_model: 256
 
-  lambda_det: 1.0
+  lambda_det: 0.31
   lambda_lcmd: 1.0
-  lambda_tcld: 1.0
+  lambda_tcld: 11.7
 
-  alpha: 5.0e-5
-  beta: 1.0e-7
+  alpha: 1686.5
+  beta: 3.373
 
   lambda_cls: 1.0
   lambda_l1: 5.0
