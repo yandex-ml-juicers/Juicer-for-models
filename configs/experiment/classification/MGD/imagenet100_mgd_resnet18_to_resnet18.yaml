@@ -1,33 +1,15 @@
 # @package _global_
 defaults:
-  - override /data/dataset: imagenet100
-  - override /model/teacher: torchvision_model_for_classification
-  - override /model/student: torchvision_model_for_classification
+  - override /data: imagenet100
+  - override /model/teacher: resnet18_imagenet_pretrained
+  - override /model/student: resnet18_imagenet
   - override /loss: mgd
-  - override /optimizer: SGD
 
 name: imagenet100_mgd_resnet18_to_resnet18
-device: cuda
-deterministic: false
-
-clearml:
-  enabled: True
-
-optimizer:
-  lr: 0.1469789358410702
+ckpt_path: data/weights/resnet18_scratch/best.pt
 
 loss:
   t_channels: 512
-  lambda_mgd: 0.0009961730496122815
-  mask_ratio: 0.6266000008583069
 
 trainer:
   epochs: 100
-  amp: true
-
-model:
-  teacher:
-    model_name: resnet18
-    checkpoint_path: data/weights/resnet18_imagenet100_scratch/best.pt
-  student:
-    model_name: resnet18
