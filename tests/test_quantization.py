@@ -6,6 +6,7 @@
 """
 
 import json
+import math
 from pathlib import Path
 
 import pytest
@@ -250,6 +251,45 @@ def test_tensor_diff_sees_shifted_logits():
     # Сдвиг одинаков по классам, argmax не меняется — и это ровно тот случай,
     # ради которого max_abs смотрят отдельно от совпадения предсказаний.
     assert metrics["argmax_agreement"] == 1.0
+
+
+def test_nan_does_not_hide_in_the_worst_case_metric(loader):
+    """NaN проигрывает сравнение в max(), и катастрофа исчезает из max_abs.
+
+    Реальный случай: TensorRT-движок SegNeXt выдавал NaN, а max_abs показывал
+    безобидные 2.69 — потому что первый батч был конечным и выиграл сравнение.
+    """
+    from src.quantization.backends.torch_backend import TorchRunner
+
+    class _Diverging(TinyNet):
+        """Ломается не сразу: первый батч считает честно, дальше выдаёт NaN."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        def forward(self, batch: torch.Tensor) -> torch.Tensor:
+            self.calls += 1
+            output = super().forward(batch)
+            return output if self.calls <= 1 else output * float("nan")
+
+    reference = TorchRunner(TinyNet().eval(), precision="fp32", device="cpu")
+    broken = TorchRunner(_Diverging().eval(), precision="fp32", device="cpu")
+
+    result = compare_runners(reference, broken, loader, device=torch.device("cpu"))
+    assert math.isnan(result["max_abs"]), "NaN обязан доехать до худшего случая"
+    assert result["nonfinite"] > 0.5
+
+
+def test_acceptance_names_nan_a_breakage_not_a_metric_drop():
+    verdict = check_acceptance(
+        {"miou": 0.808}, {"miou": 0.255},
+        {"argmax_agreement": 0.733, "nonfinite": 0.21},
+        task_type="segmentation", max_metric_drop=0.005, min_agreement=0.999,
+    )
+    assert not verdict["passed"]
+    # Именно первым: иначе пойдут искать деградацию точности вместо переполнения.
+    assert "NaN/Inf" in verdict["violations"][0]
 
 
 def test_acceptance_catches_silent_prediction_drift():

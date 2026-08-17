@@ -1,6 +1,7 @@
 """Численная валидация: какая потеря качества"""
 
 import logging
+import math
 
 import torch
 import torch.nn.functional as F
@@ -25,6 +26,11 @@ def tensor_diff(reference: Tensor, candidate: Tensor) -> dict[str, float]:
         "max_abs": diff.max().item(),
         "mean_abs": diff.mean().item(),
         "rel_to_max": (diff.max() / scale).item(),
+        # Доля NaN/Inf в выходе кандидата. Это не «потеря точности», а поломка:
+        # fp16 переполняется или делит почти ноль на почти ноль. Меряем явно,
+        # потому что в остальных метриках NaN только портит числа, не называя
+        # причину.
+        "nonfinite": (~torch.isfinite(candidate)).float().mean().item(),
     }
 
     if reference.ndim >= 2:
@@ -65,8 +71,13 @@ def compare_runners(
     limit_batches: int | None = None,
 ) -> dict:
     """L1: прогоняет оба раннера по одним и тем же батчам и сводит расхождение"""
-    worst_max_abs = 0.0
-    totals = {"mean_abs": 0.0, "rel_to_max": 0.0, "cosine": 0.0, "argmax_agreement": 0.0, "kl": 0.0}
+    # Максимумы копим списком, а не через max() на лету: NaN проигрывает любое
+    # сравнение, поэтому max(2.69, nan) == 2.69 — и катастрофа исчезает из
+    # метрики, которая ровно для катастроф и заведена. Реальный случай:
+    # TensorRT-движок SegNeXt выдавал NaN, а max_abs показывал безобидные 2.69.
+    peaks: list[float] = []
+    totals = {"mean_abs": 0.0, "rel_to_max": 0.0, "cosine": 0.0, "argmax_agreement": 0.0,
+              "kl": 0.0, "nonfinite": 0.0}
     samples = 0
     batches = 0
 
@@ -83,8 +94,8 @@ def compare_runners(
         metrics = tensor_diff(reference_output, candidate_output)
         count = images.shape[0]
 
-        worst_max_abs = max(worst_max_abs, metrics["max_abs"])
-        for key in ("mean_abs", "rel_to_max", "cosine", "argmax_agreement"):
+        peaks.append(metrics["max_abs"])
+        for key in ("mean_abs", "rel_to_max", "cosine", "argmax_agreement", "nonfinite"):
             totals[key] += metrics.get(key, 0.0) * count
         totals["kl"] += kl_divergence(reference_output, candidate_output) * count
 
@@ -100,10 +111,19 @@ def compare_runners(
         "batches": batches,
         "samples": samples,
         # Худший случай, а не средний: одно переполнение fp16 на одном батче —
-        # это уже поломка, и усреднение по выборке её замажет.
-        "max_abs": worst_max_abs,
+        # это уже поломка, и усреднение по выборке её замажет. NaN не теряется:
+        # если он был хоть в одном батче, он и окажется в максимуме.
+        "max_abs": float("nan") if any(math.isnan(peak) for peak in peaks) else max(peaks),
         **{key: value / samples for key, value in totals.items()},
     }
+
+    if result["nonfinite"] > 0:
+        log.error(
+            "%s выдаёт NaN/Inf на %.2f%% выходов. Это не потеря точности, а поломка: "
+            "fp16 переполнился или разделил почти ноль на почти ноль. Метрики ниже "
+            "считать нельзя, чинить надо точность отдельных слоёв.",
+            candidate.name, result["nonfinite"] * 100,
+        )
 
     log.info(
         "L1 (%s vs %s) на %d батчах: max_abs=%.3g | cos=%.6f | argmax=%.4f | KL=%.3g",

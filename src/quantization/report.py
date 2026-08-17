@@ -61,8 +61,17 @@ def check_acceptance(
 
     drop = baseline[metric_key] - candidate[metric_key]
     agreement = comparison.get("argmax_agreement", 0.0)
+    nonfinite = comparison.get("nonfinite", 0.0)
 
     violations = []
+    # Первым делом и отдельной строкой: NaN на выходе — это не «просела
+    # метрика», а неработающий движок. Формулировка "miou просела на 0.55"
+    # увела бы искать деградацию точности там, где надо чинить переполнение.
+    if nonfinite > 0:
+        violations.append(
+            f"кандидат выдаёт NaN/Inf на {nonfinite * 100:.2f}% выходов — движок сломан, "
+            f"а не потерял точность"
+        )
     if drop > max_metric_drop:
         violations.append(
             f"{metric_key} просела на {drop:.4f} при допуске {max_metric_drop:.4f} "
