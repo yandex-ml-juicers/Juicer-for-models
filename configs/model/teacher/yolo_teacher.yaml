@@ -1,0 +1,11 @@
+_target_: src.models.factory.yolo
+model_name: yolov9c
+num_classes: 8
+# Скопировать сюда best.pt после обучения cityscapes_finetune_yolov9c
+# (см. outputs/cityscapes_finetune_yolov9c/<run>/best.pt) — стабильный путь,
+# как у yolov8n.yaml, а не эфемерная outputs/<timestamp>/.
+checkpoint_path: "data/weights/yolov9c-cityscapes/best.pt"
+backbone_dropout: 0.0
+neck_dropout: 0.0
+bbox_dropout: 0.0
+cls_dropout: 0.0

@@ -33,9 +33,9 @@ class LWDETRLoss(DistillationLoss):
 
         losses = {
             "total": total,
-            "ce": raw_losses.get("loss_ce", 0.0),
-            "bbox": raw_losses.get("loss_bbox", 0.0),
-            "giou": raw_losses.get("loss_giou", 0.0),
+            "ce": raw_losses.get("loss_ce", total.new_zeros(())),
+            "bbox": raw_losses.get("loss_bbox", total.new_zeros(())),
+            "giou": raw_losses.get("loss_giou", total.new_zeros(())),
         }
 
         if self.return_all_components:

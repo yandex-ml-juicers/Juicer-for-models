@@ -1,0 +1,11 @@
+_target_: src.models.factory.rtdetr_for_detection
+num_classes: 8
+checkpoint_id: "PekingU/rtdetr_r50vd"
+# Скопировать сюда best.pt после обучения cityscapes_finetune_rtdetr_r50
+# (см. outputs/cityscapes_finetune_rtdetr_r50/<run>/best.pt) — стабильный путь,
+# как у yolo_teacher.yaml, а не эфемерная outputs/<timestamp>/.
+checkpoint_path: "data/weights/rtdetr_r50vd-cityscapes/best.pt"
+# 0.0 — как у yolo_teacher.yaml: учитель должен давать детерминированные
+# soft-таргеты для дистилляции, а не шуметь dropout'ом на инференсе.
+dropout: 0.0
+disable_custom_kernels: true

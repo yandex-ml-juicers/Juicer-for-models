@@ -22,7 +22,7 @@ from torchvision.models import get_model
 from torchvision.models.detection import FasterRCNN
 from torchvision.models.detection.rpn import AnchorGenerator
 from torchvision.models import resnet18, ResNet18_Weights
-from transformers import LwDetrConfig, LwDetrForObjectDetection
+from transformers import LwDetrConfig, LwDetrForObjectDetection, RTDetrConfig, RTDetrForObjectDetection
 
 from ultralytics import YOLO
 from ultralytics.nn.tasks import DetectionModel
@@ -373,6 +373,7 @@ def yolo(
     num_classes: int = 8,
     weights: str | Path | None = None,
     weights_dir: str | None = "data/weights",
+    checkpoint_path: str | Path | None = None,
     backbone_dropout: float = 0.05,
     neck_dropout: float = 0.10,
     bbox_dropout: float = 0.05,
@@ -391,9 +392,20 @@ def yolo(
         weights: путь к локальному чекпоинту; None — канонический
             претрейн (ultralytics сама докачает его в
             <weights_dir>/<model_name>.pt, если файла там ещё нет);
-            "random" — без претрейна, чистая инициализация.
+            "random" — без претрейна, чистая инициализация. Загружается
+            через ultralytics' YOLO(path).model — ждёт именно её нативный
+            формат чекпоинта, не подходит для чекпоинтов этого проекта.
         weights_dir: куда докачивать канонический чекпоинт при
             weights=None; по умолчанию data/weights.
+        checkpoint_path: путь к чекпоинту, сохранённому этим проектом
+            (best.pt/last.pt с ключом "student_state" — например, обученный
+            здесь же учитель-YOLO для дистилляции). Формат другой, чем у
+            weights (там ultralytics-нативный), поэтому отдельный параметр
+            и отдельная ветка загрузки — та же логика, что уже используется
+            в lwdetr_small_for_detection для той же задачи. Если задан,
+            полностью заменяет обычную загрузку через weights: канонический
+            претрейн не тянется вовсе, он всё равно был бы перезаписан
+            ниже strict-загрузкой.
         backbone_dropout, neck_dropout, bbox_dropout, cls_dropout: точечный
             dropout в блоках C2f/SPPF (backbone/neck) и в ветках cv2/cv3
             Detect-головы (bbox/cls). Это инъекция под конкретные типы
@@ -422,7 +434,29 @@ def yolo(
     if num_classes == 8:
         model.names = cityscapes_names
 
-    if weights != "random":
+    if checkpoint_path is not None:
+        weights_path = Path(to_absolute_path(str(checkpoint_path)))
+        if not weights_path.is_file():
+            raise FileNotFoundError(f"Checkpoint file was not found: {weights_path}")
+
+        checkpoint = torch.load(weights_path, map_location="cpu", weights_only=True)
+
+        if isinstance(checkpoint, dict) and "student_state" in checkpoint:
+            state_dict = checkpoint["student_state"]
+        elif isinstance(checkpoint, dict) and "state_dict" in checkpoint:
+            state_dict = checkpoint["state_dict"]
+        elif isinstance(checkpoint, dict) and "model" in checkpoint:
+            state_dict = checkpoint["model"]
+        else:
+            state_dict = checkpoint
+
+        state_dict = {
+            key.removeprefix("module."): value
+            for key, value in state_dict.items()
+        }
+
+        model.load_state_dict(state_dict, strict=True)
+    elif weights != "random":
         if weights is None:
             weights_path = resolve_weights_dir(weights_dir) / f"{model_name}.pt"
         else:
@@ -478,6 +512,69 @@ def yolo(
         )
 
     return model
+
+
+def rtdetr_for_detection(
+    num_classes: int = 8,
+    checkpoint_id: str = "PekingU/rtdetr_r50vd",
+    disable_custom_kernels: bool = True,
+    dropout: float = 0.1,
+    checkpoint_path: str | Path | None = None,
+) -> nn.Module:
+    """RT-DETR (CNN-бэкбон ResNet-50-vd + лёгкий transformer encoder-decoder)
+    как учитель/студент для детекции. Задуман как архитектурный «мост» между
+    чисто-CNN YOLO и чисто-ViT LW-DETR в прогрессивной KD-цепочке (см.
+    разбор статьи MTPD) — feature-only дистилляция для YOLOKDLoss берёт фичу
+    с model.encoder_input_proj.2 (последний уровень backbone'а перед
+    hybrid encoder'ом, голый тензор [B,256,H,W], тот же stride32, что у
+    YOLO-студента — проверено прогоном модели).
+
+    Args:
+        checkpoint_id: канонический COCO-претрейн с HuggingFace Hub.
+        checkpoint_path: путь к чекпоинту, сохранённому этим проектом
+            (best.pt с ключом "student_state") — та же логика, что у
+            lwdetr_small_for_detection и yolo(). Если задан, применяется
+            ПОСЛЕ канонического COCO-претрейна (strict=True, полностью
+            перезаписывает веса).
+    """
+    cityscapes_classes = [
+        "person", "rider", "car", "truck", "bus", "train", "motorcycle", "bicycle",
+    ]
+    id2label = {index: name for index, name in enumerate(cityscapes_classes)}
+    label2id = {name: index for index, name in id2label.items()}
+
+    config = RTDetrConfig.from_pretrained(checkpoint_id)
+    config.num_labels = num_classes
+    config.id2label = id2label
+    config.label2id = label2id
+    config.dropout = dropout
+    config.disable_custom_kernels = disable_custom_kernels
+
+    model = RTDetrForObjectDetection.from_pretrained(
+        checkpoint_id, config=config, ignore_mismatched_sizes=True
+    )
+
+    if checkpoint_path is not None:
+        weights_path = Path(to_absolute_path(str(checkpoint_path)))
+        if not weights_path.is_file():
+            raise FileNotFoundError(f"Checkpoint file was not found: {weights_path}")
+
+        checkpoint = torch.load(weights_path, map_location="cpu", weights_only=True)
+
+        if isinstance(checkpoint, dict) and "student_state" in checkpoint:
+            state_dict = checkpoint["student_state"]
+        elif isinstance(checkpoint, dict) and "state_dict" in checkpoint:
+            state_dict = checkpoint["state_dict"]
+        elif isinstance(checkpoint, dict) and "model" in checkpoint:
+            state_dict = checkpoint["model"]
+        else:
+            state_dict = checkpoint
+
+        state_dict = {key.removeprefix("module."): value for key, value in state_dict.items()}
+        model.load_state_dict(state_dict, strict=True)
+
+    return model
+
 
 def faster_rcnn_resnet18_for_detection(
     num_classes: int = 8,

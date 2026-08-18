@@ -17,6 +17,7 @@ from src.losses.yolo_loss import YOLO
 from src.losses.dckd_loss import DCKDLoss
 from src.losses.kd_detr_loss import KDDETRLoss
 from src.losses.clockdistill_loss import CLoCKDistillLoss
+from src.losses.yolo_kd_loss import YOLOKDLoss
 
 __all__ = [
     "CrossEntropy",
@@ -36,4 +37,5 @@ __all__ = [
     "DCKDLoss",
     "KDDETRLoss",
     "CLoCKDistillLoss",
+    "YOLOKDLoss",
 ]

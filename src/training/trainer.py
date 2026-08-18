@@ -1063,7 +1063,15 @@ class DetectionTrainer:
                     targets=targets_for_meters_map,
                 )
 
-            if self.teacher is not None:
+            if self.teacher is not None and isinstance(student_outputs, dict) and "kd_logits" in student_outputs and "kd_boxes" in student_outputs:
+                # YOLOKDLoss (гомогенная YOLO->YOLO и RT-DETR-мост дистилляция)
+                # не заполняет kd_logits/kd_boxes декодированными координатами,
+                # как DCKD/CLoCKDistill/KD-DETR (это отдельная ~50-строчная DFL
+                # decode-логика в DCKDLoss._decode_yolo_boxes) — метрика чисто
+                # диагностическая (no_grad, не влияет на обучение), поэтому для
+                # YOLOKD просто не считается вместо краша; agreement_rate=0.0
+                # в history.csv для таких прогонов значит "не считалось", а не
+                # "0% согласия".
                 correct, total = self._detection_agreement_rate(student_outputs, teacher_outputs, num_classes=8, teacher_topk=100, student_topk=1000)
                 agreement_correct += correct
                 agreement_total += total

@@ -1,0 +1,68 @@
+# @package _global_
+defaults:
+  - override /data/dataset: cityscapes
+  - override /data/transform/train: base_cityscapes_transform
+  - override /data/transform/eval: base_cityscapes_transform
+  - override /model/teacher: null
+  - override /model/student: rtdetr
+  - override /loss: lwdetr_small_loss
+  - override /optimizer: no_decay_adamw
+  - override /scheduler: warmup_cosine
+  - override /prediction_postprocessors: lwdetr
+
+name: cityscapes_finetune_rtdetr_r50
+device: cuda
+deterministic: false
+
+task_type: "detection"
+
+clearml:
+  enabled: True
+  tags: [cityscapes, teacher, finetune, rtdetr-r50]
+  output_uri: false
+  plots:
+    debug_samples: 0
+    grad_contrib_every_n_steps: 50
+
+trainer:
+  epochs: 40
+  amp: true
+  # DETR-семейство (см. cityscapes_finetune_LWDETR_small.yaml) — тот же 0.1.
+  grad_clip_norm: 0.1
+  # RT-DETR отдаёт фиксированные num_queries=500 и в train, и в eval (в
+  # отличие от LW-DETR, у которого group_detr раздувает train-режим в 13x
+  # копий на объект) — здесь track_train_map не искажается, можно включить.
+  track_train_map: true
+
+optimizer:
+  lr: 1.0e-4
+  weight_decay: 1.0e-4
+
+scheduler:
+  warmup_epochs: 5
+  start_factor: 0.01
+  end_factor: 1.0
+  eta_min: 1.0e-6
+
+data:
+  dataset:
+    image_size: [512, 1024]
+    targets_format_mode: "lw-detr-small"
+    build:
+      label_offset: 0
+  transform:
+    train:
+      horizontal_flip: 0.5
+  loader:
+    # RT-DETR тяжелее LW-DETR-small (42.89M вс 14.56M + denoising-ветки) —
+    # проверил реальный расход памяти: 16 → 16.65GB пик, 8 → 8.63GB пик
+    # (с GradScaler, 3 шага) на 32GB GPU. Беру 8 — оставляет запас на общей
+    # машине, где параллельно крутятся другие джобы.
+    batch_size: 8
+    num_workers: 8
+    persistent_workers: true
+    pin_memory: true
+
+model:
+  student:
+    checkpoint_path: null
