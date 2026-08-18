@@ -287,11 +287,16 @@ def calibration_source(cfg: DictConfig) -> dict:
     """
     normalize = get_normalize_stats(cfg)
     size = cfg.data.dataset.get("image_size")
+    # image_size: [1024, 2048] приходит из Hydra как ListConfig — это не list,
+    # isinstance его не ловит, а json.dumps не переваривает. Приводим к
+    # примитивам по способности итерироваться, а не по типу.
+    if size is not None and not isinstance(size, int):
+        size = [int(dim) for dim in size]
     return {
         "split": str(cfg.quantize.calibrate.split),
         "dataset": cfg.data.dataset.build.get("_target_"),
         "transform": cfg.data.transform.eval.get("_target_"),
-        "image_size": list(size) if isinstance(size, (list, tuple)) else size,
+        "image_size": size,
         "normalize": [list(normalize[0]), list(normalize[1])] if normalize else None,
         "seed": int(cfg.seed),
     }

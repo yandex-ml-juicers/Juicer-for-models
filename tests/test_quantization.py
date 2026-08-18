@@ -953,3 +953,40 @@ def test_layer_precision_reads_the_input_when_the_output_is_unknown():
         "Outputs": [{"Format/Datatype": "N/A"}],
         "Inputs": [{"Format/Datatype": "Channel major FP16 format where channel % 8 == 0"}],
     }) == "FP16"
+
+
+def test_calibration_source_survives_hydra_lists():
+    """image_size: [1024, 2048] — это ListConfig, а не list: json.dumps падал.
+
+    Поймано на SegNeXt/Cityscapes: у классификации image_size — int, и путь
+    со списком не исполнялся ни в одном прогоне до сегментации.
+    """
+    from omegaconf import OmegaConf
+
+    from scripts.quantize import calibration_source
+
+    cfg = OmegaConf.create({
+        "seed": 42,
+        "quantize": {"calibrate": {"split": "train"}},
+        "data": {
+            "dataset": {
+                "build": {"_target_": "src.data.datasets.cityscapes_segmentation"},
+                "image_size": [1024, 2048],
+                "normalize": {"mean": [0.485, 0.456, 0.406], "std": [0.229, 0.224, 0.225]},
+            },
+            "transform": {
+                "eval": {"_target_": "src.data.transforms.build_segmentation_transform_eval"}
+            },
+        },
+    })
+
+    payload = calibration_source(cfg)
+    json.dumps(payload)  # раньше падало: ListConfig is not JSON serializable
+    assert payload["image_size"] == [1024, 2048]
+    assert payload["normalize"] == [[0.485, 0.456, 0.406], [0.229, 0.224, 0.225]]
+
+    # Скалярный и отсутствующий размеры не должны пострадать от правки.
+    cfg.data.dataset.image_size = 224
+    assert calibration_source(cfg)["image_size"] == 224
+    cfg.data.dataset.image_size = None
+    assert calibration_source(cfg)["image_size"] is None
