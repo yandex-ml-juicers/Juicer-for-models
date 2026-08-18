@@ -438,20 +438,43 @@ PRECISION_ALIASES = {
 }
 
 
+# Точность, закодированная в имени тактики NVIDIA. Последняя зацепка для
+# слоёв без весов на движке с ДИНАМИЧЕСКИМ входом: там инспектор пишет в
+# Format/Datatype «N/A», потому что раскладка выбирается уже во время
+# исполнения. Проверено на ResNet-18 (динамический батч): пять слоёв из
+# двадцати шести иначе остаются без ответа вовсе.
+#   *mma — ядра тензорных ядер: hmma половинные, imma целочисленные;
+#   f16f16 / i8i8 — типы операндов в именах implicit-gemm ядер.
+TACTIC_MARKERS = {
+    "i8i8": "INT8", "igemm": "INT8", "imma": "INT8", "int8": "INT8",
+    "f16f16": "FP16", "hgemm": "FP16", "hmma": "FP16",
+    "f32f32": "FP32", "sgemm": "FP32",
+}
+
+
 def layer_precision(layer: dict) -> str:
     """В какой точности исполняется слой, по отчёту EngineInspector.
 
-    У слоёв с весами тип берётся из `Weights.Type`, у остальных (Reformat,
-    Pooling, поэлементные) — из формата выходного тензора: своих весов у них
-    нет, а считаются они в типе того, что производят.
+    Источники по убыванию надёжности:
+      1. `Weights.Type` — у слоёв с весами это прямой ответ;
+      2. формат тензоров — у Reformat, Pooling и поэлементных своих весов нет,
+         а считаются они в типе того, что производят;
+      3. имя тактики — когда движок собран под динамический вход и формат
+         тензора ещё неизвестен.
+
+    Если не ответил ни один — так и говорим. Прежняя формулировка «без весов»
+    утверждала то, чего мы не проверяли: на деле это «точность определить не
+    удалось», и путать одно с другим нельзя ровно там, где разбор слоёв и
+    нужен — в вопросе «применился ли int8 вообще».
     """
     weights = layer.get("Weights")
     if isinstance(weights, dict) and weights.get("Type"):
         name = str(weights["Type"])
         return PRECISION_ALIASES.get(name.lower(), name)
 
-    for output in layer.get("Outputs", []):
-        fmt = str(output.get("Format/Datatype", ""))
+    # Входы наравне с выходами: у Reformat выход бывает N/A, а вход — нет.
+    for tensor in (*layer.get("Outputs", []), *layer.get("Inputs", [])):
+        fmt = str(tensor.get("Format/Datatype", ""))
         if not fmt or "N/A" in fmt:
             continue
         # Формат при статическом входе выглядит как
@@ -462,7 +485,12 @@ def layer_precision(layer: dict) -> str:
                 return precision
         return fmt
 
-    return f"без весов ({layer.get('LayerType', '?')})"
+    tactic = str(layer.get("TacticName", "")).lower()
+    for token, precision in TACTIC_MARKERS.items():
+        if token in tactic:
+            return precision
+
+    return f"не определена ({layer.get('LayerType', '?')})"
 
 
 def _layer_precision_summary(trt: Any, engine: Any, output_path: Path) -> dict | None:
@@ -497,6 +525,23 @@ def _layer_precision_summary(trt: Any, engine: Any, output_path: Path) -> dict |
         return None
 
     log.info("Слои движка по точности: %s (полный разбор: %s)", summary, sidecar.name)
+
+    unresolved = [
+        str(layer.get("Name", "?"))
+        for layer in layers
+        if isinstance(layer, dict) and layer_precision(layer).startswith("не определена")
+    ]
+    if unresolved:
+        log.info(
+            "У %d слоёв точность определить не удалось (%s%s): ни весов, ни читаемого "
+            "формата тензора, ни распознанной тактики. Обычно это служебные слои "
+            "движка с динамическим входом. В вопросе «применилась ли точность» их "
+            "надо считать неизвестными, а не отсутствующими — разбор в %s.",
+            len(unresolved),
+            ", ".join(unresolved[:3]),
+            ", ..." if len(unresolved) > 3 else "",
+            sidecar.name,
+        )
     return summary
 
 

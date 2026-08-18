@@ -489,9 +489,11 @@ def test_layer_precision_reads_weight_type():
     }
     assert layer_precision(conv) == "FP16"
 
-    # У Reformat весов нет — считать его вместе со свёртками нельзя.
+    # У Reformat весов нет, а формат при динамическом входе неизвестен. Это
+    # «определить не удалось», а не «точность отсутствует»: путать нельзя ровно
+    # там, где разбор и нужен — в вопросе «применился ли int8 вообще».
     reformat = {"LayerType": "Reformat", "Outputs": [{"Format/Datatype": "N/A due to dynamic shapes"}]}
-    assert layer_precision(reformat) == "без весов (Reformat)"
+    assert layer_precision(reformat) == "не определена (Reformat)"
 
     # У слоя без весов тип берётся из формата выходного тензора. Строка формата
     # несёт и раскладку — в сводку должен попасть только тип, иначе гистограмма
@@ -866,3 +868,88 @@ def test_build_options_separate_engines_that_look_identical():
     # смены настройки, которая к ним не относится.
     assert "int8_fp16_fallback" not in plain
     assert build_options(precision="int8", int8_fp16_fallback=False)["int8_fp16_fallback"] is False
+
+
+# ---------------------------------------------------------------------------
+# Достоверность замера
+# ---------------------------------------------------------------------------
+
+
+def test_impossible_measurements_are_flagged():
+    """Числа из прогона int8 от 2026-08-18: оба нарушения выглядели обычно."""
+    from src.quantization.benchmark import check_measurement_sanity
+
+    measured = {
+        ("torch_fp32", "compute"): {1: 6.41, 8: 6.72, 32: 19.28},
+        ("torch_fp32", "e2e"): {1: 4.15, 8: 7.46, 32: 13.24},
+        ("trt_int8", "compute"): {1: 1.23, 8: 3.93, 32: 3.71},
+        ("trt_int8", "e2e"): {1: 3.79, 8: 2.04, 32: 8.21},
+    }
+    # p99 задан ровным, чтобы проверка хвоста не примешивалась: тест про
+    # структурные инварианты, а не про разлёт.
+    rows = [
+        {"runner": runner, "mode": mode, "batch_size": batch,
+         "p50_ms": p50, "p99_ms": p50 * 1.05}
+        for (runner, mode), timings in measured.items()
+        for batch, p50 in timings.items()
+    ]
+    warnings = check_measurement_sanity(rows)
+
+    # e2e — это compute плюс копия с хоста, меньше он быть не может.
+    assert any("torch_fp32 batch=1" in text for text in warnings)
+    # Батч 8 не может считаться быстрее батча 1 — работы больше.
+    assert any("batch=8" in text and "batch=1" in text for text in warnings)
+
+    # А вот compute batch=32 (3.71) против batch=8 (3.93) — разница 5.6%,
+    # это ничья в пределах допуска, и жаловаться на неё не на что.
+    assert not any("batch=32" in text and "batch=8" in text for text in warnings)
+
+
+def test_a_clean_measurement_raises_no_flags():
+    """Числа прогона №1 из журнала, включая законный разлёт хвоста у eager."""
+    from src.quantization.benchmark import check_measurement_sanity
+
+    rows = [
+        # p99/p50 = 1.73: eager шумит и на свободной карте, это не аномалия.
+        {"runner": "torch_fp32", "mode": "compute", "batch_size": 1, "p50_ms": 4.07, "p99_ms": 7.02},
+        {"runner": "torch_fp32", "mode": "compute", "batch_size": 8, "p50_ms": 5.87, "p99_ms": 6.10},
+        {"runner": "torch_fp32", "mode": "compute", "batch_size": 32, "p50_ms": 8.68, "p99_ms": 8.90},
+        {"runner": "trt_fp16", "mode": "compute", "batch_size": 1, "p50_ms": 1.29, "p99_ms": 1.30},
+        {"runner": "trt_fp16", "mode": "compute", "batch_size": 8, "p50_ms": 1.39, "p99_ms": 1.41},
+        {"runner": "trt_fp16", "mode": "compute", "batch_size": 32, "p50_ms": 2.63, "p99_ms": 2.66},
+        {"runner": "trt_fp16", "mode": "e2e", "batch_size": 1, "p50_ms": 1.39, "p99_ms": 1.42},
+        {"runner": "trt_fp16", "mode": "e2e", "batch_size": 8, "p50_ms": 1.82, "p99_ms": 1.85},
+        {"runner": "trt_fp16", "mode": "e2e", "batch_size": 32, "p50_ms": 4.33, "p99_ms": 4.40},
+    ]
+    assert check_measurement_sanity(rows) == []
+
+
+def test_layer_precision_falls_back_to_the_tactic_name():
+    """Движок с динамическим входом пишет в Format/Datatype «N/A»."""
+    from src.quantization.build_engine import layer_precision
+
+    dynamic_output = {"Outputs": [{"Format/Datatype": "N/A"}], "LayerType": "CaskConvolution"}
+
+    # Без тактики честно признаёмся, что не знаем, вместо «без весов».
+    assert layer_precision(dynamic_output).startswith("не определена")
+
+    # Имя ядра NVIDIA точность содержит: i8i8 — целочисленное, f16f16 — половинное.
+    assert layer_precision({
+        **dynamic_output,
+        "TacticName": "sm80_xmma_fprop_implicit_gemm_i8i8_i8i32_f32_nhwc",
+    }) == "INT8"
+    assert layer_precision({
+        **dynamic_output,
+        "TacticName": "sm70_xmma_fprop_implicit_gemm_f16f16_f16f16_f16_nhwckrsc",
+    }) == "FP16"
+
+
+def test_layer_precision_reads_the_input_when_the_output_is_unknown():
+    """У Reformat выход бывает N/A, а вход — нет."""
+    from src.quantization.build_engine import layer_precision
+
+    assert layer_precision({
+        "LayerType": "Reformat",
+        "Outputs": [{"Format/Datatype": "N/A"}],
+        "Inputs": [{"Format/Datatype": "Channel major FP16 format where channel % 8 == 0"}],
+    }) == "FP16"

@@ -15,7 +15,12 @@ from torch.utils.data import DataLoader
 
 from src.data import base_loader
 from src.quantization.backends.base import make_runner
-from src.quantization.benchmark import benchmark_runner, log_speedup_summary, speedup_table
+from src.quantization.benchmark import (
+    benchmark_runner,
+    check_measurement_sanity,
+    log_speedup_summary,
+    speedup_table,
+)
 from src.quantization.export import export_onnx, sha256_file
 from src.quantization.numerics import compare_runners, evaluate_runner
 from src.quantization.report import QuantizationReport, check_acceptance
@@ -621,10 +626,18 @@ def stage_benchmark(cfg, reference, candidate, sample_shape, device, report) -> 
 
     rows = benchmark_runner(reference, **common) + benchmark_runner(candidate, **common)
     log_speedup_summary(rows, baseline=str(settings.baseline))
+    # После сводки, а не до: предупреждение должно оказаться последним на
+    # экране, иначе его унесёт таблицей, а оно как раз про то, можно ли этой
+    # таблице верить.
+    anomalies = check_measurement_sanity(rows)
     rows = speedup_table(rows, baseline=str(settings.baseline))
 
     report.table("benchmark.csv", rows)
-    report.stage("benchmark", {"rows": len(rows)})
+    report.stage(
+        "benchmark",
+        {"rows": len(rows), "anomalies": anomalies},
+        status="ok" if not anomalies else "unreliable",
+    )
     return rows
 
 

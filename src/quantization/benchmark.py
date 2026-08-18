@@ -128,6 +128,77 @@ def benchmark_runner(
     return rows
 
 
+JITTER_LIMIT = 2.0
+
+# Допуски, ниже которых нарушение инварианта — это ничья, а не аномалия.
+# Копия с хоста при батче 1 занимает микросекунды, а маленькая модель на
+# батчах 1 и 8 упирается в накладные расходы запуска ядра, а не в работу:
+# времена там почти равны, и шум в процент легко их переставляет. Без допусков
+# проверка кричала бы на исправных замерах, и её перестали бы читать.
+COPY_TOLERANCE = 0.02
+BATCH_TOLERANCE = 0.10
+
+
+def check_measurement_sanity(rows: Sequence[dict]) -> list[str]:
+    """Ищет в замере физически невозможное — признак того, что карта занята.
+
+    Смысл проверки не в том, чтобы оценить величину чисел: «медленно» бывает
+    и по делу. Смысл в НАРУШЕНИИ ИНВАРИАНТОВ, которые верны при любой модели,
+    любом бэкенде и любой нагрузке. Если они нарушены, замер меряет соседа по
+    карте, а не нашу модель, и любые выводы из него — про случайность.
+
+    Проверено на прогоне int8 от 2026-08-18: там `e2e` оказался быстрее
+    `compute` у одного и того же раннера, а батч 32 — быстрее батча 8. Оба
+    результата невозможны, и оба выглядели как обычные числа в таблице.
+    """
+    warnings: list[str] = []
+    timings = {(row["runner"], row["mode"], row["batch_size"]): row for row in rows}
+
+    # 1. e2e = compute + копирование с хоста. Меньше compute он быть не может.
+    for (runner, mode, batch), row in timings.items():
+        if mode != "e2e":
+            continue
+        compute = timings.get((runner, "compute", batch))
+        if compute is not None and row["p50_ms"] < compute["p50_ms"] * (1 - COPY_TOLERANCE):
+            warnings.append(
+                f"{runner} batch={batch}: e2e ({row['p50_ms']:.2f} мс) быстрее compute "
+                f"({compute['p50_ms']:.2f} мс). e2e — это compute плюс копия с хоста, "
+                f"меньше он быть не может"
+            )
+
+    # 2. Больший батч — больше работы. Быстрее он не считается.
+    by_series: dict[tuple[str, str], list[dict]] = {}
+    for row in rows:
+        by_series.setdefault((row["runner"], row["mode"]), []).append(row)
+    for (runner, mode), series in by_series.items():
+        series.sort(key=lambda row: row["batch_size"])
+        for previous, current in zip(series, series[1:]):
+            if current["p50_ms"] < previous["p50_ms"] * (1 - BATCH_TOLERANCE):
+                warnings.append(
+                    f"{runner} {mode}: batch={current['batch_size']} "
+                    f"({current['p50_ms']:.2f} мс) быстрее batch={previous['batch_size']} "
+                    f"({previous['p50_ms']:.2f} мс) — больший батч не может считаться быстрее"
+                )
+
+    # 3. Разлёт хвоста. Сам по себе не приговор (eager шумит и на свободной
+    # карте), но вместе с первыми двумя однозначно указывает на соседа.
+    for row in rows:
+        jitter = row["p99_ms"] / row["p50_ms"] if row["p50_ms"] else 0.0
+        if jitter > JITTER_LIMIT:
+            warnings.append(
+                f"{row['runner']} {row['mode']} batch={row['batch_size']}: "
+                f"p99/p50 = {jitter:.1f} (p50={row['p50_ms']:.2f}, p99={row['p99_ms']:.2f})"
+            )
+
+    if warnings:
+        log.warning(
+            "ЗАМЕР НЕДОСТОВЕРЕН — карта, скорее всего, занята соседом. Найдено:\n  %s\n"
+            "Числа в таблицу брать нельзя. Проверь nvidia-smi и перемерь на свободной карте.",
+            "\n  ".join(warnings),
+        )
+    return warnings
+
+
 def log_speedup_summary(rows: Sequence[dict], baseline: str) -> None:
     """Сводка «во сколько раз быстрее» одной таблицей в конце замера.
 
