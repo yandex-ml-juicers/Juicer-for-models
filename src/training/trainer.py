@@ -34,6 +34,7 @@ from tqdm import tqdm
 
 from src.data.batch_augment import MixedBatch, interpolate_losses
 from src.losses.base import DistillationLoss
+from src.training.ema import ModelEMA
 from src.models.feature_extractor import FeatureExtractor
 from src.utils.distributed import DistInfo, unwrap, all_reduce_sum_, all_reduce_max_
 from src.utils.logger import MetricsHistory, get_logger
@@ -750,6 +751,7 @@ class DetectionTrainer:
         class_names: dict[int, str] | None = None,
         normalize: tuple[Sequence[float], Sequence[float]] | None = None,
         plots: dict | None = None,
+        ema_decay: float = 0.0,
     ) -> None:
 
         if criterion.requires_teacher and teacher is None:
@@ -819,6 +821,12 @@ class DetectionTrainer:
         self.criterion.to(self.device)
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
+        # EMA держит собственную копию весов, поэтому создаётся ПОСЛЕ переноса
+        # студента на устройство — иначе среднее осталось бы на CPU и каждое
+        # обновление тянуло бы веса через шину. 0.0 — выключено, формат
+        # чекпоинта при этом не меняется.
+        self.ema = ModelEMA(self.student, decay=ema_decay) if ema_decay > 0 else None
+
         if self.teacher is not None:
             self.teacher.to(self.device)
             self.teacher.eval()
@@ -874,8 +882,12 @@ class DetectionTrainer:
                 lr = self.optimizer.param_groups[0]["lr"]
 
                 train_loss_components, other_train_metrics = self._train_epoch(epoch)
+                # Метрика считается по усреднённым весам, если EMA включена:
+                # именно они уходят в student_state чекпоинта, поэтому
+                # сохранённая модель воспроизводит отчётный mAP.
+                eval_model = self.ema.module if self.ema is not None else self.student
                 eval_loss, eval_metrics = detection_evaluate(
-                    model=self.student,
+                    model=eval_model,
                     criterion=self.criterion, 
                     loader=self.eval_loader, 
                     device=self.device,
@@ -1052,6 +1064,12 @@ class DetectionTrainer:
 
             self.scaler.step(self.optimizer)
             self.scaler.update()
+
+            # Среднее обновляется только после реально применённого шага:
+            # при переполнении fp16 GradScaler шаг пропускает, и веса не
+            # менялись — усреднять их повторно смысла нет.
+            if self.ema is not None:
+                self.ema.update(self.student)
 
             norms.update(grad_norm, params)
 
@@ -1305,7 +1323,21 @@ class DetectionTrainer:
         чекпоинта и выставляет эпоху и лучший mAP, с которых продолжать fit().
         """
         checkpoint = torch.load(path, map_location=self.device, weights_only=True)
-        unwrap(self.student).load_state_dict(checkpoint["student_state"])
+        # При EMA в student_state лежат усреднённые веса, а продолжать обучение
+        # надо с живых — они сохранены отдельным ключом. Для чекпоинтов без EMA
+        # ключа нет, и student_state и есть живые веса.
+        live_state = checkpoint.get("student_live_state") or checkpoint["student_state"]
+        unwrap(self.student).load_state_dict(live_state)
+
+        if self.ema is not None:
+            if checkpoint.get("ema_state") is not None:
+                self.ema.load_state_dict(checkpoint["ema_state"])
+            else:
+                # Чекпоинт из прогона без EMA: пересеиваем среднее загруженными
+                # весами, иначе в нём остались бы веса момента создания тренера
+                # и метрика первых эпох после resume была бы заниженной.
+                self.ema.module.load_state_dict(live_state)
+
         unwrap(self.criterion).load_state_dict(checkpoint["criterion_state"])
         self.optimizer.load_state_dict(checkpoint["optimizer_state"])
         if self.scheduler is not None and checkpoint.get("scheduler_state") is not None:
@@ -1329,7 +1361,20 @@ class DetectionTrainer:
             # unwrap: под DDP ключи иначе ушли бы с префиксом "module." (сейчас
             # для detection DDP запрещён выше по стеку, так что unwrap() здесь
             # no-op, но так чекпоинт останется совместим, если это снимут).
-            "student_state": unwrap(self.student).state_dict(),
+            #
+            # При включённой EMA в student_state уходят УСРЕДНЁННЫЕ веса: по ним
+            # считалась метрика этой эпохи, и именно этот ключ читают eval.py и
+            # загрузка учителя в KD — иначе сохранённая модель не воспроизвела бы
+            # отчётный mAP. Живые веса кладутся рядом и нужны только для resume.
+            "student_state": (
+                self.ema.module.state_dict()
+                if self.ema is not None
+                else unwrap(self.student).state_dict()
+            ),
+            "student_live_state": (
+                unwrap(self.student).state_dict() if self.ema is not None else None
+            ),
+            "ema_state": self.ema.state_dict() if self.ema is not None else None,
             "criterion_state": unwrap(self.criterion).state_dict(),
             "optimizer_state": self.optimizer.state_dict(),
             "scheduler_state": (

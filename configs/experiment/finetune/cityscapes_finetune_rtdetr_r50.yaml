@@ -29,17 +29,20 @@ trainer:
   amp: true
   # DETR-семейство (см. cityscapes_finetune_LWDETR_small.yaml) — тот же 0.1.
   grad_clip_norm: 0.1
+  # Официальный RT-DETR репортит EMA-веса; без них eval mAP гулял на +-0.03
+  # между соседними эпохами при монотонно падающем train loss. 0.0 — выключить.
+  ema_decay: 0.9999
   # RT-DETR отдаёт фиксированные num_queries=500 и в train, и в eval (в
   # отличие от LW-DETR, у которого group_detr раздувает train-режим в 13x
   # копий на объект) — здесь track_train_map не искажается, можно включить.
   track_train_map: true
 
 optimizer:
-  lr: 1.0e-4
+  lr: 2.0e-4
   # Бэкбон (23.47M из 42.74M) предобучен на COCO и на едином lr=1e-4 деградировал:
   # пик eval mAP=0.3025 на 4-й эпохе, к 17-й — 0.2531 при train mAP 0.4064.
-  lr_backbone: 1.0e-5
-  weight_decay: 1.0e-4
+  lr_backbone: 5.0e-5
+  weight_decay: 0.005
 
 scheduler:
   warmup_epochs: 5
@@ -69,3 +72,7 @@ data:
 model:
   student:
     checkpoint_path: null
+    # Стем + стадии 0..2 = 8.53M из 42.89M. Понижение lr бэкбона до 1e-5
+    # переобучение не сняло, заморозка убирает этот канал целиком; стадия 3
+    # (14.94M) остаётся обучаемой — она самая специфичная для задачи.
+    freeze_backbone_stages: 3

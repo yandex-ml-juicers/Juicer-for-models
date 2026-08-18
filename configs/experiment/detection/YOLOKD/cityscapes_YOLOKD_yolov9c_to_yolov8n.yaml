@@ -1,0 +1,97 @@
+# @package _global_
+# Копия cityscapes_YOLOKD_yolov9c_to_yolov9t с заменой студента на yolov8n.
+# Отличается ровно двумя вещами: model_name и student_channels — у yolov8n
+# на model.21 стоит C2f с 256 каналами против RepNCSPELAN4 со 128 у yolov9t
+# (замерено прогоном моделей, не взято из документации).
+defaults:
+  - override /data/dataset: cityscapes
+  - override /data/transform/train: cityscapes_transform_for_yolo
+  - override /data/transform/eval: cityscapes_transform_for_yolo
+  - override /model/teacher: yolo_teacher
+  - override /model/student: yolo
+  - override /loss: yolo_kd
+  - override /optimizer: SGD
+  - override /scheduler: warmup_cosine
+  - override /prediction_postprocessors: yolov8n
+
+name: cityscapes_YOLOKD_yolov9c_to_yolov8n
+device: cuda
+deterministic: false
+
+task_type: "detection"
+
+clearml:
+  enabled: True
+  tags: [cityscapes, YOLOKD, yolov9c, yolov8n]
+  output_uri: false
+  plots:
+    debug_samples: 0
+    grad_contrib_every_n_steps: 50
+
+trainer:
+  epochs: 100
+  amp: true
+  grad_clip_norm: 10.0
+
+optimizer:
+  lr: 0.02
+  momentum: 0.937
+  weight_decay: 0.0005
+
+scheduler:
+  warmup_epochs: 5
+  start_factor: 0.01
+  end_factor: 1.0
+  eta_min: 1.0e-4
+
+data:
+  dataset:
+    image_size: [512, 1024]
+    targets_format_mode: "yolov8n"
+    build:
+      label_offset: 0
+  loader:
+    batch_size: 32
+    num_workers: 16
+    persistent_workers: true
+    pin_memory: true
+
+model:
+  student:
+    model_name: yolov8n
+    weights: null
+    backbone_dropout: 0.0
+    neck_dropout: 0.0
+    bbox_dropout: 0.0
+    cls_dropout: 0.0
+
+loss:
+  num_classes: 8
+
+  student_feature_key: model.21
+  teacher_feature_key: model.21
+  student_channels: 256
+  teacher_channels: 512
+
+  temperature: 2.0
+
+  # Учитель и студент из одного семейства, поэтому кроме фич переносятся
+  # логиты и боксы. Внимание при COCO-учителе: класс rider в COCO
+  # отсутствует, его строка головы остаётся случайной после переноса 7/8
+  # строк по именам — на этом классе soft-таргеты недостоверны.
+  #
+  # 80/20 — по ФАКТИЧЕСКОМУ вкладу в градиент (train_gradshare_*), а не по
+  # номиналу λ; сверка по прогону
+  # cityscapes_YOLOKD_yolov9c_to_yolov8n_coco_8020 (18 эпох).
+  # Наивные 0.8 / 0.0984 / 0.0984 / 0.0033 давали gradshare 99.99 / 0.01:
+  # det идёт с ultralytics-множителем batch_size (сырая ‖∇L_det‖ ≈ 256 на
+  # эпохе 1), а KD-компоненты — обычные средние (‖∇L_logit‖ ≈ 0.026,
+  # ‖∇L_box‖ ≈ 0.21, ‖∇L_feat‖ ≈ 0.065), разрыв ~2200x.
+  # Весь KD-блок отмасштабирован одним множителем 667 (геом. среднее
+  # отношения det/KD за 18 эпох), внутренние пропорции logit:box:feat
+  # сохранены. Отношение падает по ходу обучения, поэтому доля KD растёт
+  # с ~7% на старте до ~31% к 18-й эпохе, проходя 20% примерно в середине.
+  lambda_det: 0.8
+  lambda_logit: 65.63
+  lambda_box: 65.63
+  lambda_feat: 2.201

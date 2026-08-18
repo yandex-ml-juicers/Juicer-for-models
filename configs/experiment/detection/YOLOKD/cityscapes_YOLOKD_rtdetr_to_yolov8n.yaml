@@ -1,4 +1,8 @@
 # @package _global_
+# Копия cityscapes_YOLOKD_rtdetr_to_yolov9t с заменой студента на yolov8n.
+# Отличается ровно двумя вещами: model_name и student_channels — у yolov8n
+# на model.21 стоит C2f с 256 каналами против RepNCSPELAN4 со 128 у yolov9t
+# (замерено прогоном моделей, не взято из документации).
 defaults:
   - override /data/dataset: cityscapes
   - override /data/transform/train: cityscapes_transform_for_yolo
@@ -10,7 +14,7 @@ defaults:
   - override /scheduler: warmup_cosine
   - override /prediction_postprocessors: yolov8n
 
-name: cityscapes_YOLOKD_rtdetr_to_yolov9t
+name: cityscapes_YOLOKD_rtdetr_to_yolov8n
 device: cuda
 deterministic: false
 
@@ -18,7 +22,7 @@ task_type: "detection"
 
 clearml:
   enabled: True
-  tags: [cityscapes, YOLOKD, rtdetr-r50, yolov9t]
+  tags: [cityscapes, YOLOKD, rtdetr-r50, yolov8n]
   output_uri: false
   plots:
     debug_samples: 0
@@ -47,8 +51,6 @@ data:
     build:
       label_offset: 0
   loader:
-    # Проверено: связка RT-DETR(no_grad)+YOLOv9t(train) на 32 — 5.93GB пик,
-    # запас большой (учитель не считает backward/denoising).
     batch_size: 32
     num_workers: 16
     persistent_workers: true
@@ -56,7 +58,7 @@ data:
 
 model:
   student:
-    model_name: yolov9t
+    model_name: yolov8n
     weights: null
     backbone_dropout: 0.0
     neck_dropout: 0.0
@@ -68,25 +70,23 @@ loss:
 
   student_feature_key: model.21
   teacher_feature_key: model.encoder_input_proj.2
-
-  student_channels: 128
+  student_channels: 256
   teacher_channels: 256
 
   temperature: 2.0
 
-  # RT-DETR — query-based учитель: logit/box КД по позиции anchor'а
-  # невозможны (нет dense-сетки, см. докстринг YOLOKDLoss), поэтому 0 —
-  # используется только feature-KD (lambda_feat) поверх det.
+  # Дистилляция только по фичам: головы RT-DETR живут в другом пространстве
+  # выходов, чем YOLO-голова, поэтому логиты и боксы не переносятся.
   #
   # 80/20 — по ФАКТИЧЕСКОМУ вкладу в градиент (train_gradshare_*), а не по
   # номиналу λ. Наивные 0.8/0.2 давали gradshare det/feat = 99.99/0.01:
-  # det идёт с ultralytics-множителем batch_size (сырая ‖∇L_det‖ ≈ 259 на
-  # эпохе 1), а feat — обычное среднее (‖∇L_feat‖ ≈ 7.8), разрыв ~2000x.
-  # lambda_feat подобран из прогона cityscapes_YOLOKD_rtdetr_to_yolov9t_coco_8020
-  # по геометрическому среднему отношения det/feat за 15 эпох (783).
-  # Отношение падает по ходу обучения, поэтому доля feat растёт с ~9% на
-  # старте до ~26% к 15-й эпохе, проходя 20% примерно в середине.
+  # det идёт с ultralytics-множителем batch_size (сырая ‖∇L_det‖ ≈ 267 на
+  # эпохе 1), а feat — обычное среднее (‖∇L_feat‖ ≈ 8.1), разрыв ~2000x.
+  # lambda_feat подобран из прогона cityscapes_YOLOKD_rtdetr_to_yolov8n_coco_8020
+  # по геометрическому среднему отношения det/feat за 17 эпох (955).
+  # Отношение падает по ходу обучения, поэтому доля feat растёт с ~11% на
+  # старте до ~23% к 17-й эпохе, проходя 20% примерно в середине.
   lambda_det: 0.8
   lambda_logit: 0.0
   lambda_box: 0.0
-  lambda_feat: 2.584
+  lambda_feat: 3.15

@@ -26,7 +26,7 @@ from transformers import LwDetrConfig, LwDetrForObjectDetection, RTDetrConfig, R
 
 from ultralytics import YOLO
 from ultralytics.nn.tasks import DetectionModel
-from ultralytics.nn.modules.block import C2f, SPPF
+from ultralytics.nn.modules.block import C2f, SPPF, RepNCSPELAN4, SPPELAN, ELAN1
 from ultralytics.nn.modules.head import Detect
 
 from src.models.lwdetr_clockdistill import LwDetrCLoCKDistillMemory
@@ -407,14 +407,15 @@ def yolo(
             претрейн не тянется вовсе, он всё равно был бы перезаписан
             ниже strict-загрузкой.
         backbone_dropout, neck_dropout, bbox_dropout, cls_dropout: точечный
-            dropout в блоках C2f/SPPF (backbone/neck) и в ветках cv2/cv3
-            Detect-головы (bbox/cls). Это инъекция под конкретные типы
-            модулей v8-семейства: она работает для архитектур, что
-            унаследовали C2f/SPPF/Detect (v8, v10, v11, v12), но НЕ для
-            архитектур без них (например чистый YOLOv9 использует
-            RepNCSPELAN4/ELAN1/SPPELAN вместо C2f/SPPF). Если запрошен
-            ненулевой dropout, а подходящих слоёв в модели не нашлось —
-            функция не глотает это молча, а кидает предупреждение.
+            dropout в блоках backbone/neck и в ветках cv2/cv3 Detect-головы
+            (bbox/cls). Инъекция идёт по типам модулей и покрывает оба
+            семейства: C2f/SPPF у v8, v10, v11, v12 и RepNCSPELAN4/ELAN1/
+            SPPELAN у чистого YOLOv9. Dropout2d везде встаёт ПОСЛЕ выходной
+            свёртки блока — у C2f/SPPF это cv2, у RepNCSPELAN4/ELAN1 — cv4,
+            у SPPELAN — cv5 (не путать с её же cv4, это одна из веток
+            пулинга). Если запрошен ненулевой dropout, а подходящих слоёв в
+            модели не нашлось — функция не глотает это молча, а кидает
+            предупреждение.
             Для v10Detect (наследник Detect с доп. one2one-веткой)
             bbox/cls dropout встаёт только в общую cv2/cv3-ветку
             (one2many), one2one-ветка его не получает.
@@ -485,6 +486,23 @@ def yolo(
                 layer.cv2 = nn.Sequential(layer.cv2, nn.Dropout2d(p=backbone_dropout))
                 dropout_applied["backbone"] = True
 
+        # Аналоги C2f/SPPF у чистого YOLOv9. Граница backbone/neck та же
+        # (i < 10): в yolov9c/t/s бэкбон занимает слои 0..9, последним стоит
+        # SPPELAN, дальше начинается голова.
+        elif isinstance(layer, (RepNCSPELAN4, ELAN1)):
+            is_backbone = layer.i < 10
+            dropout = backbone_dropout if is_backbone else neck_dropout
+            if dropout > 0:
+                layer.cv4 = nn.Sequential(layer.cv4, nn.Dropout2d(p=dropout))
+                dropout_applied["backbone" if is_backbone else "neck"] = True
+
+        elif isinstance(layer, SPPELAN):
+            if backbone_dropout > 0:
+                # Выход SPPELAN — cv5; cv2/cv3/cv4 это ветки пулинга, dropout
+                # после любой из них резал бы часть пирамиды, а не выход блока.
+                layer.cv5 = nn.Sequential(layer.cv5, nn.Dropout2d(p=backbone_dropout))
+                dropout_applied["backbone"] = True
+
         elif isinstance(layer, Detect):
             if bbox_dropout > 0:
                 for branch in layer.cv2:
@@ -506,8 +524,8 @@ def yolo(
     if missed:
         warnings.warn(
             f"yolo(model_name={model_name!r}): запрошен dropout для {missed}, "
-            "но в этой архитектуре нет подходящих слоёв (C2f/SPPF/Detect) — "
-            "dropout не применён.",
+            "но в этой архитектуре нет подходящих слоёв (C2f/SPPF/Detect или "
+            "RepNCSPELAN4/ELAN1/SPPELAN) — dropout не применён.",
             stacklevel=2,
         )
 
@@ -519,6 +537,7 @@ def rtdetr_for_detection(
     checkpoint_id: str = "PekingU/rtdetr_r50vd",
     disable_custom_kernels: bool = True,
     dropout: float = 0.1,
+    freeze_backbone_stages: int = 0,
     checkpoint_path: str | Path | None = None,
 ) -> nn.Module:
     """RT-DETR (CNN-бэкбон ResNet-50-vd + лёгкий transformer encoder-decoder)
@@ -531,6 +550,17 @@ def rtdetr_for_detection(
 
     Args:
         checkpoint_id: канонический COCO-претрейн с HuggingFace Hub.
+        freeze_backbone_stages: сколько стадий ResNet-бэкбона заморозить,
+            считая от входа. 0 — учится весь бэкбон (прежнее поведение),
+            N>0 — замораживаются стем (embedder) и стадии 0..N-1. Размеры:
+            стем 0.03M, стадии 0.21M / 1.21M / 7.08M / 14.94M, весь бэкбон —
+            23.47M из 42.89M, то есть заморозка двух стадий почти ничего не
+            даёт, осмысленный порог — три. Понижение lr бэкбона до 1e-5
+            переобучение на 2975 кадрах Cityscapes не сняло (прогон
+            rtdetr_r50_lrsplit: eval mAP падал с 0.30 при train mAP 0.41),
+            заморозка убирает этот канал целиком. Нормализации в бэкбоне
+            замороженные (FrozenBatchNorm, веса лежат буферами) — отдельно
+            гасить их статистику не нужно.
         checkpoint_path: путь к чекпоинту, сохранённому этим проектом
             (best.pt с ключом "student_state") — та же логика, что у
             lwdetr_small_for_detection и yolo(). Если задан, применяется
@@ -572,6 +602,24 @@ def rtdetr_for_detection(
 
         state_dict = {key.removeprefix("module."): value for key, value in state_dict.items()}
         model.load_state_dict(state_dict, strict=True)
+
+    if freeze_backbone_stages > 0:
+        frozen_prefixes = ("model.backbone.model.embedder",) + tuple(
+            f"model.backbone.model.encoder.stages.{stage}"
+            for stage in range(freeze_backbone_stages)
+        )
+        frozen = 0
+        for name, param in model.named_parameters():
+            if name.startswith(frozen_prefixes):
+                param.requires_grad_(False)
+                frozen += param.numel()
+
+        if frozen == 0:
+            warnings.warn(
+                f"rtdetr_for_detection: freeze_backbone_stages={freeze_backbone_stages}, "
+                "но подходящих параметров не нашлось — ничего не заморожено.",
+                stacklevel=2,
+            )
 
     return model
 

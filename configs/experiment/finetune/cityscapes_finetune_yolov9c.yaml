@@ -41,12 +41,16 @@ optimizer:
   # Тот же рецепт ultralytics: lr0 0.01 при номинальном батче 64, здесь
   # батч 32 -> 0.01 * 64 / 32 = 0.02. Формула не зависит от размера модели,
   # только от batch_size.
-  lr: 0.02
+  lr: 0.01
   momentum: 0.937
-  weight_decay: 0.0005
+  # Прогон yolov9c_20260818 переобучался: train mAP 0.48 против eval 0.34 к
+  # 50-й эпохе на 2975 картинках. 0.0005 — дефолт ultralytics для батча 64,
+  # при нашем батче 32 их же формула дала бы 0.00025, то есть регуляризации
+  # было вдвое меньше номинала.
+  weight_decay: 0.005
 
 scheduler:
-  warmup_epochs: 3
+  warmup_epochs: 5
   start_factor: 0.01
   end_factor: 1.0
   eta_min: 2.0e-4
@@ -69,9 +73,12 @@ model:
     model_name: yolov9c
     # null — докачать канонический COCO-претрейн (yolov9c.pt) в data/weights.
     weights: null
-    # RepNCSPELAN4/ELAN1/SPPELAN у yolov9-семейства (нет C2f/SPPF), поэтому
-    # backbone/neck/bbox/cls-дропаут из yolo() — no-op, как и для yolov9t/s.
+    # У yolov9-семейства вместо C2f/SPPF стоят RepNCSPELAN4/ELAN1/SPPELAN —
+    # фабрика теперь вставляет dropout и в них (выходные свёртки cv4/cv5),
+    # так что все четыре ручки рабочие. Голова Detect общая с yolov8.
     backbone_dropout: 0.0
     neck_dropout: 0.0
+    # Переобучение сидит в классификации, а не в регрессии бокса — поэтому
+    # cls выше bbox; значения — дефолты самой фабрики yolo().
     bbox_dropout: 0.0
     cls_dropout: 0.0
