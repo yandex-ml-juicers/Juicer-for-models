@@ -15,6 +15,15 @@ pip install -e . --no-deps        # пакет src/ становится имп�
 pip install --force-reinstall 'torch>=2.7' 'torchvision>=0.22' --index-url https://download.pytorch.org/whl/cu128
 # Старые cu126 (Tesla V100, compute capability 7.0)
 pip install --force-reinstall 'torch>=2.7' 'torchvision>=0.22' --index-url https://download.pytorch.org/whl/cu126
+
+# если хотим запускать квантизацию:
+pip install -e ".[deploy]"          # onnx + onnxscript + onnxruntime
+
+# TensorRT — ТОЛЬКО с суффиксом CUDA и не старше 10.x, иначе не заработает:
+#   без суффикса ставится сборка под CUDA 13 (cudaError 35 на драйвере под 12);
+#   в 10.16+ и 11.x удалена поддержка Volta, то есть V100.
+python -c "import torch; print(torch.version.cuda)"   # -> 12.6
+pip install 'tensorrt-cu12==10.3.0'
 ```
 
 Проверки
@@ -189,6 +198,26 @@ python scripts/train.py experiment=<...> model/student=espnetv2_native model.stu
 Доступные варианты — `s050`/`s100`/`s125`/`s150`/`s200` (масштаб `s` из
 статьи, общий для обоих декодеров; веса качаются автоматически, см.
 `src/models/espnetv2.py`).
+
+## Квантизация (PTQ fp32 -> fp16)
+
+Обученный чекпоинт превращается в движок под конкретное железо одной командой:
+
+```bash
+pip install -e ".[deploy]"   # onnx + onnxscript + onnxruntime
+
+CUDA_VISIBLE_DEVICES=2 python scripts/quantize.py experiment=<...> \
+    ckpt_path=outputs/<name>/<run>/best.pt quantize=trt_fp16
+```
+
+Карта выбирается через `CUDA_VISIBLE_DEVICES`: TensorRT собирает движок на
+текущем устройстве процесса, и прятать чужие карты надёжнее, чем указывать
+индекс.
+
+Стадии (`export -> calibrate -> build -> validate -> benchmark`) перечислены в
+`quantize.stages`; отчёты остаются в папке запуска, а `.onnx` и `.engine` -
+в `data/deploy/<model_id>/`. Подробности, три уровня валидации и как читать
+замеры — в [docs/quantization.md](docs/quantization.md).
 
 ## Очередь экспериментов
 

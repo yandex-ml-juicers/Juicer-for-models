@@ -1,0 +1,35 @@
+# Смоук-рецепт: экспорт + валидация + замер на onnxruntime/CPU.
+#
+# Аналог `data/dataset=fake_cifar10` для обучения — прогоняет весь конвейер
+# на машине без CUDA и без TensorRT, за секунды. Ускорения тут нет и быть не
+# может (тот же fp32 на том же процессоре); проверяется, что стадии
+# стыкуются, артефакты складываются куда надо и отчёт собирается.
+#
+#   python scripts/quantize.py data/dataset=fake_cifar10 quantize=ort_cpu \
+#       '~model/teacher' device=cpu
+defaults:
+  - base
+  - _self_
+
+stages: [export, validate, benchmark]
+
+backend: onnxruntime
+precision: fp32
+providers: [CPUExecutionProvider]
+
+export:
+  batch_size: 4
+
+validate:
+  compare_batches: 3
+  limit_eval_batches: 3
+  # Тот же fp32 на том же CPU обязан совпасть с точностью до порядка сложения.
+  min_agreement: 0.999
+  max_metric_drop: 0.001
+
+benchmark:
+  batch_sizes: [1, 4]
+  warmup: 3
+  iters: 10
+  modes: [e2e]
+  baseline: torch_fp32

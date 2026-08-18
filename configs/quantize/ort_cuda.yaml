@@ -1,0 +1,27 @@
+# onnxruntime с CUDA EP — путь для карт, которые TensorRT уже не поддерживает
+# (наш случай: V100 = sm_70, выпилена в TensorRT 10.16+).
+#
+# Точность пока fp32: CUDA EP исполняет ровно те типы, что записаны в графе,
+# а fp16-граф — отдельная работа на стадии экспорта. Смысл рецепта в том, что
+# он даёт графовый движок на карте и замер тем же кодом, что и остальные.
+#
+#   pip install onnxruntime-gpu
+#   CUDA_VISIBLE_DEVICES=2 python scripts/quantize.py experiment=<...> \
+#       ckpt_path=<...> quantize=ort_cuda
+defaults:
+  - base
+  - _self_
+
+stages: [export, validate, benchmark]
+
+backend: onnxruntime
+precision: fp32
+# Провайдеры перечислены явно и проверяются: при недоступном CUDA EP
+# onnxruntime молча уходит на CPU, и "замер GPU" оказывается замером CPU.
+providers: [CUDAExecutionProvider]
+
+validate:
+  # Тот же fp32, что и в torch: расхождение здесь означает проблему экспорта,
+  # а не точности.
+  min_agreement: 0.999
+  max_metric_drop: 0.001

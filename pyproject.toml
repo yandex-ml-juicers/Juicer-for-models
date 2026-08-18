@@ -12,6 +12,11 @@ dynamic = ["dependencies"]
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "pre-commit"]
 
+# Квантизация: pip install -e ".[deploy]"
+# onnxscript обязателен: через него torch.onnx.export строит граф в
+# dynamo-режиме (дефолт с torch 2.9). Сам torch его не тянет.
+deploy = ["onnx>=1.16", "onnxscript>=0.1", "onnxruntime>=1.18"]
+
 [tool.setuptools.dynamic]
 dependencies = { file = ["requirements.txt"] }
 
