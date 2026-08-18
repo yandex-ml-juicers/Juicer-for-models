@@ -3,14 +3,14 @@ defaults:
   - override /data/dataset: cityscapes
   - override /data/transform/train: cityscapes_transform_for_yolo
   - override /data/transform/eval: cityscapes_transform_for_yolo
-  - override /model/teacher: lwdetr_clockdistill
+  - override /model/teacher: lwdetr
   - override /model/student: yolo
-  - override /loss: clockdistill
-  - override /optimizer: yolo_sgd
+  - override /loss: dckd
+  - override /optimizer: SGD
   - override /scheduler: warmup_cosine
   - override /prediction_postprocessors: yolov8n
 
-name: cityscapes_CLoCKDistill_LWDETR_small_to_yolov8n
+name: cityscapes_DCKD_LWDETR_small_to_yolov9s
 device: cuda
 deterministic: false
 
@@ -18,14 +18,10 @@ task_type: "detection"
 
 clearml:
   enabled: True
-  tags: [cityscapes, CLoCKDistill, LW-DETR-small, yolov8n]
+  tags: [cityscapes, DCKD, LW-DETR-small, yolov9s]
   output_uri: false
   plots:
-    # 0 — Debug Samples не отправляются вовсе.
     debug_samples: 0
-    # 0/не указано — зонд вклада компонентов лосса в градиент выключен;
-    # N>0 — считается раз в N шагов внутри эпохи (график grad_contribution
-    # в ClearML). См. GradientContributionTracker в src/utils/metrics.py.
     grad_contrib_every_n_steps: 50
 
 trainer:
@@ -52,12 +48,13 @@ data:
       label_offset: 0
   loader:
     batch_size: 32
-    num_workers: 8
+    num_workers: 16
     persistent_workers: true
     pin_memory: true
 
 model:
   student:
+    model_name: yolov9s
     weights: null
     backbone_dropout: 0.02
     neck_dropout: 0.0
@@ -69,28 +66,28 @@ model:
 loss:
   num_classes: 8
 
-  student_feature_key: model.21
-  teacher_feature_key: model.model.backbone.projector
+  # model.21 у yolov9s — тот же индекс/канальность (256), что и у yolov8n
+  # (проверено эмпирически) — базовые student_feature_key/student_channels
+  # из dckd.yaml подходят без переопределения.
 
-  student_channels: 256
-  teacher_channels: 256
-  d_model: 256
-
-  lambda_det: 0.31
-  lambda_lcmd: 1.0
-  lambda_tcld: 11.7
-
-  alpha: 1686.5
-  beta: 3.373
-
-  lambda_cls: 1.0
-  lambda_l1: 5.0
-  lambda_giou: 2.0
+  lambda_det: 0.044
+  lambda_hekld: 11.0
+  lambda_hokfd: 11.0
 
   temperature: 2.0
 
   teacher_has_no_object: false
 
-  max_target_queries: 300
+  teacher_topk: 100
+  student_topk: 1000
+  teacher_score_threshold: 0.0
+
+  match_cls_weight: 1.0
+  match_l1_weight: 5.0
+  match_giou_weight: 2.0
+
+  local_iou_threshold: 0.5
+  quality_gamma: 0.5
+  attention_temperature: 0.1
 
   eps: 1.0e-6

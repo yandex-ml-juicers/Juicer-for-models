@@ -6,11 +6,11 @@ defaults:
   - override /model/teacher: lwdetr_clockdistill
   - override /model/student: yolo
   - override /loss: clockdistill
-  - override /optimizer: yolo_sgd
+  - override /optimizer: SGD
   - override /scheduler: warmup_cosine
   - override /prediction_postprocessors: yolov8n
 
-name: cityscapes_CLoCKDistill_LWDETR_small_to_yolov8n
+name: cityscapes_CLoCKDistill_LWDETR_small_to_yolov9s
 device: cuda
 deterministic: false
 
@@ -18,14 +18,10 @@ task_type: "detection"
 
 clearml:
   enabled: True
-  tags: [cityscapes, CLoCKDistill, LW-DETR-small, yolov8n]
+  tags: [cityscapes, CLoCKDistill, LW-DETR-small, yolov9s]
   output_uri: false
   plots:
-    # 0 — Debug Samples не отправляются вовсе.
     debug_samples: 0
-    # 0/не указано — зонд вклада компонентов лосса в градиент выключен;
-    # N>0 — считается раз в N шагов внутри эпохи (график grad_contribution
-    # в ClearML). См. GradientContributionTracker в src/utils/metrics.py.
     grad_contrib_every_n_steps: 50
 
 trainer:
@@ -58,6 +54,7 @@ data:
 
 model:
   student:
+    model_name: yolov9s
     weights: null
     backbone_dropout: 0.02
     neck_dropout: 0.0
@@ -69,12 +66,9 @@ model:
 loss:
   num_classes: 8
 
-  student_feature_key: model.21
-  teacher_feature_key: model.model.backbone.projector
-
-  student_channels: 256
-  teacher_channels: 256
-  d_model: 256
+  # model.21 у yolov9s — тот же индекс/канальность (256), что и у yolov8n
+  # (проверено эмпирически) — student_feature_key/student_channels/
+  # teacher_channels/d_model из clockdistill.yaml подходят без переопределения.
 
   lambda_det: 0.31
   lambda_lcmd: 1.0
