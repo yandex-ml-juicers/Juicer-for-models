@@ -1,0 +1,26 @@
+_target_: src.optimizers.rtdetr_adamw
+_partial_: true
+_convert_: all
+
+lr: 1.0e-4
+# Бэкбон предобучен на COCO — вдесятеро меньший lr, как в официальном рецепте
+# RT-DETR. Единый lr на всю модель ломал предобученные признаки: лучший eval
+# mAP приходился на 4-ю эпоху, дальше метрика падала при растущем train mAP.
+lr_backbone: 1.0e-5
+lr_encoder: 1.0e-4
+# Головы классификации инициализированы случайно (80 классов COCO -> 8
+# Cityscapes), поэтому вынесены отдельной ручкой; по умолчанию базовый lr.
+lr_head: 1.0e-4
+
+# Затухания выключены: включать по одному в отдельных экспериментах.
+lr_backbone_stage_decay: 1.0
+lr_component_decay: 1.0
+
+weight_decay: 1.0e-4
+
+betas: [0.9, 0.999]
+eps: 1.0e-8
+
+fused: false
+
+num_backbone_stages: 4

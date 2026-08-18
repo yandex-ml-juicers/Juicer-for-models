@@ -1,9 +1,0 @@
-_target_: src.optimizers.no_decay_adamw
-_partial_: true
-_convert_: all
-
-lr: 1.0e-4
-weight_decay: 1.0e-4
-betas: [0.9, 0.999]
-eps: 1.0e-8
-fused: false

@@ -6,7 +6,7 @@ defaults:
   - override /model/teacher: null
   - override /model/student: rtdetr
   - override /loss: lwdetr_small_loss
-  - override /optimizer: no_decay_adamw
+  - override /optimizer: rtdetr_adamw
   - override /scheduler: warmup_cosine
   - override /prediction_postprocessors: lwdetr
 
@@ -36,6 +36,9 @@ trainer:
 
 optimizer:
   lr: 1.0e-4
+  # Бэкбон (23.47M из 42.74M) предобучен на COCO и на едином lr=1e-4 деградировал:
+  # пик eval mAP=0.3025 на 4-й эпохе, к 17-й — 0.2531 при train mAP 0.4064.
+  lr_backbone: 1.0e-5
   weight_decay: 1.0e-4
 
 scheduler:
@@ -58,8 +61,8 @@ data:
     # проверил реальный расход памяти: 16 → 16.65GB пик, 8 → 8.63GB пик
     # (с GradScaler, 3 шага) на 32GB GPU. Беру 8 — оставляет запас на общей
     # машине, где параллельно крутятся другие джобы.
-    batch_size: 8
-    num_workers: 8
+    batch_size: 16
+    num_workers: 16
     persistent_workers: true
     pin_memory: true
 
