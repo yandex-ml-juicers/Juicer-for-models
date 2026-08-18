@@ -21,6 +21,7 @@ from src.quantization.numerics import compare_runners, evaluate_runner
 from src.quantization.report import QuantizationReport, check_acceptance
 from src.utils import resolve_device, seed_everything
 from src.utils.checkpoints import load_checkpoint_into
+from src.utils.seed import make_generator, seed_worker
 from typing import Any
 
 log = logging.getLogger(__name__)
@@ -191,6 +192,15 @@ def check_batch_fits_profile(cfg: DictConfig) -> None:
                 f"{allowed}. Правь quantize.benchmark.batch_sizes."
             )
 
+    if cfg.quantize.precision == "int8" and "build" in stages:
+        calib_batch = int(cfg.quantize.calibrate.batch_size)
+        if not low <= calib_batch <= high:
+            raise ValueError(
+                f"Батч калибровки {calib_batch} не подходит движку: он принимает {allowed}. "
+                f"Калибровка идёт через тот же вход, что и инференс — правь "
+                f"quantize.calibrate.batch_size."
+            )
+
     if "validate" not in stages:
         return
 
@@ -264,15 +274,121 @@ def stage_export(cfg, student, get_loader, device, onnx_path, manifest, report) 
     return result.meta
 
 
-def stage_calibrate(cfg, report) -> dict:
-    """Заглушка под int8"""
-    reason = (
-        f"precision={cfg.quantize.precision}: ни масштабов, ни zero-point здесь нет, "
-        f"статистики активаций собирать не для чего."
+def calibration_source(cfg: DictConfig) -> dict:
+    """Паспорт источника выборки: по нему решается, годится ли собранная ранее.
+
+    Только JSON-совместимые типы: паспорт переживает запись на диск, и
+    сравнивать его придётся уже после чтения.
+    """
+    normalize = get_normalize_stats(cfg)
+    size = cfg.data.dataset.get("image_size")
+    return {
+        "split": str(cfg.quantize.calibrate.split),
+        "dataset": cfg.data.dataset.build.get("_target_"),
+        "transform": cfg.data.transform.eval.get("_target_"),
+        "image_size": list(size) if isinstance(size, (list, tuple)) else size,
+        "normalize": [list(normalize[0]), list(normalize[1])] if normalize else None,
+        "seed": int(cfg.seed),
+    }
+
+
+def calibration_loader(cfg: DictConfig) -> DataLoader:
+    """Лоадер под калибровку: картинки одного сплита, препроцессинг инференса.
+
+    Три решения, каждое из которых влияет на масштабы квантования сильнее,
+    чем кажется.
+
+    **Сплит по умолчанию train, а не eval.** Калибровка подбирает диапазоны
+    под данные. Подбирать их по той же выборке, на которой потом отчитываешься
+    метрикой, — подгонка: результат окажется оптимистичным ровно там, где его
+    и меряют.
+
+    **Препроцессинг всегда eval, даже для train-сплита.** Калибровка обязана
+    видеть активации такими, какими они будут в проде. Случайный кроп,
+    отражение и цветовые сдвиги обучающей аугментации их смещают.
+
+    **Перемешивание обязательно.** Датасеты разложены по классам подряд:
+    первые 512 картинок ImageNet-100 — это два класса из ста, и калибровка
+    оценила бы диапазоны по ним вместо всей задачи. Генератор фиксирован
+    seed'ом, так что выборка при этом остаётся воспроизводимой.
+    """
+    settings = cfg.quantize.calibrate
+    split = str(settings.split)
+    if split not in ("train", "eval"):
+        raise ValueError(f"quantize.calibrate.split={split!r}; доступны 'train' и 'eval'.")
+
+    if cfg.get("task_type") == "detection":
+        raise NotImplementedError(
+            "Калибровка для детекции не поддержана: там свой collate_fn и батч не "
+            "сводится к одному тензору изображений."
+        )
+
+    if split == "eval":
+        log.warning(
+            "Калибровка идёт по eval-сплиту — по той же выборке, на которой считается "
+            "отчётная метрика. Масштабы подстроятся под неё, и просадка int8 выйдет "
+            "заниженной. Годится для отладки, не для отчёта."
+        )
+
+    transform = instantiate(cfg.data.transform.eval)
+    dataset = instantiate(cfg.data.dataset.build, train=(split == "train"), transform=transform)
+
+    return DataLoader(
+        dataset,
+        batch_size=int(settings.batch_size),
+        shuffle=True,
+        generator=make_generator(cfg.seed),
+        num_workers=int(cfg.data.loader.num_workers),
+        pin_memory=False,
+        worker_init_fn=seed_worker,
     )
-    log.info("calibrate: пропуск - %s", reason)
-    report.stage("calibrate", {"reason": reason}, status="skipped")
-    return {"skipped": True}
+
+
+def stage_calibrate(cfg, artifacts, report) -> dict:
+    """Калибровочная выборка под int8; для fp32/fp16 — осознанный пропуск."""
+    if cfg.quantize.precision != "int8":
+        reason = (
+            f"precision={cfg.quantize.precision}: ни масштабов, ни zero-point здесь нет, "
+            f"статистики активаций собирать не для чего."
+        )
+        log.info("calibrate: пропуск - %s", reason)
+        report.stage("calibrate", {"reason": reason}, status="skipped")
+        return {"skipped": True}
+
+    from src.quantization.calibration import (
+        calibration_dir,
+        calibration_paths,
+        collect_calibration_samples,
+        load_calibration_data,
+        matches_request,
+    )
+
+    settings = cfg.quantize.calibrate
+    num_samples = int(settings.num_samples)
+    batch_size = int(settings.batch_size)
+    source = calibration_source(cfg)
+    samples_path, manifest_path = calibration_paths(artifacts)
+
+    if cfg.quantize.reuse and samples_path.is_file() and manifest_path.is_file():
+        data = load_calibration_data(artifacts)
+        if matches_request(data, num_samples=num_samples, batch_size=batch_size, source=source):
+            log.info(
+                "calibrate: выборка уже собрана (%d примеров из %s) - переиспользую",
+                data.num_samples, source["split"],
+            )
+            report.stage("calibrate", {**data.meta, "reused": True})
+            return data.meta
+        log.info("calibrate: выборка есть, но собрана под другой запрос - пересобираю")
+
+    data = collect_calibration_samples(
+        calibration_loader(cfg),
+        output_dir=calibration_dir(artifacts),
+        num_samples=num_samples,
+        batch_size=batch_size,
+        source=source,
+    )
+    report.stage("calibrate", data.meta)
+    return data.meta
 
 
 def engine_path_for(cfg: DictConfig, artifacts: Path) -> Path:
@@ -290,26 +406,68 @@ def stage_build(cfg, onnx_path, artifacts, report) -> dict:
         report.stage("build", {"reason": reason}, status="skipped")
         return {"skipped": True}
 
-    from src.quantization.build_engine import build_engine
+    from src.quantization.build_engine import build_engine, build_options
 
+    settings = cfg.quantize.build
     engine_path = engine_path_for(cfg, artifacts)
+
+    opt_batch = settings.opt_batch
+    opt_shape = None
+    if opt_batch is not None:
+        exported = report.payload["stages"].get("export", {}).get("input_shape")
+        if exported is None:
+            raise ValueError(
+                "quantize.build.opt_batch задан, но форма входа неизвестна: стадия "
+                "export в этом запуске не выполнялась. Добавь её в quantize.stages "
+                "или убери opt_batch."
+            )
+        opt_shape = [int(opt_batch), *exported[1:]]
+
+    options = build_options(
+        precision=cfg.quantize.precision,
+        opt_shape=opt_shape,
+        fp32_layers=list(settings.get("fp32_layers") or []),
+        fp32_margin=int(settings.get("fp32_margin") or 0),
+        calibration_algorithm=str(cfg.quantize.calibrate.algorithm),
+        int8_fp16_fallback=bool(settings.get("int8_fp16_fallback", True)),
+    )
+
+    calibration, calibration_cache = None, None
+    if cfg.quantize.precision == "int8":
+        from src.quantization.calibration import calibration_dir, load_calibration_data
+
+        calibration = load_calibration_data(artifacts)
+        # Кэш масштабов лежит рядом с выборкой, а не в engines/<hw_tag>/:
+        # таблица диапазонов активаций — свойство модели и данных, от карты и
+        # версии TensorRT она не зависит и переживает пересборку под другое железо.
+        calibration_cache = (
+            calibration_dir(artifacts) / f"scales_{cfg.quantize.calibrate.algorithm}.cache"
+        )
 
     if cfg.quantize.reuse and engine_path.is_file():
         meta_path = engine_path.with_suffix(".meta.json")
         if meta_path.is_file():
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
-            if meta.get("source_onnx_sha256") == sha256_file(onnx_path):
-                log.info("build: %s собран из этого же .onnx - пропускаем", engine_path.name)
+            same_onnx = meta.get("source_onnx_sha256") == sha256_file(onnx_path)
+            # У int8-движка исходников два. Те же веса, откалиброванные по
+            # другой выборке, дают другие масштабы и другое качество — сверять
+            # один только .onnx здесь недостаточно.
+            same_calibration = calibration is None or (
+                (meta.get("calibration") or {}).get("samples_sha256")
+                == calibration.meta.get("sha256")
+            )
+            # Настройки сборки — третий исходник наравне с .onnx и выборкой.
+            # Движок, собранный без fp32_layers, внешне неотличим от собранного
+            # с ними: тот же путь, тот же размер, другое поведение.
+            same_options = meta.get("build_options") == options
+            if same_onnx and same_calibration and same_options:
+                log.info("build: %s собран из этих же исходников - пропускаем", engine_path.name)
                 report.stage("build", {**meta, "reused": True})
                 return meta
-        log.info("build: движок есть, но собран из другого .onnx - пересобираем")
-
-    settings = cfg.quantize.build
-    opt_batch = settings.opt_batch
-    opt_shape = None
-    if opt_batch is not None:
-        sample_shape = report.payload["stages"]["export"]["input_shape"]
-        opt_shape = [int(opt_batch), *sample_shape[1:]]
+        log.info(
+            "build: движок есть, но собран из другого .onnx, другой выборки или с "
+            "другими настройками - пересобираем"
+        )
 
     result = build_engine(
         onnx_path,
@@ -321,8 +479,12 @@ def stage_build(cfg, onnx_path, artifacts, report) -> dict:
         timing_cache_path=engine_path.parent / "timing.cache" if settings.timing_cache else None,
         verbose=bool(settings.verbose),
         detailed_layers=bool(settings.get("detailed_layers", True)),
-        fp32_layers=list(settings.get("fp32_layers") or []),
-        fp32_margin=int(settings.get("fp32_margin") or 0),
+        fp32_layers=list(options["fp32_layers"]),
+        fp32_margin=int(options["fp32_margin"]),
+        calibration=calibration,
+        calibration_cache=calibration_cache,
+        calibration_algorithm=str(cfg.quantize.calibrate.algorithm),
+        int8_fp16_fallback=bool(settings.get("int8_fp16_fallback", True)),
     )
     report.stage("build", result.meta)
     return result.meta
@@ -526,7 +688,7 @@ def main(cfg: DictConfig) -> float:
     if "export" in stages:
         stage_export(cfg, student, get_loader, device, onnx_path, manifest, report)
     if "calibrate" in stages:
-        stage_calibrate(cfg, report)
+        stage_calibrate(cfg, artifacts, report)
     if "build" in stages:
         stage_build(cfg, onnx_path, artifacts, report)
 

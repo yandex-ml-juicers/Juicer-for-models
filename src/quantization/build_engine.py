@@ -18,7 +18,7 @@ log = logging.getLogger(__name__)
 
 DEFAULT_WORKSPACE_BYTES = 2 * 1024**3
 
-PRECISIONS = ("fp32", "fp16")
+PRECISIONS = ("fp32", "fp16", "int8")
 
 
 @dataclass(frozen=True)
@@ -172,9 +172,54 @@ def _network_flags(trt: Any, precision: str) -> int:
     return flags
 
 
-def _apply_precision(trt: Any, builder: Any, config: Any, network: Any, precision: str) -> str:
+def _apply_int8(trt: Any, builder: Any, config: Any, *, fp16_fallback: bool = True) -> str:
+    """Флаги под int8. Сами масштабы придут из калибратора, а не отсюда.
+
+    `fp16_fallback` — про то, что делать со слоями, которым int8 не идёт.
+    По умолчанию билдеру разрешено выбрать для них fp16, и это правильный
+    деплойный режим: он даёт лучший движок из возможных. Но и худший
+    инструмент измерения — на карте, где fp16 быстрее int8 (любая Volta),
+    билдер выберет fp16 почти везде, и «замер int8» окажется замером fp16.
+    Чтобы узнать цену именно int8, фолбэк надо выключить.
+    """
+    flag = getattr(trt.BuilderFlag, "INT8", None)
+    if flag is None:
+        raise RuntimeError(
+            f"В TensorRT {trt.__version__} нет BuilderFlag.INT8: неявная квантизация "
+            f"с калибратором из этой ветки удалена. int8 там задаётся явно, узлами "
+            f"QuantizeLinear/DequantizeLinear в самом ONNX, — это работа стадии "
+            f"экспорта, а не сборки."
+        )
+
+    if not getattr(builder, "platform_has_fast_int8", True):
+        log.warning(
+            "У карты нет быстрого int8: движок соберётся, но ускорения не будет."
+        )
+    config.set_flag(flag)
+    route = "BuilderFlag.INT8"
+
+    if fp16_fallback:
+        fp16 = getattr(trt.BuilderFlag, "FP16", None)
+        if fp16 is not None:
+            config.set_flag(fp16)
+            route += " + FP16"
+    return route
+
+
+def _apply_precision(
+    trt: Any,
+    builder: Any,
+    config: Any,
+    network: Any,
+    precision: str,
+    *,
+    int8_fp16_fallback: bool = True,
+) -> str:
     if precision == "fp32":
         return "fp32"
+
+    if precision == "int8":
+        return _apply_int8(trt, builder, config, fp16_fallback=int8_fp16_fallback)
 
     flag = getattr(trt.BuilderFlag, "FP16", None)
     if flag is not None:
@@ -193,6 +238,103 @@ def _apply_precision(trt: Any, builder: Any, config: Any, network: Any, precisio
             f"а не на сборке."
         )
     return "типы графа (strongly typed)"
+
+
+def build_options(
+    *,
+    precision: str,
+    opt_shape: Sequence[int] | None = None,
+    fp32_layers: Sequence[str] | None = None,
+    fp32_margin: int = 0,
+    calibration_algorithm: str | None = None,
+    int8_fp16_fallback: bool | None = None,
+) -> dict:
+    """Настройки, от которых движок зависит ПО СУЩЕСТВУ.
+
+    Пишется в паспорт и сверяется при переиспользовании. Без этого
+    `quantize.build.fp32_layers=[bmm]` поверх уже собранного движка молча
+    вернул бы старый: и веса, и .onnx те же, а защиты точности, ради которой
+    флаг и ставили, в нём нет. Ровно та же ловушка ждёт переключение
+    int8_fp16_fallback — эксперимент выглядел бы проведённым.
+
+    Того, что на движок не влияет (verbose, timing_cache) или уже зашито в
+    путь (precision, железо), здесь нет: лишние ключи заставляли бы
+    пересобирать движок на ровном месте.
+    """
+    options: dict = {
+        "opt_shape": list(opt_shape) if opt_shape is not None else None,
+        "fp32_layers": sorted(fp32_layers or []),
+        "fp32_margin": int(fp32_margin),
+    }
+    if precision == "int8":
+        options["calibration_algorithm"] = calibration_algorithm
+        options["int8_fp16_fallback"] = bool(int8_fp16_fallback)
+    return options
+
+
+def _attach_calibrator(
+    trt: Any,
+    builder: Any,
+    config: Any,
+    *,
+    calibration: Any,
+    cache_path: Path | None,
+    algorithm: str,
+    onnx_sha256: str,
+    input_name: str,
+    shape_min: Sequence[int],
+    shape_max: Sequence[int],
+    device: str = "cuda",
+) -> Any:
+    """Подключает калибратор к сборке и фиксирует форму калибровочного батча."""
+    if calibration is None:
+        raise ValueError(
+            "precision=int8 требует калибровочной выборки. Веса билдер квантует сам, "
+            "а диапазоны АКТИВАЦИЙ зависят от данных, и взять их неоткуда, кроме как "
+            "прогнав модель на реальных примерах.\n"
+            "Запусти стадию calibrate: quantize.stages='[export,calibrate,build,validate,benchmark]'."
+        )
+
+    from src.quantization.calibration import make_calibrator
+
+    handle = make_calibrator(
+        trt,
+        calibration,
+        cache_path=cache_path,
+        algorithm=algorithm,
+        onnx_sha256=onnx_sha256,
+        device=device,
+    )
+
+    shape = tuple(handle.shape)
+    if len(shape) != len(shape_min) or any(
+        not low <= dim <= high for dim, low, high in zip(shape, shape_min, shape_max)
+    ):
+        raise ValueError(
+            f"Форма калибровочного батча {shape} не влезает в профиль движка "
+            f"{tuple(shape_min)}..{tuple(shape_max)}. Калибровка идёт через тот же вход, "
+            f"что и инференс, поэтому форма обязана быть допустимой — правь "
+            f"quantize.calibrate.batch_size."
+        )
+
+    config.int8_calibrator = handle.calibrator
+
+    # Динамическому входу нужен ОТДЕЛЬНЫЙ профиль калибровки. Без него
+    # TensorRT берёт kOPT первого профиля оптимизации (у нас это максимум
+    # диапазона, обычно 64) и требует от калибратора батчи ровно такого
+    # размера — а он отдаёт свои. Фиксируем профиль по форме выборки.
+    set_calibration_profile = getattr(config, "set_calibration_profile", None)
+    if set_calibration_profile is not None:
+        profile = builder.create_optimization_profile()
+        profile.set_shape(input_name, shape, shape, shape)
+        set_calibration_profile(profile)
+
+    log.info(
+        "Калибровка int8: %d батчей %s, алгоритм %s%s",
+        handle.meta["num_batches"], shape, algorithm,
+        ", масштабы из кэша" if handle.meta["cache_reused"] else "",
+    )
+    return handle
 
 
 def constrain_layer_precision(
@@ -371,6 +513,10 @@ def build_engine(
     detailed_layers: bool = True, # хранить в движке разбор слоёв (иначе не узнать, что ушло в fp16)
     fp32_layers: Sequence[str] | None = None, # шаблоны имён слоёв, которые обязаны остаться в fp32
     fp32_margin: int = 0, # запас по краям диапазона: границы (касты) тоже бывают опасны
+    calibration: Any | None = None, # CalibrationData: выборка для int8, обязательна при precision=int8
+    calibration_cache: str | Path | None = None, # таблица масштабов; переживает пересборку
+    calibration_algorithm: str = "entropy2", # entropy2 для свёрток, minmax для трансформеров
+    int8_fp16_fallback: bool = True, # разрешить билдеру уводить неудобные слои в fp16
 ) -> BuildResult:
     """Собирает `.engine` из `.onnx` и пишет рядом паспорт сборки"""
 
@@ -382,8 +528,7 @@ def build_engine(
 
     if precision not in PRECISIONS:
         raise ValueError(
-            f"precision={precision!r} не поддержан. Доступно: {PRECISIONS}. "
-            f"int8 требует калибровки - это стадия calibrate, её ещё нет."
+            f"precision={precision!r} не поддержан. Доступно: {PRECISIONS}."
         )
 
     inputs = onnx_inputs(onnx_path)
@@ -414,7 +559,24 @@ def build_engine(
 
     config = builder.create_builder_config()
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, workspace_bytes)
-    precision_route = _apply_precision(trt, builder, config, network, precision)
+    precision_route = _apply_precision(
+        trt, builder, config, network, precision, int8_fp16_fallback=int8_fp16_fallback
+    )
+
+    # Ссылку держим до конца сборки: билдер зовёт калибратор из C++ и читает
+    # его буфер по указателю. Сборщик мусора об этом не знает.
+    calibration_handle = None
+    if precision == "int8":
+        calibration_handle = _attach_calibrator(
+            trt, builder, config,
+            calibration=calibration,
+            cache_path=Path(calibration_cache) if calibration_cache is not None else None,
+            algorithm=calibration_algorithm,
+            onnx_sha256=sha256_file(onnx_path),
+            input_name=input_name,
+            shape_min=shape_min,
+            shape_max=shape_max,
+        )
 
     precision_constraints = None
     if fp32_layers:
@@ -486,6 +648,15 @@ def build_engine(
         "precision": precision,
         "precision_route": precision_route,
         "precision_constraints": precision_constraints,
+        "build_options": build_options(
+            precision=precision,
+            opt_shape=opt_shape,
+            fp32_layers=fp32_layers,
+            fp32_margin=fp32_margin,
+            calibration_algorithm=calibration_algorithm,
+            int8_fp16_fallback=int8_fp16_fallback,
+        ),
+        "calibration": calibration_handle.meta if calibration_handle is not None else None,
         "graph_precisions": sorted(graph_precisions(network)),
         "source_onnx": str(onnx_path),
         "source_onnx_sha256": sha256_file(onnx_path),

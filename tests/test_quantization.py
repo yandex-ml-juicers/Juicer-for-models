@@ -22,7 +22,7 @@ from src.quantization.export import export_onnx
 from src.quantization.numerics import compare_runners, evaluate_runner, tensor_diff
 from src.quantization.report import check_acceptance
 
-RECIPES = ["base", "trt_fp16", "trt_fp32", "trt_fp16_seg", "torch_fp16", "ort_cpu", "ort_cuda"]
+RECIPES = ["base", "trt_fp16", "trt_fp32", "trt_fp16_seg", "trt_int8", "torch_fp16", "ort_cpu", "ort_cuda"]
 
 
 class TinyNet(nn.Module):
@@ -62,9 +62,11 @@ def test_quantize_recipes_compose(recipe):
     with initialize(version_base="1.3", config_path="../configs"):
         cfg = compose(config_name="config", overrides=[f"quantize={recipe}"])
 
-    assert cfg.quantize.precision in ("fp32", "fp16")
+    assert cfg.quantize.precision in ("fp32", "fp16", "int8")
     assert cfg.quantize.backend in ("torch", "onnxruntime", "tensorrt")
     assert set(cfg.quantize.stages) <= {"export", "calibrate", "build", "validate", "benchmark"}
+    # int8 без калибровки — движок с масштабами «из воздуха»: стадия обязана быть.
+    assert cfg.quantize.precision != "int8" or "calibrate" in cfg.quantize.stages
     # opset ниже 18 dynamo-экспортер не отдаёт — молча получили бы не тот граф.
     assert not cfg.quantize.export.dynamo or cfg.quantize.export.opset >= 18
 
@@ -664,3 +666,203 @@ def test_require_tensorrt_is_the_single_import_point():
     else:
         module = require_tensorrt()
         assert tuple(int(part) for part in module.__version__.split(".")[:2]) >= MIN_TRT_VERSION
+
+
+# ---------------------------------------------------------------------------
+# Калибровка под int8
+# ---------------------------------------------------------------------------
+
+
+class _FakeInt8Base:
+    """Двойник базового класса калибратора TensorRT: нужен только конструктор."""
+
+
+class _FakeCalibratorTRT:
+    """Модуль tensorrt в объёме, достаточном для сборки калибратора."""
+
+    __version__ = "10.3.0"
+    IInt8EntropyCalibrator2 = _FakeInt8Base
+    IInt8MinMaxCalibrator = _FakeInt8Base
+
+
+def _calibration_data(tmp_path, *, num_samples=8, batch_size=4, source=None):
+    from src.quantization.calibration import calibration_dir, collect_calibration_samples
+
+    torch.manual_seed(0)
+    images = torch.randn(max(num_samples, 8), 3, 8, 8)
+    labels = torch.zeros(images.shape[0], dtype=torch.long)
+    loader = DataLoader(TensorDataset(images, labels), batch_size=2)
+    return collect_calibration_samples(
+        loader,
+        output_dir=calibration_dir(tmp_path),
+        num_samples=num_samples,
+        batch_size=batch_size,
+        source=source if source is not None else {"split": "train"},
+    )
+
+
+def test_calibration_sample_count_is_rounded_down_to_whole_batches(tmp_path):
+    """Неполный батч TensorRT отдать нельзя — выборка обязана делиться нацело."""
+    data = _calibration_data(tmp_path, num_samples=10, batch_size=4)
+
+    assert data.num_samples == 8
+    assert data.num_batches == 2
+    assert data.batch_shape == (4, 3, 8, 8)
+
+
+def test_calibration_manifest_survives_a_round_trip(tmp_path):
+    from src.quantization.calibration import load_calibration_data
+
+    data = _calibration_data(tmp_path)
+    reloaded = load_calibration_data(tmp_path)
+
+    assert reloaded.meta == data.meta
+    assert reloaded.batch_shape == data.batch_shape
+    # Статистики выборки — страховка от калибровки с чужой нормировкой.
+    assert len(reloaded.meta["stats"]["channel_mean"]) == 3
+
+
+def test_calibration_reuse_notices_a_different_split(tmp_path):
+    """Выборка с другого сплита неотличима на вид, а масштабы даёт другие."""
+    from src.quantization.calibration import load_calibration_data, matches_request
+
+    _calibration_data(tmp_path, num_samples=8, batch_size=4, source={"split": "train"})
+    data = load_calibration_data(tmp_path)
+
+    assert matches_request(data, num_samples=8, batch_size=4, source={"split": "train"})
+    assert not matches_request(data, num_samples=8, batch_size=4, source={"split": "eval"})
+    assert not matches_request(data, num_samples=16, batch_size=4, source={"split": "train"})
+
+
+def test_calibrator_serves_every_batch_once_and_then_stops(tmp_path):
+    """None из get_batch — штатный конец выборки, по нему билдер строит гистограммы."""
+    from src.quantization.calibration import make_calibrator
+
+    data = _calibration_data(tmp_path, num_samples=8, batch_size=4)
+    handle = make_calibrator(_FakeCalibratorTRT(), data, cache_path=None, device="cpu")
+
+    assert handle.calibrator.get_batch_size() == 4
+    assert handle.shape == (4, 3, 8, 8)
+
+    served = [handle.calibrator.get_batch(["input"]) for _ in range(3)]
+    assert [isinstance(item, list) for item in served] == [True, True, False]
+    assert served[-1] is None
+
+
+def test_calibration_cache_is_not_reused_for_another_model(tmp_path):
+    """Кэш масштабов не помнит, из какой сети он получен, — помнит паспорт рядом."""
+    from src.quantization.calibration import make_calibrator
+
+    data = _calibration_data(tmp_path)
+    cache = tmp_path / "scales.cache"
+    common = {"cache_path": cache, "device": "cpu"}
+
+    first = make_calibrator(_FakeCalibratorTRT(), data, onnx_sha256="aaa", **common)
+    assert first.meta["cache_reused"] is False
+    first.calibrator.write_calibration_cache(b"scales")
+
+    same = make_calibrator(_FakeCalibratorTRT(), data, onnx_sha256="aaa", **common)
+    assert same.meta["cache_reused"] is True
+    assert same.calibrator.read_calibration_cache() == b"scales"
+
+    other = make_calibrator(_FakeCalibratorTRT(), data, onnx_sha256="bbb", **common)
+    assert other.meta["cache_reused"] is False
+    assert other.calibrator.read_calibration_cache() is None
+
+
+def test_calibration_cache_without_a_passport_is_ignored(tmp_path):
+    from src.quantization.calibration import make_calibrator
+
+    data = _calibration_data(tmp_path)
+    cache = tmp_path / "scales.cache"
+    cache.write_bytes(b"scales from nowhere")
+
+    handle = make_calibrator(
+        _FakeCalibratorTRT(), data, cache_path=cache, onnx_sha256="aaa", device="cpu"
+    )
+    assert handle.meta["cache_reused"] is False
+
+
+def test_int8_needs_a_calibration_set(tmp_path):
+    """Диапазоны активаций взять неоткуда, кроме как прогнав модель на данных."""
+    from src.quantization.build_engine import _attach_calibrator
+
+    with pytest.raises(ValueError, match="calibrate"):
+        _attach_calibrator(
+            _FakeCalibratorTRT(), None, None,
+            calibration=None, cache_path=None, algorithm="entropy2",
+            onnx_sha256="x", input_name="input", shape_min=(1, 3, 8, 8), shape_max=(8, 3, 8, 8),
+        )
+
+
+def test_calibration_batch_outside_the_profile_is_caught(tmp_path):
+    """Калибровка идёт через тот же вход, что и инференс: форма обязана быть допустимой."""
+    from types import SimpleNamespace
+
+    from src.quantization.build_engine import _attach_calibrator
+
+    data = _calibration_data(tmp_path, num_samples=8, batch_size=4)
+
+    with pytest.raises(ValueError, match="профиль движка"):
+        _attach_calibrator(
+            _FakeCalibratorTRT(), SimpleNamespace(), SimpleNamespace(),
+            calibration=data, cache_path=None, algorithm="entropy2",
+            onnx_sha256="x", input_name="input",
+            shape_min=(1, 3, 8, 8), shape_max=(2, 3, 8, 8),
+            device="cpu",
+        )
+
+
+def test_int8_route_lets_the_builder_fall_back_to_fp16():
+    """Фолбэк — правильный деплойный режим и плохой инструмент измерения."""
+    from src.quantization.build_engine import _apply_int8
+
+    trt = _FakeTensorRT(has_fp16_flag=True)
+    trt.BuilderFlag = type("BuilderFlag", (), {"FP16": 4, "INT8": 3})
+    builder = type("Builder", (), {"platform_has_fast_int8": True})()
+
+    flags: list[int] = []
+    config = type("Config", (), {"set_flag": lambda self, flag: flags.append(flag)})()
+
+    assert _apply_int8(trt, builder, config, fp16_fallback=True) == "BuilderFlag.INT8 + FP16"
+    assert flags == [3, 4]
+
+    flags.clear()
+    assert _apply_int8(trt, builder, config, fp16_fallback=False) == "BuilderFlag.INT8"
+    assert flags == [3]
+
+
+def test_int8_on_tensorrt_without_calibrator_api_says_what_to_do():
+    """В ветке без неявной квантизации int8 задаётся узлами QDQ, а не флагом."""
+    from src.quantization.build_engine import _apply_int8
+
+    trt = _FakeTensorRT(has_fp16_flag=False)
+    with pytest.raises(RuntimeError, match="QuantizeLinear"):
+        _apply_int8(trt, object(), object())
+
+
+def test_unknown_calibration_algorithm_lists_the_available_ones(tmp_path):
+    from src.quantization.calibration import make_calibrator
+
+    data = _calibration_data(tmp_path)
+    with pytest.raises(ValueError, match="entropy2"):
+        make_calibrator(_FakeCalibratorTRT(), data, algorithm="percentile", device="cpu")
+
+
+def test_build_options_separate_engines_that_look_identical():
+    """Движок с fp32_layers и без — один путь, один размер, разное поведение."""
+    from src.quantization.build_engine import build_options
+
+    plain = build_options(precision="fp16")
+    guarded = build_options(precision="fp16", fp32_layers=["bmm"])
+    assert plain != guarded
+
+    # Порядок шаблонов сборку не меняет — пересобирать из-за него незачем.
+    assert build_options(precision="fp16", fp32_layers=["bmm", "clamp"]) == build_options(
+        precision="fp16", fp32_layers=["clamp", "bmm"]
+    )
+
+    # int8-ключи есть только у int8: иначе fp16-движки пересобирались бы от
+    # смены настройки, которая к ним не относится.
+    assert "int8_fp16_fallback" not in plain
+    assert build_options(precision="int8", int8_fp16_fallback=False)["int8_fp16_fallback"] is False
