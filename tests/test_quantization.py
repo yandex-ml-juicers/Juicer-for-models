@@ -990,3 +990,73 @@ def test_calibration_source_survives_hydra_lists():
     assert calibration_source(cfg)["image_size"] == 224
     cfg.data.dataset.image_size = None
     assert calibration_source(cfg)["image_size"] is None
+
+
+def test_known_build_failure_is_named_instead_of_guessed():
+    """Общий совет «крути workspace» посылает не туда, когда причина известна."""
+    from src.quantization.build_engine import diagnose_build_failure
+
+    assert_msg = [
+        "[randomFill.cpp::replaceFillNodesForMyelin::100] Error Code 2: Internal Error "
+        "(Assertion node->backend == Backend::kMYELIN failed. )"
+    ]
+
+    diagnosis = diagnose_build_failure(assert_msg, "int8")
+    assert "RandomUniformLike" in diagnosis
+    assert "workspace" not in diagnosis
+
+    # Тот же ассерт вне int8 нашей расшифровкой не покрыт — не выдумываем.
+    assert "workspace" in diagnose_build_failure(assert_msg, "fp16")
+    # Незнакомый отказ по-прежнему получает общий совет.
+    assert "workspace" in diagnose_build_failure(["Some other internal error"], "int8")
+    assert "workspace" in diagnose_build_failure([], "int8")
+
+
+def test_stages_as_a_string_names_the_quoting_mistake():
+    """Апострофы внутри переменной оболочки давали посимвольный список стадий."""
+    from omegaconf import OmegaConf
+
+    from scripts.quantize import main
+
+    cfg = OmegaConf.create({"quantize": {"stages": "[build,benchmark]"}})
+    with pytest.raises(ValueError, match="кавычки"):
+        main.__wrapped__(cfg)
+
+
+def test_validation_does_not_need_the_train_split(tmp_path, monkeypatch):
+    """Стадия validate обучающую выборку не трогает — и требовать её не должна.
+
+    Поймано на A100: туда перенесли только валидацию Cityscapes, а прогон падал
+    с «No images were found in .../leftImg8bit/train», потому что base_loader
+    строит оба датасета сразу.
+    """
+    from omegaconf import OmegaConf
+
+    from scripts import quantize
+
+    built: list[bool] = []
+
+    def fake_instantiate(node, **kwargs):
+        if "train" in kwargs:
+            built.append(kwargs["train"])
+            if kwargs["train"]:
+                raise FileNotFoundError("train-сплита здесь нет и быть не должно")
+            return TensorDataset(torch.randn(4, 3, 8, 8), torch.zeros(4, dtype=torch.long))
+        return None
+
+    monkeypatch.setattr(quantize, "instantiate", fake_instantiate)
+
+    cfg = OmegaConf.create({
+        "task_type": "segmentation",
+        "data": {
+            "dataset": {"build": {"_target_": "src.data.datasets.cityscapes_segmentation"}},
+            "transform": {"eval": {"_target_": "src.data.transforms.eval"}},
+            "loader": {"batch_size": 12, "eval_batch_size": 1, "num_workers": 0,
+                       "pin_memory": False, "persistent_workers": False},
+        },
+    })
+
+    loader = quantize.eval_loader(cfg)
+
+    assert built == [False], "датасет должен строиться только со split=eval"
+    assert loader.batch_size == 1

@@ -13,7 +13,6 @@ from hydra.utils import instantiate, to_absolute_path
 from omegaconf import DictConfig, OmegaConf
 from torch.utils.data import DataLoader
 
-from src.data import base_loader
 from src.quantization.backends.base import make_runner
 from src.quantization.benchmark import (
     benchmark_runner,
@@ -277,6 +276,43 @@ def stage_export(cfg, student, get_loader, device, onnx_path, manifest, report) 
     student.to(device)
     report.stage("export", result.meta)
     return result.meta
+
+
+def eval_loader(cfg: DictConfig) -> DataLoader:
+    """Лоадер валидации, собранный БЕЗ train-сплита.
+
+    `base_loader` строит оба датасета сразу — для обучения это правильно, но
+    здесь означало бы, что стадия `validate` требует обучающую выборку, к
+    которой она не притрагивается. Разница не теоретическая: на машину под
+    замеры переносят валидацию, а train там весит десятки гигабайт. Проверено
+    на A100 — прогон падал с «No images were found in .../leftImg8bit/train»,
+    имея на руках всё, что ему на самом деле нужно.
+
+    Калибровка train-сплитом пользуется, но собирает его сама
+    (см. `calibration_loader`) — и падает внятно, если его нет.
+    """
+    if cfg.get("task_type") == "detection":
+        raise NotImplementedError(
+            "Квантизация детекции не поддержана: там свой collate_fn, и батч не "
+            "сводится к одному тензору изображений (см. evaluate_runner)."
+        )
+
+    transform = instantiate(cfg.data.transform.eval)
+    dataset = instantiate(cfg.data.dataset.build, train=False, transform=transform)
+
+    settings = cfg.data.loader
+    num_workers = int(settings.num_workers)
+    loader = DataLoader(
+        dataset,
+        batch_size=int(settings.get("eval_batch_size") or settings.batch_size),
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=bool(settings.pin_memory) and torch.cuda.is_available(),
+        persistent_workers=bool(settings.persistent_workers) and num_workers > 0,
+        worker_init_fn=seed_worker,
+    )
+    log.info("Валидационная выборка: %d объектов", len(dataset))
+    return loader
 
 
 def calibration_source(cfg: DictConfig) -> dict:
@@ -653,6 +689,20 @@ def main(cfg: DictConfig) -> float:
             "Не выбран тип квантизации в config. Например quantize=trt_fp16"
         )
 
+    # Строка вместо списка — это почти всегда лишние кавычки в переменной
+    # оболочки: R="... quantize.stages='[build,benchmark]'" кладёт апострофы
+    # ВНУТРЬ значения, и Hydra разбирает их как часть строки. Без этой проверки
+    # ошибка выглядит как посимвольный список неизвестных стадий.
+    if isinstance(cfg.quantize.stages, str):
+        raise ValueError(
+            f"quantize.stages пришёл строкой {cfg.quantize.stages!r}, а нужен список. "
+            f"Скорее всего кавычки попали внутрь значения — так бывает, когда "
+            f"аргументы собраны в переменную оболочки:\n"
+            f"  R=\"... quantize.stages='[build,benchmark]'\"   # апострофы уедут в значение\n"
+            f"Кавычки нужно ставить при вызове, а не внутри переменной:\n"
+            f"  python scripts/quantize.py $R 'quantize.stages=[build,benchmark]'"
+        )
+
     unknown = set(cfg.quantize.stages) - set(STAGES)
     if unknown:
         raise ValueError(f"Неизвестные стадии {sorted(unknown)}; доступны {STAGES}.")
@@ -682,9 +732,7 @@ def main(cfg: DictConfig) -> float:
 
     def get_loader() -> DataLoader:
         if "eval" not in loaders:
-            _, loaders["eval"] = base_loader(
-                cfg.data, cfg.get("task_type", "classification"), seed=cfg.seed
-            )
+            loaders["eval"] = eval_loader(cfg)
         return loaders["eval"]
 
     manifest = write_source_manifest(

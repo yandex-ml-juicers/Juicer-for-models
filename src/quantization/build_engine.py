@@ -240,6 +240,43 @@ def _apply_precision(
     return "типы графа (strongly typed)"
 
 
+DEFAULT_BUILD_FAILURE = (
+    "TensorRT вернул пустой движок — чаще всего не хватило workspace или ни одна "
+    "тактика не подошла под заданный профиль."
+)
+
+# Отказы билдера, у которых причина известна точно. Общая формулировка про
+# workspace и тактики в этих случаях вредна: она посылает крутить настройки
+# там, где настройки ни при чём. Проверено на SegNeXt — три прогона ушло на
+# перебор флагов, прежде чем стало ясно, что упирается в ограничение TensorRT.
+KNOWN_BUILD_FAILURES: tuple[tuple[str, str, str], ...] = (
+    (
+        "replaceFillNodesForMyelin",
+        "int8",
+        "Сборка int8 несовместима со случайной генерацией внутри графа.\n"
+        "В ONNX есть узел RandomUniformLike (в наших моделях это `torch.rand` в\n"
+        "NMF-разложении SegNeXt, вызываемый на каждом forward). Такие узлы\n"
+        "TensorRT исполняет только внутри Myelin и при сборке заменяет, ожидая\n"
+        "их там; с флагом INT8 граф режется иначе, узел уезжает из Myelin — и\n"
+        "билдер падает на внутреннем ассерте.\n"
+        "Настройками это не лечится: проверено, что не помогают ни\n"
+        "int8_fp16_fallback (оба значения), ни расширение fp32_layers.\n"
+        "Лечится в модели: детерминированные базисы в eval вместо torch.rand —\n"
+        "тогда RandomUniformLike уходит из графа. fp16 при этом собирается\n"
+        "(quantize=trt_fp16_seg 'quantize.build.fp32_layers=[bmm]').",
+    ),
+)
+
+
+def diagnose_build_failure(errors: Sequence[str], precision: str) -> str:
+    """Расшифровка отказа билдера, если причина среди известных."""
+    haystack = "\n".join(errors)
+    for marker, affected_precision, diagnosis in KNOWN_BUILD_FAILURES:
+        if marker in haystack and precision == affected_precision:
+            return diagnosis
+    return DEFAULT_BUILD_FAILURE
+
+
 def build_options(
     *,
     precision: str,
@@ -671,8 +708,8 @@ def build_engine(
 
     if serialized is None:
         raise RuntimeError(
-            "TensorRT вернул пустой движок — чаще всего не хватило workspace или ни одна "
-            "тактика не подошла под заданный профиль. Что сказал сам TensorRT:\n  "
+            diagnose_build_failure(logger.errors, precision)
+            + "\n\nЧто сказал сам TensorRT:\n  "
             + "\n  ".join(logger.errors or ["(сообщений не было)"])
         )
 
