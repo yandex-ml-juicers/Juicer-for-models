@@ -19,44 +19,42 @@ def yolo_sgd(
     Обе группы идут с одним lr: тренер логирует param_groups[0]["lr"], и это
     должно быть осмысленное значение, а не lr случайной группы.
 
-    params принимает и плоский список Parameter (обычный finetune), и список
-    уже готовых param-group словарей — например, {"params": adapter_params,
-    "weight_decay": 0.0} из scripts/train.py для feature_adapter в CLoCKDistill/
-    DCKD (там weight_decay намеренно обнулён отдельно, чтобы декей не убивал
-    веса адаптера). Группы с явным weight_decay сохраняются как есть, группы
-    без него (и голые Parameter) идут в обычный decay/no-decay сплит.
-
-    requires_grad НЕ фильтруется: trainer.py сверяет, что все параметры
-    criterion.parameters() попали в какую-то группу оптимизатора (например,
-    у CLoCKDistillLoss content_embed — намеренно замороженный, requires_grad=
-    False, но зарегистрированный Parameter). SGD.step() сам безопасно
-    пропускает параметры без градиента, так что включать их сюда не вредно.
+    На вход принимается либо плоский набор параметров, либо уже собранные
+    группы-словари: scripts/train.py передаёт именно группы, когда у лосса
+    есть feature_adapter — ему weight_decay отключают отдельно. Каждая
+    входная группа режется на многомерную и одномерную половины, и заданный
+    в группе weight_decay имеет приоритет над общим, иначе развязка адаптера
+    потерялась бы при переходе на этот оптимизатор.
     """
-    decay: list[nn.Parameter] = []
-    no_decay: list[nn.Parameter] = []
-    extra_groups: list[dict] = []
+    incoming = list(params)
+    if incoming and isinstance(incoming[0], dict):
+        groups = [dict(group) for group in incoming]
+    else:
+        groups = [{"params": incoming}]
 
-    for item in params:
-        if isinstance(item, dict):
-            if "weight_decay" in item:
-                if item["params"]:
-                    extra_groups.append(item)
+    param_groups: list[dict] = []
+    for group in groups:
+        group_weight_decay = group.get("weight_decay", weight_decay)
+        extra = {
+            key: value for key, value in group.items()
+            if key not in ("params", "weight_decay")
+        }
+
+        decay: list[nn.Parameter] = []
+        no_decay: list[nn.Parameter] = []
+
+        for param in group["params"]:
+            if not param.requires_grad:
                 continue
-            iterable = item["params"]
-        else:
-            iterable = [item]
 
-        for param in iterable:
             (no_decay if param.ndim <= 1 else decay).append(param)
 
-    param_groups = [
-        group
-        for group in (
-            {"params": decay, "weight_decay": weight_decay},
-            {"params": no_decay, "weight_decay": 0.0},
-        )
-        if group["params"]
-    ] + extra_groups
+        if decay:
+            param_groups.append(
+                {"params": decay, "weight_decay": group_weight_decay, **extra}
+            )
+        if no_decay:
+            param_groups.append({"params": no_decay, "weight_decay": 0.0, **extra})
 
     return torch.optim.SGD(
         param_groups,

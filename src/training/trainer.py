@@ -835,7 +835,13 @@ class DetectionTrainer:
         if self.metrics_callback_table is not None:
             self.metrics_callback_table(build_param_table(self.student, self.teacher, self.criterion))
 
-        criterion_params = list(self.criterion.parameters())
+        # Только обучаемые: у CLoCKDistill есть намеренно замороженный
+        # content_embed (в статье — "queries remain unlearnable throughout
+        # distillation"), а оптимизаторы вроде yolo_sgd параметры с
+        # requires_grad=False отбрасывают. Требовать их наличия в optimizer
+        # значит падать на корректной конфигурации; смысл проверки — поймать
+        # адаптеры, которые должны обучаться, но никуда не попали.
+        criterion_params = [p for p in self.criterion.parameters() if p.requires_grad]
         if criterion_params:
             optimizer_params = {id(p) for group in optimizer.param_groups for p in group["params"]}
             missing = [p for p in criterion_params if id(p) not in optimizer_params]

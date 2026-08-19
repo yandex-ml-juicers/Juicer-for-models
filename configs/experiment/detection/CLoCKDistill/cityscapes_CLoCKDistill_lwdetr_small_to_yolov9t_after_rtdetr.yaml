@@ -1,0 +1,114 @@
+# @package _global_
+# Второй этап дистилляции yolov9t: ученик стартует с весов, полученных
+# дистилляцией от RT-DETR-R50 (cityscapes_YOLOKD_rtdetr_to_yolov9t, прогон
+# yolokd_rtdetr_v9t_lf313, best mAP 0.3235 на эпохе 80). Учитель здесь
+# LW-DETR-small — CLoCKDistill-лосс завязан на его memory и decoder.
+#
+# От cityscapes_CLoCKDistill_lwdetr_small_to_yolov9t.yaml отличается только
+# именем, тегами и model.student.checkpoint_path.
+defaults:
+  - override /data/dataset: cityscapes
+  - override /data/transform/train: cityscapes_transform_for_yolo
+  - override /data/transform/eval: cityscapes_transform_for_yolo
+  - override /model/teacher: lwdetr_clockdistill
+  - override /model/student: yolo
+  - override /loss: clockdistill
+  - override /optimizer: yolo_sgd
+  - override /scheduler: warmup_cosine
+  - override /prediction_postprocessors: yolov8n
+
+name: cityscapes_CLoCKDistill_LWDETR_small_to_yolov9t_after_rtdetr
+device: cuda
+deterministic: false
+
+task_type: "detection"
+
+clearml:
+  enabled: True
+  tags: [cityscapes, CLoCKDistill, LW-DETR-small, yolov9t, stage2, from-rtdetr-kd]
+  output_uri: false
+  plots:
+    # 0 — Debug Samples не отправляются вовсе.
+    debug_samples: 0
+    # 0/не указано — зонд вклада компонентов лосса в градиент выключен;
+    # N>0 — считается раз в N шагов внутри эпохи (график grad_contribution
+    # в ClearML). См. GradientContributionTracker в src/utils/metrics.py.
+    grad_contrib_every_n_steps: 50
+
+trainer:
+  epochs: 100
+  amp: true
+  grad_clip_norm: 10.0
+
+optimizer:
+  lr: 0.01
+  momentum: 0.937
+  weight_decay: 0.005
+
+scheduler:
+  warmup_epochs: 5
+  start_factor: 0.01
+  end_factor: 1.0
+  eta_min: 1.0e-4
+
+data:
+  dataset:
+    image_size: [512, 1024]
+    targets_format_mode: "yolov8n"
+    build:
+      label_offset: 0
+  loader:
+    batch_size: 32
+    num_workers: 16
+    persistent_workers: true
+    pin_memory: true
+
+model:
+  student:
+    model_name: yolov9t
+    # checkpoint_path полностью заменяет загрузку через weights (см. докстринг
+    # src.models.factory.yolo): COCO-претрейн не тянется вовсе.
+    weights: null
+    checkpoint_path: "data/weights/yolov9t-rtdetr-kd/best.pt"
+    # Backbone-дропаут из yolo() у yolov9t не применяется (нет C2f/SPPF -
+    # у него RepNCSPELAN4/ELAN1/SPPELAN); 0.0 явно фиксирует это, а не
+    # оставляет висеть значение из yolov8n-рецепта. cls_dropout встаёт
+    # нормально: Detect-голова у yolov9t та же, что у yolov8n.
+    backbone_dropout: 0.0
+    neck_dropout: 0.0
+    bbox_dropout: 0.0
+    cls_dropout: 0.08
+  teacher:
+    checkpoint_path: "data/weights/lw-detr-small/best.pt"
+
+loss:
+  num_classes: 8
+
+  # model.21 - последний neck-блок перед Detect (P5/stride 32); позиция в
+  # module list у yolov9t такая же, как у yolov8n, но каналов меньше:
+  # RepNCSPELAN4 отдаёт 128, а не 256 у C2f (см. DCKD-конфиг для yolov9t).
+  student_feature_key: model.21
+  teacher_feature_key: model.model.backbone.projector
+
+  student_channels: 128
+  teacher_channels: 256
+  d_model: 256
+
+  lambda_det: 0.53
+  lambda_lcmd: 0.51
+  lambda_tcld: 5.9
+
+  alpha: 1686.5
+  beta: 3.373
+
+  lambda_cls: 1.0
+  lambda_l1: 5.0
+  lambda_giou: 2.0
+
+  temperature: 2.0
+
+  teacher_has_no_object: false
+
+  max_target_queries: 300
+
+  eps: 1.0e-6
