@@ -21,7 +21,7 @@ from src.quantization.benchmark import (
     speedup_table,
 )
 from src.quantization.export import export_onnx, sha256_file
-from src.quantization.numerics import compare_runners, evaluate_runner
+from src.quantization.numerics import compare_runners, evaluate_runner, noise_separates
 from src.quantization.report import QuantizationReport, check_acceptance
 from src.utils import resolve_device, seed_everything
 from src.utils.checkpoints import load_checkpoint_into
@@ -583,13 +583,17 @@ def stage_validate(cfg, reference, candidate, loader, device, report) -> dict:
         reference, candidate, loader, device=device, limit_batches=batches,
     )
 
-    if noise_floor is not None and comparison["max_abs"] <= noise_floor["max_abs"]:
+    if noise_floor is not None and not noise_separates(comparison, noise_floor):
         log.warning(
-            "Расхождение %s (%.3g) не превышает собственный шум модели (%.3g). "
-            "Вердикт приёмки ниже относится к сумме двух эффектов и об эффекте "
+            "Расхождение %s тонет в собственном шуме модели ни по одному сигналу "
+            "(max_abs %.3g против %.3g, совпадение %.4f против %.4f, KL %.3g против "
+            "%.3g). Вердикт приёмки ниже относится к сумме двух эффектов и об эффекте "
             "точности сам по себе не говорит ничего — сначала убирайте случайность "
             "из модели.",
-            candidate.name, comparison["max_abs"], noise_floor["max_abs"],
+            candidate.name,
+            comparison["max_abs"], noise_floor["max_abs"],
+            comparison["argmax_agreement"], noise_floor["argmax_agreement"],
+            comparison["kl"], noise_floor["kl"],
         )
 
     limit = settings.limit_eval_batches

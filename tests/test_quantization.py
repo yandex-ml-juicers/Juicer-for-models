@@ -1060,3 +1060,57 @@ def test_validation_does_not_need_the_train_split(tmp_path, monkeypatch):
 
     assert built == [False], "датасет должен строиться только со split=eval"
     assert loader.batch_size == 1
+
+
+def test_noise_floor_needs_more_than_the_worst_case():
+    """max_abs берётся по миллиарду чисел и тонет в случайности модели.
+
+    Числа из int8-прогона SegNeXt на A100: по максимуму кандидат «внутри
+    шума», а по совпадению предсказаний и KL — заметно хуже. Решать по одному
+    максимуму значило бы объявить разницу неизмеримой.
+    """
+    from src.quantization.numerics import noise_separates
+
+    noise = {"max_abs": 5.91, "argmax_agreement": 0.9978, "kl": 0.000621}
+    int8 = {"max_abs": 5.80, "argmax_agreement": 0.9960, "kl": 0.00149}
+
+    separating = noise_separates(int8, noise)
+    assert "max_abs" not in separating
+    assert "совпадение предсказаний" in separating and "KL" in separating
+
+    # Кандидат, неотличимый по всем трём сигналам, — вот тогда предупреждаем.
+    assert noise_separates({"max_abs": 5.5, "argmax_agreement": 0.9990, "kl": 0.0005}, noise) == []
+
+
+def test_parity_accepts_accumulated_error_when_predictions_match():
+    """Абсолютный допуск не масштабируется на выход из 40 миллионов чисел.
+
+    Числа прогона ESPNetv2 на A100: max_abs 3.8e-4 против atol 1e-4, при
+    относительной ошибке 2e-5 и совпадении ВСЕХ предсказаний. Экспорт исправен,
+    а пайплайн его браковал.
+    """
+    from src.quantization.export import parity_verdict
+
+    espnetv2 = {"max_abs": 3.81e-4, "rel_to_max": 2.08e-5, "argmax_agreement": 1.0}
+    assert parity_verdict(espnetv2, atol=1e-4, rtol=1e-3) == "rtol+argmax"
+
+    # Мелкий выход по-прежнему проходит абсолютным критерием.
+    assert parity_verdict({"max_abs": 1e-6, "rel_to_max": 1e-7,
+                           "argmax_agreement": 1.0}, atol=1e-4, rtol=1e-3) == "atol"
+
+    # Сломанный экспорт не спасает ни малая относительная ошибка...
+    assert parity_verdict({"max_abs": 3.81e-4, "rel_to_max": 2.08e-5,
+                           "argmax_agreement": 0.98}, atol=1e-4, rtol=1e-3) is None
+    # ...ни совпадение предсказаний при большом расхождении логитов.
+    assert parity_verdict({"max_abs": 5.0, "rel_to_max": 0.3,
+                           "argmax_agreement": 1.0}, atol=1e-4, rtol=1e-3) is None
+
+
+def test_cosine_never_exceeds_one_on_large_tensors():
+    """float32-накопление на 40M элементов давало косинус 1.0011."""
+    torch.manual_seed(0)
+    reference = torch.randn(1, 8_000_000)
+    candidate = reference + torch.randn_like(reference) * 1e-5
+
+    assert tensor_diff(reference, candidate)["cosine"] <= 1.0
+    assert tensor_diff(reference, reference)["cosine"] == pytest.approx(1.0, abs=1e-9)

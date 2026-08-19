@@ -103,6 +103,32 @@ def _verification_inputs(sample: Tensor, spec: DynamicAxisSpec) -> list[Tensor]:
     return inputs
 
 
+PARITY_RTOL = 1e-3
+
+
+def parity_verdict(check: dict, atol: float, rtol: float) -> str | None:
+    """Каким критерием прошла сверка, или None если не прошла ни одним.
+
+    Абсолютный допуск сам по себе не масштабируется. Он подбирался на
+    классификации, где выход — сотня логитов; у сегментации в полном
+    разрешении их 19x1024x2048 = 40 миллионов, и максимум по такому množeству
+    накопленных float32-сумм закономерно оказывается выше при той же
+    исправности экспорта. Проверено на ESPNetv2: max_abs 3.8e-4 против допуска
+    1e-4 — при том что относительная ошибка 2e-5 от размаха выхода, а
+    предсказания совпали ВСЕ до единого пикселя.
+
+    Поэтому второй критерий — относительный, и он строже там, где это важно:
+    он требует не только малой ошибки относительно размаха, но и полного
+    совпадения argmax. Сломанный экспорт совпадение предсказаний не удержит,
+    а накопленная арифметическая погрешность на него не влияет вовсе.
+    """
+    if check["max_abs"] <= atol:
+        return "atol"
+    if check.get("rel_to_max", float("inf")) <= rtol and check.get("argmax_agreement") == 1.0:
+        return "rtol+argmax"
+    return None
+
+
 def check_onnx_parity(
     onnx_path: str | Path,
     model: nn.Module,
@@ -110,6 +136,7 @@ def check_onnx_parity(
     *,
     input_name: str = "input",
     atol: float = 1e-4,
+    rtol: float = PARITY_RTOL,
 ) -> dict:
     """Уровень L0: сходятся ли выходы torch и ONNX на одном и том же входе"""
     import onnxruntime as ort
@@ -132,13 +159,22 @@ def check_onnx_parity(
             )
             metrics : dict[str, Any] = tensor_diff(reference, torch.from_numpy(candidate))
             metrics["shape"] = list(tensor.shape)
+            metrics["verdict"] = parity_verdict(metrics, atol, rtol)
             checks.append(metrics)
     finally:
         if was_training:
             model.train()
 
     worst = max(check["max_abs"] for check in checks)
-    return {"atol": atol, "passed": worst <= atol, "max_abs": worst, "checks": checks}
+    return {
+        "atol": atol,
+        "rtol": rtol,
+        "passed": all(check["verdict"] is not None for check in checks),
+        "criteria": sorted({check["verdict"] for check in checks if check["verdict"]}),
+        "max_abs": worst,
+        "rel_to_max": max(check.get("rel_to_max", 0.0) for check in checks),
+        "checks": checks,
+    }
 
 
 def export_onnx(
@@ -306,16 +342,21 @@ def export_onnx(
     parity = meta["parity"]
     if parity is not None:
         log.info(
-            "L0 (torch vs onnx): max_abs=%.3g при atol=%.3g -> %s",
+            "L0 (torch vs onnx): max_abs=%.3g (atol=%.3g) | отн. %.3g (rtol=%.3g) -> %s",
             parity["max_abs"],
             parity["atol"],
-            "OK" if parity["passed"] else "РАСХОЖДЕНИЕ",
+            parity["rel_to_max"],
+            parity["rtol"],
+            f"OK по {'/'.join(parity['criteria'])}" if parity["passed"] else "РАСХОЖДЕНИЕ",
         )
         if not parity["passed"]:
             raise RuntimeError(
-                f"Экспорт изменил численность модели: max_abs={parity['max_abs']:.3g} "
-                f"> atol={parity['atol']:.3g}. Дальше по пайплайну идти нельзя - расхождение "
-                f"fp16-движка будет списано на fp16, хотя сломан экспорт. "
+                f"Экспорт изменил численность модели. Не прошёл ни один критерий:\n"
+                f"  max_abs={parity['max_abs']:.3g} > atol={parity['atol']:.3g}\n"
+                f"  относительная ошибка {parity['rel_to_max']:.3g} > rtol={parity['rtol']:.3g} "
+                f"либо предсказания разошлись\n"
+                f"Дальше по пайплайну идти нельзя - расхождение fp16-движка будет списано на "
+                f"fp16, хотя сломан экспорт.\n"
                 f"Проверки: {parity['checks']}"
             )
 
