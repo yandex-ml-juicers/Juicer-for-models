@@ -10,7 +10,7 @@ defaults:
   - override /model/teacher: rtdetr
   - override /model/student: yolo
   - override /loss: yolo_kd
-  - override /optimizer: SGD
+  - override /optimizer: yolo_sgd
   - override /scheduler: warmup_cosine
   - override /prediction_postprocessors: yolov8n
 

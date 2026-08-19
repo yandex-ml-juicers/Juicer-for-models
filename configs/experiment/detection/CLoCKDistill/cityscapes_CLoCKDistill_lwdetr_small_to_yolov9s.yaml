@@ -6,7 +6,7 @@ defaults:
   - override /model/teacher: lwdetr_clockdistill
   - override /model/student: yolo
   - override /loss: clockdistill
-  - override /optimizer: SGD
+  - override /optimizer: yolo_sgd
   - override /scheduler: warmup_cosine
   - override /prediction_postprocessors: yolov8n
 
@@ -70,9 +70,9 @@ loss:
   # (проверено эмпирически) — student_feature_key/student_channels/
   # teacher_channels/d_model из clockdistill.yaml подходят без переопределения.
 
-  lambda_det: 0.31
-  lambda_lcmd: 1.0
-  lambda_tcld: 11.7
+  lambda_det: 0.72
+  lambda_lcmd: 0.31
+  lambda_tcld: 3.58
 
   alpha: 1686.5
   beta: 3.373

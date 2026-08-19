@@ -6,7 +6,7 @@ defaults:
   - override /model/teacher: lwdetr_kd_detr
   - override /model/student: yolo
   - override /loss: kd_detr
-  - override /optimizer: SGD
+  - override /optimizer: yolo_sgd
   - override /scheduler: warmup_cosine
   - override /prediction_postprocessors: yolov8n
 
@@ -34,7 +34,7 @@ trainer:
   grad_clip_norm: 10.0
 
 optimizer:
-  lr: 0.02
+  lr: 0.01
   momentum: 0.937
   weight_decay: 0.005
 

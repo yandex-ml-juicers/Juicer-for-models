@@ -76,9 +76,9 @@ loss:
   teacher_channels: 256
   d_model: 256
 
-  lambda_det: 0.31
-  lambda_lcmd: 1.0
-  lambda_tcld: 11.7
+  lambda_det: 0.72
+  lambda_lcmd: 0.31
+  lambda_tcld: 3.58
 
   alpha: 1686.5
   beta: 3.373
