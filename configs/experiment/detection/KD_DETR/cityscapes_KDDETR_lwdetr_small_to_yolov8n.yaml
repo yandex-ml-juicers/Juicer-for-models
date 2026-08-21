@@ -70,7 +70,7 @@ model:
 loss:
   num_classes: 8
 
-  lambda_distill: 38.0
+  lambda_distill: 5.56
 
   lambda_cls: 3.0
   lambda_l1: 40.0

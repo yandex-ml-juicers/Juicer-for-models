@@ -70,8 +70,8 @@ loss:
   # (проверено эмпирически) — базовые student_feature_key/student_channels
   # из dckd.yaml подходят без переопределения.
 
-  lambda_det: 0.044
-  lambda_hekld: 11.0
+  lambda_det: 0.066
+  lambda_hekld: 2.77
   lambda_hokfd: 11.0
 
   temperature: 2.0
